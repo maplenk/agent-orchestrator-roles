@@ -1,36 +1,42 @@
 # Phase 2A — worker switch (execution notes)
 
-**Status:** first slice landed (domain + compiler + migration 0044 ledger).  
-**Not done:** saga orchestration, API, promoting `switch_supported`.
+## Landed
 
-## Landed (2A.0)
+| Slice | Status | Detail |
+|-------|--------|--------|
+| **2A.0** | Done | SemanticHandoff / ObservedWorkspace / Compile / migration 0044 ledger |
+| **2A.1** | Done | Switch fence (`ErrSwitchInProgress`), durable phases → ledger |
+| **2A.2** | Done | `handoff.ObserveWorkspace` (git branch/HEAD/porcelain) |
+| **2A.3** | Done | `SwitchWorker` Claude↔Codex (destroy runtime, keep worktree, relaunch) |
+| **2A.4** | Done | `FreshConversation` same-harness via switch saga |
+| Caps | Done | Claude + Codex `switch_supported=true` (limit still false) |
 
-| Item | Path |
-|------|------|
-| SemanticHandoffV1 / ObservedWorkspaceV1 / CompiledHandoff | `domain/handoff.go` |
-| Lifecycle ledger kinds/phases | `domain/lifecycle_ledger.go` |
-| Compiler (observed overrides semantic) | `handoff/compile.go` |
-| Migration 0044 append-only table | `migrations/0044_lifecycle_ledger.sql` |
-| Store append + list | `store/lifecycle_ledger_store.go` |
+## API surface (session_manager)
 
-## Next slices
+```go
+SwitchWorker(ctx, SwitchRequest) (SwitchResult, error)
+FreshConversation(ctx, sessionID, SemanticHandoffV1) (SwitchResult, error)
+```
 
-1. **2A.1** — `session_manager` switch fence (`ErrSwitchInProgress`) + durable saga phases writing ledger  
-2. **2A.2** — Observe workspace (git) into `ObservedWorkspaceV1`  
-3. **2A.3** — Worker switch Claude↔Codex path using `relaunchSession` (not orch RetireForReplacement)  
-4. **2A.4** — Same-harness fresh conversation (`kind=fresh_conversation`)  
-5. **2A.5** — Promote `switch_supported` for Claude/Codex after dogfood  
-6. **2A.6** — API/CLI + review pack
+Saga phases written to `lifecycle_ledger`:
+`requested` → `pre_stop` → `post_stop` → `target_ack` (or `failed`)
 
-## DoD (MASTER_PLAN)
+| Failure mode | Behavior |
+|--------------|----------|
+| Pre-stop (destroy fails) | Source usable; phase `failed` |
+| Post-stop (relaunch fails) | Handoff in ledger; `ErrSwitchPostStop` |
 
-- Pre-stop failure → source usable  
-- Post-stop failure → handoff retained, target retry  
-- One generation owns input at boundary  
-- Ledger records every switch/fresh  
+## Still open
+
+1. HTTP/CLI surface for switch + fresh  
+2. Input ownership fence in sessionguard/lifecycle during switch  
+3. Service-layer wiring + API errors (409/400)  
+4. Crash recovery re-drive from post_stop ledger  
+5. Real dogfood + review pack  
+6. Phase 2B orchestrator ownership transfer  
 
 ## Non-goals
 
-- Orchestrator ownership transfer (2B)  
+- Orchestrator switch (2B)  
 - Synara ports  
 - Full chat ledger  

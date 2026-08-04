@@ -204,13 +204,16 @@ See also `PHASE2A_PLAN.md`.
 
 | Task | Status | Detail |
 |------|--------|--------|
-| SemanticHandoffV1 + ObservedWorkspaceV1 | **Done (2A.0)** | `domain/handoff.go` |
-| Compiler | **Done (2A.0)** | `handoff/compile.go` — observed overrides semantic |
-| Lifecycle ledger migration + store | **Done (2A.0)** | 0044 + `AppendLifecycleLedger` / list |
-| Switch saga | Open | #3548-class: durable states, generation fencing, pre/post-stop, target ack |
-| Initial matrix | Open | Claude ↔ Codex; promote `switch_supported` only after tests |
-| Same-harness fresh conversation | Open | New native session + compiled handoff; same role_id / worktree |
-| Registry | Open | Promote `switch_supported` for pairs that pass dogfood |
+| SemanticHandoffV1 + ObservedWorkspaceV1 | **Done** | `domain/handoff.go` |
+| Compiler | **Done** | `handoff/compile.go` — observed overrides semantic |
+| Lifecycle ledger migration + store | **Done** | 0044 + `AppendLifecycleLedger` / list |
+| Switch saga | **Done (manager)** | `SwitchWorker`: fence + phases + pre/post-stop; API still open |
+| Observe workspace | **Done** | `handoff.ObserveWorkspace` |
+| Initial matrix | **Done (unit)** | Claude↔Codex `switch_supported=true`; dogfood still open |
+| Same-harness fresh conversation | **Done (manager)** | `FreshConversation` |
+| HTTP/CLI + service wiring | Open | |
+| Crash re-drive from post_stop | Open | |
+| Dogfood + review pack | Open | |
 
 **DoD (from MASTER_PLAN):** pre-stop leaves source usable; post-stop retains handoff; one generation owns input.
 

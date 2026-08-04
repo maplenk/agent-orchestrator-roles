@@ -35,6 +35,7 @@ type fakeStore struct {
 	projects       map[string]domain.ProjectRecord
 	workspaceRepo  map[string][]domain.WorkspaceRepoRecord
 	artifacts      map[string]fakeTemplateArtifact
+	ledger         []domain.LifecycleLedgerRecord
 	num            int
 	deleteErr      error
 	upsertWTErr    error
@@ -55,6 +56,19 @@ func newFakeStore() *fakeStore {
 		artifacts:     map[string]fakeTemplateArtifact{},
 		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
 	}
+}
+func (f *fakeStore) AppendLifecycleLedger(_ context.Context, rec domain.LifecycleLedgerRecord) error {
+	f.ledger = append(f.ledger, rec)
+	return nil
+}
+func (f *fakeStore) ListLifecycleLedger(_ context.Context, sessionID domain.SessionID) ([]domain.LifecycleLedgerRecord, error) {
+	var out []domain.LifecycleLedgerRecord
+	for _, e := range f.ledger {
+		if e.SessionID == sessionID {
+			out = append(out, e)
+		}
+	}
+	return out, nil
 }
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
 	r, ok := f.projects[id]

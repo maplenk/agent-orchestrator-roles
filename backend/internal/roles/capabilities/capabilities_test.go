@@ -15,12 +15,15 @@ func TestFor_Phase1Cells(t *testing.T) {
 	if claude.ReadOnlyEnforced {
 		t.Fatalf("claude-code must not claim read_only_enforced until dontAsk/OS sandbox: %+v", claude)
 	}
-	if claude.SwitchSupported || claude.LimitDetectionSupported {
-		t.Fatalf("claude-code must default switch/limit false: %+v", claude)
+	if !claude.SwitchSupported {
+		t.Fatalf("claude-code must support switch (Phase 2A matrix): %+v", claude)
+	}
+	if claude.LimitDetectionSupported {
+		t.Fatalf("claude-code must default limit false: %+v", claude)
 	}
 
 	codex := For(domain.HarnessCodex)
-	if !codex.SpawnSupported || !codex.ReadOnlyEnforced {
+	if !codex.SpawnSupported || !codex.ReadOnlyEnforced || !codex.SwitchSupported {
 		t.Fatalf("codex: %+v", codex)
 	}
 

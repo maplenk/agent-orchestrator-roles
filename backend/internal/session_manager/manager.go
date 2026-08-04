@@ -60,6 +60,13 @@ var (
 	// session. The API maps it to a 409 so a double-submit does not race two
 	// teardown/relaunch cycles over one worktree.
 	ErrSwitchInProgress = errors.New("session: switch already in progress")
+	// ErrSwitchNotSupported means source/target harness lacks switch_supported.
+	ErrSwitchNotSupported = errors.New("session: harness does not support switch")
+	// ErrSwitchPostStop means the source runtime was already stopped; the
+	// compiled handoff is retained on the lifecycle ledger for target retry.
+	ErrSwitchPostStop = errors.New("session: switch failed after source stop; handoff retained")
+	// ErrNotWorker means switch/fresh is only defined for worker sessions.
+	ErrNotWorker = errors.New("session: worker kind required")
 	// ErrResumeInProgress prevents concurrent resume requests from replacing the
 	// same runtime twice.
 	ErrResumeInProgress = errors.New("session: agent resume already in progress")
@@ -204,6 +211,10 @@ type Store interface {
 	// GetTemplateArtifact loads the immutable role template bytes pinned on a
 	// session. ok=false means the artifact is not present and restore must fail.
 	GetTemplateArtifact(ctx context.Context, id string) (content []byte, sha string, ok bool, err error)
+	// AppendLifecycleLedger records an append-only switch/pause/fresh event.
+	AppendLifecycleLedger(ctx context.Context, rec domain.LifecycleLedgerRecord) error
+	// ListLifecycleLedger returns events for a session oldest-first.
+	ListLifecycleLedger(ctx context.Context, sessionID domain.SessionID) ([]domain.LifecycleLedgerRecord, error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -236,6 +247,8 @@ type Manager struct {
 	newLaunchID func() string
 	resumeMu    sync.Mutex
 	resuming    map[domain.SessionID]struct{}
+	switchMu    sync.Mutex
+	switching   map[domain.SessionID]struct{}
 	// sendConfirm bounds the best-effort post-send confirmation that the session
 	// actually became active (the agent accepted the prompt). New fills in the
 	// sendConfirm* defaults; tests in this package shrink the timings directly.
@@ -368,6 +381,7 @@ func New(d Deps) *Manager {
 		executable:          d.Executable,
 		newLaunchID:         d.NewLaunchID,
 		resuming:            make(map[domain.SessionID]struct{}),
+		switching:           make(map[domain.SessionID]struct{}),
 		sendConfirm: sendConfirmConfig{
 			pollInterval:    sendConfirmPollInterval,
 			attemptDeadline: sendConfirmAttemptDeadline,
@@ -1262,6 +1276,13 @@ func (m *Manager) beginAgentResume(id domain.SessionID) bool {
 	m.resumeMu.Lock()
 	defer m.resumeMu.Unlock()
 	if _, exists := m.resuming[id]; exists {
+		return false
+	}
+	// Refuse resume while switch holds the worktree/runtime.
+	m.switchMu.Lock()
+	_, switching := m.switching[id]
+	m.switchMu.Unlock()
+	if switching {
 		return false
 	}
 	m.resuming[id] = struct{}{}

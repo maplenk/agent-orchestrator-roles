@@ -32,14 +32,16 @@ func For(h domain.AgentHarness) Caps {
 		// See docs/roles/READ_ONLY_CONTRACT.md and Claude permissions docs.
 		return Caps{
 			SpawnSupported:   true,
+			SwitchSupported:  true,
 			ReadOnlyEnforced: false,
-			Notes:            "spawn supported; read_only_enforced=false until dontAsk/OS-sandbox RO path lands",
+			Notes:            "spawn+switch; read_only_enforced=false until dontAsk/OS-sandbox RO path lands",
 		}
 	case domain.HarnessCodex:
 		return Caps{
 			SpawnSupported:   true,
+			SwitchSupported:  true,
 			ReadOnlyEnforced: true,
-			Notes:            "RO via --sandbox read-only; never --dangerously-bypass-approvals-and-sandbox",
+			Notes:            "RO via --sandbox read-only; switch pair with claude-code",
 		}
 	case domain.HarnessPi:
 		return Caps{
@@ -59,9 +61,10 @@ func For(h domain.AgentHarness) Caps {
 			Notes:            "spawn supported; read_only_enforced not implemented",
 		}
 	case domain.HarnessFake:
-		// Test harness: treat as spawnable with RO for unit tests that need it.
+		// Test harness: spawnable, RO, switchable for unit tests.
 		return Caps{
 			SpawnSupported:   true,
+			SwitchSupported:  true,
 			ReadOnlyEnforced: true,
 			Notes:            "test harness only",
 		}
