@@ -56,23 +56,23 @@ Designed to remove the prior “live handle at inject” ambiguity:
 | Authoritative footer | **`Active role: implementor. Harness: codex.`** |
 | Daemon log `recovery failed` | **None** |
 
-### Residual open: ledger still shows `failed` before `target_ack`
+### Residual `failed`→`target_ack` — root cause and fix
 
-Even with offline inject + single restart, SQLite still records:
+**Root cause (review):** concurrent daemons could both pass the runfile check; one bound the configured port, the other bound an **ephemeral** port (`server.go` fallback), and **both reconciled the same SQLite store**. One launch collides (`failed`); the other succeeds (`target_ack`). Reproduced with two processes both reaching `daemon listening` on different ports against one data dir.
+
+**Fix:** `datadirlock` exclusive lease on `AO_DATA_DIR/daemon.lock`, acquired in `daemon.Run` **before** store open / reconcile. Second start exits with `ErrLocked`. Ephemeral port fallback remains only for the lease holder when a non-AO process owns the configured port.
+
+**Re-dogfood after lease (gen `lease-crash-gen-1`):**
 
 ```text
-requested → pre_stop → post_stop → failed → target_ack
+requested → pre_stop → post_stop → target_ack
 ```
 
-for `offline-crash-gen-1`, with **~5 ms** between Go-written `failed` and `target_ack`, and **no** `reconcile: post_stop recovery failed` log line.
+- **No `failed` row**
+- Session: `harness=codex`, `runtime_launch_id=lease-crash-gen-1`, pending cleared
+- Dual-start smoke: one process acquires lease; peer exits `data directory already owned`
 
-Honest status:
-
-- Final runtime state is **correct** (one codex process, matching gen, target footer, pending clear).
-- The intermediate **`failed` row provenance is not fully explained** by this run: it is **not** claimed as intentional “fail then retry”, and it is **not** dismissed as “launch noise”.
-- Likely needs a code-path audit of who appends `LifecyclePhaseFailed` during a Recover that ultimately returns success (or a silent double-entry race), **before** treating crash-ledger provenance as closed for promotion.
-
-Artifacts: `/tmp/ao-dogfood-2a-a3bc32be/evidence/` (`v2_offline_ledger.txt`, `crash_E_footer_exact.txt`, `SUMMARY.txt`, `daemon_offline_recover.log`).
+Promotion still requires explicit accept of this close-out; production `SwitchSupported` remains false until a separate promote CL.
 
 ---
 

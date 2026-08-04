@@ -2,7 +2,7 @@
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
 **Branch:** `roles/multi-sub-v1`  
-**HEAD:** `9d30c627` (live dogfood docs after target-prompt fix)  
+**HEAD:** (see latest commit; update on each land)  
 **Baseline:** Untrivial-ai/agent-orchestrator @ `742c77bc` (see `AO_BASELINE_SHA.txt`)  
 **Target:** B (~full wishlist)  
 **Estimate:** ~4–6 **working** weeks for Target B from here (Phase 2A nearly closed; 2B/3A/3B + integration remain)
@@ -23,12 +23,13 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 2A manager saga | **Done** (switch / fresh / recover / ledger / fences) |
 | Phase 2A Service/API/CLI + auth | **Accepted** @ `83f7abfb` |
 | Phase 2A manager dogfood | **Done** — `PHASE2A_DOGFOOD.md` @ `2d19ad59` |
-| Phase 2A live dogfood | **Evidence recorded** — `PHASE2A_LIVE_DOGFOOD.md`; **not fully accepted for promotion** |
+| Phase 2A live dogfood | **Evidence** — footer + clean crash ledger after data-dir lease |
 | Target-authoritative switch prompt | **Done** @ `a3bc32be` (live footer `Harness: codex`) |
-| `switch_supported` production | **false** — do not promote until residual crash-ledger provenance accepted |
+| Concurrent daemon ownership lease | **Done** — `datadirlock` on `AO_DATA_DIR` before store/reconcile |
+| `switch_supported` production | **false** — promote only after this close-out is accepted |
 | Phase 2B / 3A / 3B | **Not started** |
 
-**Next eng (critical path):** close Phase 2A promotion gate (unexplained `failed`→`target_ack` on clean crash recover), **or** Phase 1 remainder / 2B design in parallel. **Do not flip `SwitchSupported` yet.**
+**Next eng (critical path):** accept 2A close-out (lease + clean crash ledger) → **promote `SwitchSupported`** in a separate CL, then Phase 2B.
 
 ---
 
@@ -109,9 +110,11 @@ Detail trackers: `PHASE2A_PLAN.md`, `PHASE2A_DOGFOOD.md`, `PHASE2A_LIVE_DOGFOOD.
 
 | Task | Status | Detail |
 |------|--------|--------|
-| Accept target-authoritative prompt fix | **Evidence in** | Live footer + unit tests @ `a3bc32be` |
-| Resolve / accept crash-ledger `failed`→`target_ack` provenance | **Open** | Offline-inject + single restart still shows unexplained `failed` row; final runtime correct |
-| Promote `switch_supported` (Claude/Codex) | **Open** | **Separate final CL only** after live gate accept; flips `capabilities.For` + activates failover switch_supported validation |
+| Accept target-authoritative prompt fix | **Done** | Live footer + unit tests @ `a3bc32be` |
+| Concurrent data-dir ownership lease | **Done** | `datadirlock.Acquire` before store open/reconcile; ephemeral port no longer confers second-owner mutation |
+| Concurrent-start regression | **Done** | `datadirlock` exclusive + subprocess one-reconcile-marker tests; dual-daemon smoke: one exits `ErrLocked` |
+| Clean crash ledger (no incidental `failed`) | **Done (re-dogfood)** | Offline inject after lease fix: `requested>pre_stop>post_stop>target_ack` only (`lease-crash-gen-1`) |
+| Promote `switch_supported` (Claude/Codex) | **Open** | **Separate final CL only** after accept; flips `capabilities.For` + activates failover switch_supported validation |
 
 **DoD (MASTER_PLAN):** pre-stop source usable; post-stop handoff retained; one generation owns input — **implemented**; re-verify after promotion.
 
@@ -230,8 +233,8 @@ Still open:
 7. Limit → durable pause, zero auto send/restart
 8. Failover preserves `role_id`, respects incident bound (runtime path)
 13. Read-only roles only on `read_only_enforced` harnesses with **Claude** negative proof
-16. Crash-recover ledger free of unexplained `failed` before ack (or explicit dual-attempt design)
-17. Production `switch_supported` true only after accepted live dogfood
+16. ~~Crash-recover ledger free of unexplained `failed`~~ — root cause was dual daemon ownership; fixed with datadirlock
+17. Production `switch_supported` true only after accepted 2A close-out
 
 ---
 
@@ -272,6 +275,6 @@ Still open:
 
 ## 7. Immediate next action
 
-1. **Phase 2A gate:** explain or eliminate residual `failed`→`target_ack` on clean crash recover (`PHASE2A_LIVE_DOGFOOD.md`).
+1. **Accept** data-dir ownership lease + clean crash ledger re-dogfood (this land).
 2. On accept → **promote `SwitchSupported`** for Claude/Codex in a dedicated commit.
 3. Then **Phase 2B** (orch ownership) or **Phase 1-F / Claude RO** per product priority.

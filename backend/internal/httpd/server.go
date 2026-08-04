@@ -40,12 +40,13 @@ type Server struct {
 // which case the /mux terminal surface is not mounted.
 //
 // If the configured port is already held, it falls back to an OS-assigned
-// ephemeral port rather than failing. A genuine peer AO daemon is ruled out
-// upstream (the running.json + /healthz check in daemon.Run), so a conflict here
-// means a non-AO process owns the port; exiting would only leave the desktop
-// supervisor stuck on "daemon not ready". The actual bound port is logged
-// ("daemon listening") and written to running.json, both of which the supervisor
-// reads, so the fallback propagates to the renderer with no UI changes.
+// ephemeral port rather than failing. Mutation authority over AO_DATA_DIR is
+// **not** conferred by port binding: daemon.Run acquires an exclusive data-dir
+// lease before opening the store or reconciling, so a second AO process exits
+// before it reaches this bind. A port conflict here therefore means a non-AO
+// process owns the configured port (or a race that already lost the lease).
+// The actual bound port is logged ("daemon listening") and written to
+// running.json for the supervisor/renderer.
 func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, operatorSpawnToken string, deps APIDeps) (*Server, error) {
 	log = loggerOrDefault(log)
 	ln, err := net.Listen("tcp", cfg.Addr())
@@ -53,12 +54,13 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 		if !isAddrInUse(err) {
 			return nil, fmt.Errorf("bind %s: %w", cfg.Addr(), err)
 		}
-		// Configured port is taken by a non-AO process: retry on an ephemeral port.
+		// Configured port is taken (typically non-AO): lease holder may use ephemeral.
+		// A second AO daemon never reaches here while holding mutation rights.
 		fallback, ferr := net.Listen("tcp", net.JoinHostPort(cfg.Host, "0"))
 		if ferr != nil {
 			return nil, fmt.Errorf("bind %s (in use) and ephemeral fallback: %w", cfg.Addr(), ferr)
 		}
-		log.Warn("configured port in use; bound an ephemeral port instead",
+		log.Warn("configured port in use; bound an ephemeral port instead (data-dir lease already held)",
 			"configured", cfg.Addr(), "bound", fallback.Addr().String())
 		ln = fallback
 	}
