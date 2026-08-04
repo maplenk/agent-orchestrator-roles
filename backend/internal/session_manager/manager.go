@@ -1327,9 +1327,23 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, launchHarness)
 	}
+	// Ephemeral target identity for prompt/config generation on switch/fresh
+	// relaunches. Durable session Harness/Role pin stay on the source until
+	// target_ack; only this in-memory copy is retargeted so the launched process
+	// receives AUTHORITATIVE ROLE FOOTER "Harness: <target>" (and model).
+	promptRec := rec
+	if o.LaunchHarness != "" {
+		promptRec.Metadata.Role.ResolvedHarness = o.LaunchHarness
+		if o.LaunchHarness != rec.Harness {
+			// Cross-harness: explicit target model (empty = provider default).
+			promptRec.Metadata.Role.ResolvedModel = o.RoleModel
+		} else if o.RoleModel != "" {
+			promptRec.Metadata.Role.ResolvedModel = o.RoleModel
+		}
+	}
 	// Refresh live standing instructions, but restore the role body exclusively
 	// from the immutable template artifact pinned on the session.
-	systemPrompt, _, err := m.buildRestoreSystemPrompt(ctx, rec, project)
+	systemPrompt, _, err := m.buildRestoreSystemPrompt(ctx, promptRec, project)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt: %w", operation, rec.ID, err)
 	}
@@ -1340,12 +1354,8 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	}
 
 	// Restore re-applies the host-resolved role model over the current project
-	// config, matching fresh spawn while preserving the pinned role target.
-	agentConfig := restoreAgentConfig(rec, project)
-	if o.RoleModel != "" || (o.LaunchHarness != "" && o.LaunchHarness != rec.Harness) {
-		// Cross-harness: apply explicit target model (may be empty = provider default).
-		agentConfig.Model = o.RoleModel
-	}
+	// config. For switch, use the ephemeral target-resolved model above.
+	agentConfig := restoreAgentConfig(promptRec, project)
 	// Rotate spawn capability on every relaunch so a terminated/killed session's
 	// prior token cannot be reused after hash is rewritten.
 	spawnToken, spawnHash, err := spawncred.Issue()

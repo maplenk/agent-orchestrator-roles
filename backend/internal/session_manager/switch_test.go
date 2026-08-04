@@ -127,6 +127,141 @@ func TestSwitchWorker_CrossHarnessClearsModel(t *testing.T) {
 	}
 }
 
+// Cross-harness launch must build the authoritative role footer for the *target*
+// harness while durable session identity stays on the source until target_ack.
+func TestSwitchWorker_SystemPromptTargetHarnessFooter(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	agent := &recordingAgent{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	// Before ack, durable store must still show source harness during launch.
+	// Capture system prompt from the target launch argv path.
+	res, err := m.SwitchWorker(ctx, SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex, TargetModel: "codex-target",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := agent.lastLaunch.SystemPrompt
+	if sp == "" {
+		// Switch clears agent session id → fresh launch path.
+		sp = agent.lastRestore.SystemPrompt
+	}
+	if !strings.Contains(sp, "Harness: codex") {
+		t.Fatalf("target system prompt missing codex footer:\n%s", sp)
+	}
+	if strings.Contains(sp, "Harness: claude-code") {
+		t.Fatalf("target system prompt still names source harness:\n%s", sp)
+	}
+	if !strings.Contains(sp, "Active role: implementor") {
+		t.Fatalf("role pin lost in footer:\n%s", sp)
+	}
+	// Durable identity after ack is target; mid-launch durable rec is not re-read here.
+	if res.Session.Harness != domain.HarnessCodex {
+		t.Fatalf("post-ack harness=%q", res.Session.Harness)
+	}
+	if res.Session.Metadata.Role.ResolvedHarness != domain.HarnessCodex {
+		t.Fatalf("post-ack ResolvedHarness=%q", res.Session.Metadata.Role.ResolvedHarness)
+	}
+}
+
+func TestSwitchWorker_SystemPromptTargetHarnessFooter_CodexToClaude(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessCodex, ws, art, sha)
+	rec := st.sessions[id]
+	rec.Metadata.Role.ResolvedModel = "codex-source"
+	st.sessions[id] = rec
+	agent := &recordingAgent{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessClaudeCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := agent.lastLaunch.SystemPrompt
+	if sp == "" {
+		sp = agent.lastRestore.SystemPrompt
+	}
+	if !strings.Contains(sp, "Harness: claude-code") {
+		t.Fatalf("want claude-code footer:\n%s", sp)
+	}
+	if strings.Contains(sp, "Harness: codex") {
+		t.Fatalf("source codex footer leaked:\n%s", sp)
+	}
+}
+
+func TestRecover_SystemPromptTargetHarnessFooter(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	payload := `{"semantic":{"schemaVersion":1,"objective":"recover-footer"},"observed":{"schemaVersion":1},"compiled":"## Host-compiled handoff\n\nrecover-footer"}`
+	gen := "gen-footer-rec"
+	rec := st.sessions[id]
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: gen, Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		OriginalTask: "implement feature", RoleID: "implementor", PayloadJSON: payload,
+		ToModel: "codex-on-recover", SourceRuntimeHandleID: "rt-1",
+	}
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	rec.Metadata.AgentSessionID = ""
+	rec.Metadata.Prompt = "## Host-compiled handoff\n\nrecover-footer\n\n## Prior task prompt\nimplement feature"
+	st.sessions[id] = rec
+	st.ledger = []domain.LifecycleLedgerRecord{{
+		ID: string(id) + ":" + gen + ":post_stop", SessionID: id, ProjectID: "mer",
+		Kind: domain.LifecycleKindSwitch, Phase: domain.LifecyclePhasePostStop, GenerationID: gen,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex, PayloadJSON: payload,
+	}}
+	agent := &recordingAgent{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "must-not-mint" },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	res, err := m.RecoverSwitchFromPostStop(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := agent.lastLaunch.SystemPrompt
+	if sp == "" {
+		sp = agent.lastRestore.SystemPrompt
+	}
+	if !strings.Contains(sp, "Harness: codex") {
+		t.Fatalf("recover target prompt missing codex footer:\n%s", sp)
+	}
+	if strings.Contains(sp, "Harness: claude-code") {
+		t.Fatalf("recover prompt still names source harness:\n%s", sp)
+	}
+	if res.Session.Metadata.RuntimeLaunchID != gen {
+		t.Fatalf("runtime gen=%q want %q", res.Session.Metadata.RuntimeLaunchID, gen)
+	}
+	// During recover launch, durable pending still present until ack; after success pending cleared.
+	if res.Session.Metadata.SwitchPending != nil {
+		t.Fatal("pending must clear after recover ack")
+	}
+}
+
 func TestSwitchWorker_HarnessNotPromotedBeforeAck(t *testing.T) {
 	st := newFakeStore()
 	ws := t.TempDir()
