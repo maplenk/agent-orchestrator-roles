@@ -225,6 +225,229 @@ func (m *Manager) FreshConversation(ctx context.Context, sessionID domain.Sessio
 	})
 }
 
+// switchPayload is the durable post_stop handoff blob (JSON).
+type switchPayload struct {
+	Semantic domain.SemanticHandoffV1    `json:"semantic"`
+	Observed domain.ObservedWorkspaceV1  `json:"observed"`
+	Compiled string                      `json:"compiled"`
+}
+
+// RecoverSwitchFromPostStop re-drives a worker switch/fresh that reached
+// post_stop (source stopped, handoff on ledger) but never target_ack.
+// Safe to call on boot and after ErrSwitchPostStop.
+//
+// Idempotent: if no incomplete post_stop exists, returns ErrSwitchNothingToRecover.
+func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domain.SessionID) (SwitchResult, error) {
+	if !m.beginSwitch(sessionID) {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchInProgress)
+	}
+	defer m.endSwitch(sessionID)
+
+	rec, ok, err := m.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, err)
+	}
+	if !ok {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotFound)
+	}
+	if rec.Kind != domain.KindWorker {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotWorker)
+	}
+	if rec.IsTerminated {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrTerminated)
+	}
+	if rec.Metadata.WorkspacePath == "" {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrIncompleteHandle)
+	}
+
+	events, err := m.store.ListLifecycleLedger(ctx, sessionID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: list ledger: %w", sessionID, err)
+	}
+	recov, ok := findRecoverablePostStop(events)
+	if !ok {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchNothingToRecover)
+	}
+
+	var payload switchPayload
+	if raw := strings.TrimSpace(recov.PostStop.PayloadJSON); raw != "" && raw != "{}" {
+		if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: payload: %w", sessionID, err)
+		}
+	}
+	if strings.TrimSpace(payload.Compiled) == "" {
+		// Rebuild from semantic/observed if older entries only stored fragments.
+		same := recov.PostStop.FromHarness == recov.PostStop.ToHarness || recov.Kind == domain.LifecycleKindFreshConversation
+		compiled := handoff.Compile(handoff.CompileInput{
+			Semantic:         payload.Semantic,
+			Observed:         payload.Observed,
+			RoleID:           recov.PostStop.RoleID,
+			TargetGeneration: recov.GenerationID,
+			SameHarness:      same,
+			FromHarness:      recov.PostStop.FromHarness,
+			ToHarness:        recov.PostStop.ToHarness,
+		})
+		payload.Compiled = compiled.Text
+	}
+
+	toHarness := recov.PostStop.ToHarness
+	if toHarness == "" {
+		toHarness = rec.Harness
+	}
+	if _, ok := m.agents.Agent(toHarness); !ok {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %q", sessionID, ErrUnknownHarness, toHarness)
+	}
+	if rec.Metadata.Role.RoleID != "" && !rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites {
+		if err := capabilities.RequireReadOnly(toHarness); err != nil {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %v", sessionID, ErrReadOnlyUnsupported, err)
+		}
+	}
+
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, err)
+	}
+
+	// Best-effort destroy any stale runtime handle left from a crash mid-relaunch.
+	if hid := strings.TrimSpace(rec.Metadata.RuntimeHandleID); hid != "" {
+		handle := ports.RuntimeHandle{ID: hid}
+		if alive, err := m.runtime.IsAlive(ctx, handle); err == nil && alive {
+			_ = m.runtime.Destroy(ctx, handle)
+		} else if err == nil && !alive {
+			// already dead
+		} else {
+			// Probe failed: still try destroy (idempotent adapters).
+			_ = m.runtime.Destroy(ctx, handle)
+		}
+	}
+
+	// Re-apply target pin from durable post_stop (authoritative for recovery).
+	fromHarness := recov.PostStop.FromHarness
+	fromModel := recov.PostStop.FromModel
+	toModel := recov.PostStop.ToModel
+	roleID := recov.PostStop.RoleID
+	if roleID == "" {
+		roleID = rec.Metadata.Role.RoleID
+	}
+
+	rec.Harness = toHarness
+	rec.Metadata.AgentSessionID = ""
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	if rec.Metadata.Role.RoleID != "" {
+		rec.Metadata.Role.ResolvedHarness = toHarness
+		if toModel != "" {
+			rec.Metadata.Role.ResolvedModel = toModel
+		}
+	}
+	// Inject compiled handoff once (avoid stacking on repeated recoveries).
+	if payload.Compiled != "" && !strings.Contains(rec.Metadata.Prompt, "Host-compiled handoff") {
+		// Strip a prior failed compose marker if present; otherwise prepend handoff.
+		rec.Metadata.Prompt = composeSwitchPrompt(rec.Metadata.Prompt, payload.Compiled)
+	} else if payload.Compiled != "" && !strings.Contains(rec.Metadata.Prompt, payload.Compiled) {
+		// Handoff header present but text drifted — recompose from task tail if possible.
+		rec.Metadata.Prompt = composeSwitchPrompt(stripCompiledHandoff(rec.Metadata.Prompt), payload.Compiled)
+	}
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(ctx, rec); err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: persist: %v", sessionID, ErrSwitchPostStop, err)
+	}
+
+	ws := ports.WorkspaceInfo{
+		Path:      rec.Metadata.WorkspacePath,
+		Branch:    rec.Metadata.Branch,
+		SessionID: rec.ID,
+		ProjectID: rec.ProjectID,
+		RepoPath:  rec.Metadata.WorkspaceRepoPath,
+	}
+	result, err := m.relaunchSession(ctx, "switch-recover", rec, project, ws, nil)
+	if err != nil {
+		_ = m.appendSwitchLedger(ctx, rec, recov.Kind, domain.LifecyclePhaseFailed, recov.GenerationID, fromHarness, toHarness, fromModel, toModel, roleID, "", "", recov.PostStop.PayloadJSON)
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %v", sessionID, ErrSwitchPostStop, err)
+	}
+
+	payloadBytes, _ := json.Marshal(payload)
+	if err := m.appendSwitchLedger(ctx, result.Session, recov.Kind, domain.LifecyclePhaseTargetAck, recov.GenerationID, fromHarness, toHarness, fromModel, toModel, roleID, "", result.Session.Metadata.AgentSessionID, string(payloadBytes)); err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: target ack ledger: %w", sessionID, err)
+	}
+
+	compiled := domain.CompiledHandoff{
+		Text:             payload.Compiled,
+		RoleID:           roleID,
+		SourceGeneration: payload.Semantic.SourceGeneration,
+		TargetGeneration: recov.GenerationID,
+		Semantic:         payload.Semantic,
+		Observed:         payload.Observed,
+	}
+	return SwitchResult{
+		Session:      result.Session,
+		Compiled:     compiled,
+		GenerationID: recov.GenerationID,
+		Kind:         recov.Kind,
+		Mode:         result.Mode,
+	}, nil
+}
+
+type recoverablePostStop struct {
+	PostStop     domain.LifecycleLedgerRecord
+	Kind         domain.LifecycleLedgerKind
+	GenerationID string
+}
+
+func isSwitchLedgerKind(k domain.LifecycleLedgerKind) bool {
+	return k == domain.LifecycleKindSwitch || k == domain.LifecycleKindFreshConversation
+}
+
+// findRecoverablePostStop returns the newest post_stop for a generation that
+// never received target_ack. A later "failed" phase does not clear recoverability.
+func findRecoverablePostStop(events []domain.LifecycleLedgerRecord) (recoverablePostStop, bool) {
+	acked := map[string]bool{}
+	for _, e := range events {
+		if isSwitchLedgerKind(e.Kind) && e.Phase == domain.LifecyclePhaseTargetAck && e.GenerationID != "" {
+			acked[e.GenerationID] = true
+		}
+	}
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if !isSwitchLedgerKind(e.Kind) || e.Phase != domain.LifecyclePhasePostStop {
+			continue
+		}
+		if e.GenerationID == "" || acked[e.GenerationID] {
+			continue
+		}
+		return recoverablePostStop{PostStop: e, Kind: e.Kind, GenerationID: e.GenerationID}, true
+	}
+	return recoverablePostStop{}, false
+}
+
+func (m *Manager) hasIncompletePostStop(ctx context.Context, sessionID domain.SessionID) (bool, error) {
+	events, err := m.store.ListLifecycleLedger(ctx, sessionID)
+	if err != nil {
+		return false, err
+	}
+	_, ok := findRecoverablePostStop(events)
+	return ok, nil
+}
+
+// stripCompiledHandoff removes a leading host-compiled handoff section so recovery
+// can re-inject a fresh compiled blob without stacking.
+func stripCompiledHandoff(prompt string) string {
+	const marker = "## Host-compiled handoff"
+	const prior = "## Prior task prompt"
+	p := strings.TrimSpace(prompt)
+	if !strings.Contains(p, marker) {
+		return p
+	}
+	if i := strings.Index(p, prior); i >= 0 {
+		return strings.TrimSpace(p[i+len(prior):])
+	}
+	// No prior-task marker: drop everything from the handoff header.
+	if i := strings.Index(p, marker); i >= 0 {
+		return strings.TrimSpace(p[:i])
+	}
+	return p
+}
+
 func requireSwitchCaps(from, to domain.AgentHarness, sameHarness bool) error {
 	fc := capabilities.For(from)
 	tc := capabilities.For(to)

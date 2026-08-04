@@ -211,8 +211,8 @@ See also `PHASE2A_PLAN.md`.
 | Observe workspace | **Done** | `handoff.ObserveWorkspace` |
 | Initial matrix | **Done (unit)** | Claude↔Codex `switch_supported=true`; dogfood still open |
 | Same-harness fresh conversation | **Done (manager)** | `FreshConversation` |
+| Crash re-drive from post_stop | **Done** | `RecoverSwitchFromPostStop` + `Reconcile` pass |
 | HTTP/CLI + service wiring | Open | |
-| Crash re-drive from post_stop | Open | |
 | Dogfood + review pack | Open | |
 
 **DoD (from MASTER_PLAN):** pre-stop leaves source usable; post-stop retains handoff; one generation owns input.

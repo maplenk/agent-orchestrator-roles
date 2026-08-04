@@ -67,6 +67,9 @@ var (
 	ErrSwitchPostStop = errors.New("session: switch failed after source stop; handoff retained")
 	// ErrNotWorker means switch/fresh is only defined for worker sessions.
 	ErrNotWorker = errors.New("session: worker kind required")
+	// ErrSwitchNothingToRecover means no incomplete post_stop saga exists for
+	// the session (already acked, never reached post_stop, or not a switch).
+	ErrSwitchNothingToRecover = errors.New("session: no incomplete post_stop switch to recover")
 	// ErrResumeInProgress prevents concurrent resume requests from replacing the
 	// same runtime twice.
 	ErrResumeInProgress = errors.New("session: agent resume already in progress")
@@ -1553,6 +1556,14 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	if rec.Metadata.WorkspacePath == "" || (rec.Metadata.Branch == "" && projectKind != domain.ProjectKindScratch) {
 		return nil
 	}
+	// Defense in depth: never tear down a session waiting on post_stop recovery
+	// (recover pass should have handled it; if it failed, leave for next boot).
+	if incomplete, err := m.hasIncompletePostStop(ctx, rec.ID); err != nil {
+		return fmt.Errorf("reconcile %s: ledger: %w", rec.ID, err)
+	} else if incomplete {
+		m.logger.Warn("reconcile: leaving incomplete post_stop switch for recovery", "sessionID", rec.ID)
+		return nil
+	}
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID != "" {
 		alive, err := m.runtime.IsAlive(ctx, handle)
@@ -1602,12 +1613,16 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 // call so that however the previous daemon died (clean shutdown, SIGKILL, or
 // crash), live reality matches the DB:
 //
-//  1. Live pass: for each non-terminated session, adopt it if its runtime
+//  1. Post-stop recovery: re-drive incomplete worker switch/fresh sagas that
+//     reached post_stop (handoff retained) before target_ack. Must run before
+//     the live pass so a dead runtime mid-switch is not torn down as a normal
+//     crash (which would drop the recoverable handoff path).
+//  2. Live pass: for each non-terminated session, adopt it if its runtime
 //     survived, else capture work and mark terminated (reconcileLive).
-//  2. Reap pass: for each terminated session whose runtime leaked, kill it
+//  3. Reap pass: for each terminated session whose runtime leaked, kill it
 //     (reconcileReap). Runs before restore so a restored session does not
 //     collide with a leaked tmux of the same name.
-//  3. Restore pass: relaunch shutdown-saved sessions (existing RestoreAll).
+//  4. Restore pass: relaunch shutdown-saved sessions (existing RestoreAll).
 //
 // Best-effort throughout: a per-session failure is logged and never aborts the
 // pass or blocks boot.
@@ -1615,6 +1630,22 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)
+	}
+	for _, rec := range recs {
+		if rec.IsTerminated || rec.Kind != domain.KindWorker {
+			continue
+		}
+		if _, err := m.RecoverSwitchFromPostStop(ctx, rec.ID); err != nil {
+			if errors.Is(err, ErrSwitchNothingToRecover) || errors.Is(err, ErrSwitchInProgress) {
+				continue
+			}
+			m.logger.Error("reconcile: post_stop recovery failed, skipping", "sessionID", rec.ID, "error", err)
+		}
+	}
+	// Re-list: recovery may have updated harness/runtime handles.
+	recs, err = m.store.ListAllSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("reconcile: re-list sessions: %w", err)
 	}
 	for _, rec := range recs {
 		if rec.IsTerminated {
