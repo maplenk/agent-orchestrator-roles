@@ -213,10 +213,10 @@ See also `PHASE2A_PLAN.md`.
 | Probe-driven destroy + recovery | **Done** | No dual-launch; ack-only for matching live gen |
 | Same-harness fresh conversation | **Done (manager)** | No handoff stacking |
 | Crash re-drive from post_stop | **Done** | `RecoverSwitchFromPostStop` + `Reconcile` |
-| Promote switch_supported | Open | After live Claude↔Codex dogfood |
-| HTTP/CLI + service (role-map targets) | **Done** | Authorize via roleMap + failover; caps still **false** |
+| Promote switch_supported | Open | After live dogfood acceptance (separate CL) |
+| HTTP/CLI + service (role-map targets) | **Done** | Accepted @ `83f7abfb`; caps still **false** |
 | Manager dogfood evidence | **Done** | `PHASE2A_DOGFOOD.md` @ 2d19ad59 |
-| Live-agent dogfood + review pack | Open | Controlled local-only cap enablement |
+| Live-agent dogfood | **Done (evidence)** | `PHASE2A_LIVE_DOGFOOD.md` @ base `83f7abfb` + local-only enablement |
 
 **DoD (from MASTER_PLAN):** pre-stop leaves source usable; post-stop retains handoff; one generation owns input.
 

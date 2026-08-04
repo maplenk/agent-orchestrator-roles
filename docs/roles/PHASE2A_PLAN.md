@@ -89,6 +89,6 @@ Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Override only; **pr
 ## Still open before promotion
 
 1. ~~Manager-level dogfood checklist~~ — **recorded in PHASE2A_DOGFOOD.md**
-2. ~~Service/API/CLI role-map targets~~ — **landed** (caps still false)
-3. Live desktop Claude↔Codex + crash/restart dogfood (controlled local-only cap enablement)
-4. Promote `switch_supported` in a **separate** final change
+2. ~~Service/API/CLI role-map targets + auth~~ — **accepted** @ `83f7abfb`
+3. ~~Live Claude↔Codex + crash/restart dogfood~~ — **recorded in PHASE2A_LIVE_DOGFOOD.md** (local-only `AO_DOGFOOD_SWITCH`, non-committable patch; production caps still false)
+4. Promote `switch_supported` in a **separate** final change (only after live log acceptance)
