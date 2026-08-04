@@ -14,6 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 // maxDisplayNameLen caps the sidebar label set by `--name`. Mirrored by the
@@ -193,22 +196,45 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	return cmd
 }
 
-// spawnCallerHeaders authenticates ao spawn:
-//   - Inside a session (AO_SESSION_ID set): agent capability only — never
-//     operator. Workers control their env and must not be auto-upgraded by
-//     reading ~/.ao/running.json after unsetting AO_SESSION_ID.
-//   - Outside a session: operator token only from AO_OPERATOR_SPAWN_TOKEN env
-//     (set by a privileged parent such as desktop tooling). The CLI does NOT
-//     read the operator secret from running.json.
+// spawnCallerHeaders authenticates ao spawn.
+//
+// Session-adjacent processes (any of AO_SESSION_ID, AO_SPAWN_CAPABILITY,
+// AO_DATA_DIR) never use the operator path — even if AO_SESSION_ID was unset.
+// That blocks the official-client upgrade where a worker unsets only the
+// session id and would otherwise load running.json as "external" CLI.
+//
+// Pure external shells (no session markers): operator token from
+// AO_OPERATOR_SPAWN_TOKEN, else running.json (documented ao start → ao spawn).
 func spawnCallerHeaders() map[string]string {
-	if sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID")); sid != "" {
+	sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+	capTok := strings.TrimSpace(os.Getenv("AO_SPAWN_CAPABILITY"))
+	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
+
+	if sid != "" || capTok != "" || dataDir != "" {
+		// Session-adjacent: agent headers only (may be incomplete → daemon 403).
+		if sid == "" {
+			return nil
+		}
 		h := map[string]string{"X-AO-Caller-Session-Id": sid}
-		if capTok := strings.TrimSpace(os.Getenv("AO_SPAWN_CAPABILITY")); capTok != "" {
+		if capTok != "" {
 			h["X-AO-Spawn-Capability"] = capTok
 		}
 		return h
 	}
+
 	if tok := strings.TrimSpace(os.Getenv("AO_OPERATOR_SPAWN_TOKEN")); tok != "" {
+		return map[string]string{"X-AO-Operator-Spawn-Token": tok}
+	}
+	// External human/operator CLI: load token from the daemon handshake file.
+	cfg, err := config.Load()
+	if err != nil {
+		return nil
+	}
+	info, err := runfile.Read(cfg.RunFilePath)
+	if err != nil || info == nil {
+		return nil
+	}
+	if tok := strings.TrimSpace(info.OperatorSpawnToken); tok != "" {
 		return map[string]string{"X-AO-Operator-Spawn-Token": tok}
 	}
 	return nil

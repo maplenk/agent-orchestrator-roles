@@ -172,6 +172,40 @@ function reportApiError(operation: string, category: ApiErrorCategory, status?: 
 	});
 }
 
+/**
+ * Inject X-AO-Operator-Spawn-Token for desktop privileged spawn when the main
+ * process has published the token via daemon status. Exported for unit tests.
+ * Runs for both same-URL and rebased fetch paths.
+ */
+export function applyOperatorSpawnHeaders(
+	headers: Headers,
+	method: string,
+	pathname: string,
+	token: string | undefined = daemonStatus.operatorSpawnToken,
+): Headers {
+	const m = method.toUpperCase();
+	if (
+		m === "POST" &&
+		(pathname === "/api/v1/sessions" || pathname === "/api/v1/orchestrators") &&
+		token &&
+		!headers.has("X-AO-Operator-Spawn-Token") &&
+		!headers.has("X-AO-Caller-Session-Id")
+	) {
+		headers.set("X-AO-Operator-Spawn-Token", token);
+	}
+	return headers;
+}
+
+function withOperatorSpawnAuth(input: Request): Request {
+	const url = new URL(input.url);
+	const headers = applyOperatorSpawnHeaders(new Headers(input.headers), input.method, url.pathname);
+	// Only rebuild when we actually added a header (avoid cloning unnecessarily).
+	if (headers.get("X-AO-Operator-Spawn-Token") === (input.headers.get("X-AO-Operator-Spawn-Token") ?? null)) {
+		return input;
+	}
+	return new Request(input, { headers });
+}
+
 async function runtimeFetch(input: Request): Promise<Response> {
 	const operation = normalizeApiOperation(input.method, new URL(input.url).pathname);
 	const baseUrl = runtimeApiBaseUrl;
@@ -185,14 +219,11 @@ async function runtimeFetch(input: Request): Promise<Response> {
 
 	const send = async (): Promise<Response> => {
 		if (!baseUrl) {
-			return fetch(input);
+			return fetch(withOperatorSpawnAuth(input));
 		}
 
 		const url = new URL(input.url);
 		const target = new URL(url.pathname + url.search + url.hash, baseUrl);
-		if (target.href === input.url) {
-			return fetch(input);
-		}
 
 		// Rebase onto the runtime base URL by copying fields explicitly and
 		// buffering the body. `new Request(target, input)` reads the source
@@ -200,19 +231,12 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		// "The duplex member must be specified" for any request with a body, so
 		// every POST would fail in the packaged app. API bodies are small JSON;
 		// buffering sidesteps streaming-duplex semantics entirely.
+		//
+		// Same-URL path (default 127.0.0.1:3001): still must apply operator auth —
+		// an early pass-through without withOperatorSpawnAuth left desktop spawn
+		// headerless and 403 SPAWN_AUTH_REQUIRED.
 		const body = input.method === "GET" || input.method === "HEAD" ? undefined : await input.arrayBuffer();
-		const headers = new Headers(input.headers);
-		// Privileged desktop spawn: operator token from main process (runfile via daemon status).
-		const path = target.pathname;
-		if (
-			(input.method === "POST" || input.method === "post") &&
-			(path === "/api/v1/sessions" || path === "/api/v1/orchestrators") &&
-			daemonStatus.operatorSpawnToken &&
-			!headers.has("X-AO-Operator-Spawn-Token") &&
-			!headers.has("X-AO-Caller-Session-Id")
-		) {
-			headers.set("X-AO-Operator-Spawn-Token", daemonStatus.operatorSpawnToken);
-		}
+		const headers = applyOperatorSpawnHeaders(new Headers(input.headers), input.method, target.pathname);
 		return fetch(target, {
 			method: input.method,
 			headers,

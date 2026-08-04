@@ -17,10 +17,10 @@ Cooperative policy for in-session agents remains: present session capability;
 
 | Caller | Trust | Credential |
 |--------|--------|------------|
-| Desktop renderer | Operator | `X-AO-Operator-Spawn-Token` injected by api-client from main-provided daemon status (token from runfile parse) |
+| Desktop renderer | Operator | `X-AO-Operator-Spawn-Token` on **both** same-URL and rebased fetch paths (default port 3001 fixed) |
 | Mobile LAN | Operator | Password middleware sets `authctx` LAN-authenticated; **no** operator header |
-| CLI outside session | Operator | **Only** `AO_OPERATOR_SPAWN_TOKEN` env (privileged parent). **Does not** read runfile for operator token |
-| CLI / agent inside session | Agent | `AO_SESSION_ID` + `AO_SPAWN_CAPABILITY` only — never operator path |
+| CLI external shell | Operator | `AO_OPERATOR_SPAWN_TOKEN` env **or** runfile when **no** session markers (`AO_SESSION_ID` / `AO_SPAWN_CAPABILITY` / `AO_DATA_DIR`) |
+| CLI / agent session-adjacent | Agent | Session markers present → agent headers only; never runfile operator upgrade |
 | Headerless loopback HTTP | Denied | `SPAWN_AUTH_REQUIRED` |
 
 ## P1 fixes this slice

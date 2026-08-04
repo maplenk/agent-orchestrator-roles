@@ -11,6 +11,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 func authorizedAgentsJSON(agent string) string {
@@ -824,5 +826,50 @@ func TestResolveSpawnHarness_OrchestratorDefault(t *testing.T) {
 	noOrch := projectDetails{ID: "demo", Config: &projectConfig{Worker: roleOverride{Agent: "codex"}}}
 	if _, err := resolveSpawnHarness("", "orchestrator", noOrch); err == nil || !strings.Contains(err.Error(), "--orchestrator-agent") {
 		t.Fatalf("missing orchestrator agent: err=%v, want --orchestrator-agent hint", err)
+	}
+}
+
+func TestSpawnCallerHeaders_SessionAdjacentNeverReadsRunfile(t *testing.T) {
+	cfg := setConfigEnv(t)
+	// Put operator token in runfile — must NOT be used when session markers exist.
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: 3001, OperatorSpawnToken: "runfile-op",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AO_SESSION_ID", "")
+	t.Setenv("AO_SPAWN_CAPABILITY", "")
+	t.Setenv("AO_OPERATOR_SPAWN_TOKEN", "")
+	// Worker unsets session id but still has data dir → refuse operator upgrade.
+	t.Setenv("AO_DATA_DIR", "/tmp/ao-data")
+	if h := spawnCallerHeaders(); h != nil {
+		t.Fatalf("session-adjacent without session id must not send headers: %v", h)
+	}
+	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_SESSION_ID", "mer-1")
+	t.Setenv("AO_SPAWN_CAPABILITY", "cap")
+	h := spawnCallerHeaders()
+	if h["X-AO-Caller-Session-Id"] != "mer-1" || h["X-AO-Spawn-Capability"] != "cap" {
+		t.Fatalf("agent headers = %v", h)
+	}
+	if _, ok := h["X-AO-Operator-Spawn-Token"]; ok {
+		t.Fatal("must not send operator token for session")
+	}
+}
+
+func TestSpawnCallerHeaders_ExternalCLILoadsRunfile(t *testing.T) {
+	cfg := setConfigEnv(t)
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: 3001, OperatorSpawnToken: "runfile-op",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AO_SESSION_ID", "")
+	t.Setenv("AO_SPAWN_CAPABILITY", "")
+	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_OPERATOR_SPAWN_TOKEN", "")
+	h := spawnCallerHeaders()
+	if h["X-AO-Operator-Spawn-Token"] != "runfile-op" {
+		t.Fatalf("external CLI headers = %v", h)
 	}
 }

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	apiClient,
 	apiErrorMessage,
+	applyOperatorSpawnHeaders,
 	getApiBaseUrl,
 	hasTrustedApiBaseUrl,
 	normalizeApiOperation,
@@ -312,6 +313,65 @@ describe("api error telemetry", () => {
 		vi.setSystemTime(clock + 31_000);
 		await apiClient.GET("/api/v1/projects");
 		expect(captureMock).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("applyOperatorSpawnHeaders", () => {
+	it("injects operator token for POST /sessions and /orchestrators", () => {
+		const h = applyOperatorSpawnHeaders(new Headers(), "POST", "/api/v1/sessions", "op-tok");
+		expect(h.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
+		const o = applyOperatorSpawnHeaders(new Headers(), "POST", "/api/v1/orchestrators", "op-tok");
+		expect(o.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
+	});
+
+	it("does not inject for GET or non-spawn paths", () => {
+		const h = applyOperatorSpawnHeaders(new Headers(), "GET", "/api/v1/sessions", "op-tok");
+		expect(h.has("X-AO-Operator-Spawn-Token")).toBe(false);
+		const p = applyOperatorSpawnHeaders(new Headers(), "POST", "/api/v1/projects", "op-tok");
+		expect(p.has("X-AO-Operator-Spawn-Token")).toBe(false);
+	});
+
+	it("does not override existing agent or operator headers", () => {
+		const agent = new Headers({ "X-AO-Caller-Session-Id": "mer-1" });
+		applyOperatorSpawnHeaders(agent, "POST", "/api/v1/sessions", "op-tok");
+		expect(agent.has("X-AO-Operator-Spawn-Token")).toBe(false);
+		const op = new Headers({ "X-AO-Operator-Spawn-Token": "existing" });
+		applyOperatorSpawnHeaders(op, "POST", "/api/v1/sessions", "op-tok");
+		expect(op.get("X-AO-Operator-Spawn-Token")).toBe("existing");
+	});
+});
+
+describe("runtimeFetch operator auth on same-URL (default port)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		setApiBaseUrl("http://127.0.0.1:3001");
+		setApiDaemonStatus({ state: "stopped" });
+	});
+
+	it("injects operator header when target equals input URL (no rebase)", async () => {
+		const seen: { url: string; op?: string | null }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const req = input instanceof Request ? input : new Request(String(input), init);
+			seen.push({
+				url: req.url,
+				op: req.headers.get("X-AO-Operator-Spawn-Token"),
+			});
+			return new Response(JSON.stringify({ session: { id: "x" } }), {
+				status: 201,
+				headers: { "Content-Type": "application/json" },
+			});
+		});
+
+		// Same base as openapi client default — early return path that previously skipped auth.
+		setApiBaseUrl("http://127.0.0.1:3001");
+		setApiDaemonStatus({ state: "ready", port: 3001, operatorSpawnToken: "desktop-op-secret" });
+
+		await apiClient.POST("/api/v1/sessions", {
+			body: { projectId: "mer", displayName: "task" } as never,
+		});
+
+		expect(seen.length).toBeGreaterThan(0);
+		expect(seen.some((s) => s.op === "desktop-op-secret")).toBe(true);
 	});
 });
 
