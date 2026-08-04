@@ -2956,12 +2956,78 @@ components:
       - state
       - lastActivityAt
       type: object
+    DomainFailoverConfig:
+      properties:
+        mode:
+          type: string
+        roles:
+          additionalProperties:
+            items:
+              $ref: '#/components/schemas/DomainFailoverTarget'
+            type: array
+          type: object
+      type: object
+    DomainFailoverTarget:
+      properties:
+        harness:
+          type: string
+        model:
+          type: string
+      required:
+      - harness
+      type: object
     DomainReviewerConfig:
       properties:
         harness:
           type: string
       required:
       - harness
+      type: object
+    DomainRoleBinding:
+      properties:
+        harness:
+          type: string
+        model:
+          type: string
+        permissions:
+          $ref: '#/components/schemas/DomainRoleExecutionPolicy'
+        template:
+          type: string
+        when:
+          items:
+            type: string
+          type: array
+      required:
+      - template
+      - harness
+      - permissions
+      type: object
+    DomainRoleExecutionPolicy:
+      properties:
+        canSpawn:
+          type: boolean
+        workspaceWrites:
+          type: boolean
+      required:
+      - workspaceWrites
+      - canSpawn
+      type: object
+    DomainRoleMap:
+      properties:
+        failover:
+          $ref: '#/components/schemas/DomainFailoverConfig'
+        orchestratorRole:
+          type: string
+        role_map_schema_version:
+          type: integer
+        roles:
+          additionalProperties:
+            $ref: '#/components/schemas/DomainRoleBinding'
+          type: object
+        strictDelegation:
+          type: boolean
+      required:
+      - role_map_schema_version
       type: object
     ImportReport:
       properties:
@@ -3444,6 +3510,8 @@ components:
           items:
             $ref: '#/components/schemas/DomainReviewerConfig'
           type: array
+        roleMap:
+          $ref: '#/components/schemas/DomainRoleMap'
         sessionPrefix:
           type: string
         symlinks:
@@ -4203,6 +4271,8 @@ components:
           type: string
         prompt:
           maxLength: 4096
+          type: string
+        roleId:
           type: string
       required:
       - projectId

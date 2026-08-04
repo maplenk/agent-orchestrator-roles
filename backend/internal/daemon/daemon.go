@@ -75,10 +75,8 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("generate operator spawn token: %w", err)
 	}
-	// Publish for runfile write in httpd.Server.Run; never inject into sessions.
-	if err := os.Setenv("AO_OPERATOR_SPAWN_TOKEN", operatorSpawnToken); err != nil {
-		return fmt.Errorf("set operator spawn token env: %w", err)
-	}
+	// Token is held only for API validation + runfile publication (desktop main).
+	// Never os.Setenv: tmux/ConPTY merge os.Environ() into workers.
 	browserBroker := browserruntime.New(log, browserRuntimeToken)
 
 	// Fail fast only if a daemon is genuinely still serving the recorded port.
@@ -260,7 +258,7 @@ func Run() error {
 		go dispatcher.Run(ctx)
 	}
 
-	srv, err := httpd.NewWithDeps(cfg, log, termMgr, httpd.APIDeps{
+	srv, err := httpd.NewWithDeps(cfg, log, termMgr, operatorSpawnToken, httpd.APIDeps{
 		Projects:           projectSvc,
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,

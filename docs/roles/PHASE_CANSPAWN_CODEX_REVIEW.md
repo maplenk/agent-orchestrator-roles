@@ -1,48 +1,51 @@
-# Phase canSpawn — session-scoped spawn credentials (Codex re-review)
+# Phase canSpawn — operator authority transport (Codex re-review)
 
-## Verdict history
+## Honest boundary
 
-1. First slice rejected: optional headers, global HMAC key in `AO_DATA_DIR`, no terminated check.
-2. **This redesign** addresses the three P1 privilege-escalation paths.
+**Host-enforced isolation against same-UID agents is not claimed.** A worker that
+can run arbitrary code as the desktop user can still inspect the filesystem
+(including `running.json`). This phase hardens **application transport** so:
 
-## Security model
+1. The official CLI cannot auto-upgrade a session to operator by unsetting env.
+2. Operator secrets are not ambient daemon env inherited by tmux/ConPTY children.
+3. Desktop and LAN-mobile spawn work again via trusted channels.
 
-| Path | Credential | Source |
-|------|------------|--------|
-| Operator / desktop / CLI outside session | `X-AO-Operator-Spawn-Token` | Daemon-launch secret in `running.json` only — **never** session env |
-| Agent session | `X-AO-Caller-Session-Id` + `X-AO-Spawn-Capability` | Random per-session token; **only SHA-256 hash** on session row |
-| Headerless | — | **403 SPAWN_AUTH_REQUIRED** (no operator fallthrough) |
+Cooperative policy for in-session agents remains: present session capability;
+`canSpawn:false` and terminated sessions fail closed.
 
-Additional agent checks after valid capability:
+## Transport model
 
-- Terminated caller → **403 SPAWN_SESSION_TERMINATED**
-- Role pin with `canSpawn=false` → **403 SPAWN_FORBIDDEN**
-- Capability rotated on restore/relaunch (old token hash rewritten)
+| Caller | Trust | Credential |
+|--------|--------|------------|
+| Desktop renderer | Operator | `X-AO-Operator-Spawn-Token` injected by api-client from main-provided daemon status (token from runfile parse) |
+| Mobile LAN | Operator | Password middleware sets `authctx` LAN-authenticated; **no** operator header |
+| CLI outside session | Operator | **Only** `AO_OPERATOR_SPAWN_TOKEN` env (privileged parent). **Does not** read runfile for operator token |
+| CLI / agent inside session | Agent | `AO_SESSION_ID` + `AO_SPAWN_CAPABILITY` only — never operator path |
+| Headerless loopback HTTP | Denied | `SPAWN_AUTH_REQUIRED` |
 
-## What closed the P1s
+## P1 fixes this slice
 
-1. **Worker omit headers** — headerless is denied. Operator requires distinct runfile token not injected as `AO_*` into sessions.
-2. **Global minting key in data dir** — removed. Session tokens are `crypto/rand`; only hash stored (`spawn_capability_hash`, migration 0043). No `spawn-capability.key`.
-3. **Terminated retain authority** — gate rejects `IsTerminated` before role/canSpawn.
+1. **CLI unset-env escalation** — `spawnCallerHeaders` never loads operator token from `running.json`. Unset `AO_SESSION_ID` without `AO_OPERATOR_SPAWN_TOKEN` → no headers → 403.
+2. **Env inheritance** — daemon does **not** `os.Setenv` operator token; `runtimeEnv` clears `AO_OPERATOR_SPAWN_TOKEN` and `AO_BROWSER_RUNTIME_TOKEN`.
+3. **Desktop spawn** — `parseRunFile` keeps `operatorSpawnToken`; main attaches it on ready status; renderer `runtimeFetch` sets header on POST sessions/orchestrators.
+4. **Mobile spawn** — LAN auth → `authctx.WithLANAuthenticated` → authorizeCallerSpawn allows.
 
-## Residual risk (honest)
+## Residual (documented, not “closed”)
 
-Same OS user can still read `~/.ao/running.json` if they know the path (not injected). Full process isolation needs UID separation; this redesign closes **application-level** escalate paths Codex listed.
-
-LAN mobile: password middleware authenticates the client; spawn still needs operator token (mobile client should use runfile/desktop-issued operator context — follow-up if mobile spawn is required).
+Same-UID agent that **reads** `running.json` and forges operator headers is outside this boundary without OS sandboxing / separate identity / privileged IPC with approval.
 
 ## Tests
 
 ```bash
 export PATH="/opt/homebrew/opt/go/bin:/opt/homebrew/bin:$PATH"
-cd backend && go test ./internal/service/spawncred/ ./internal/httpd/controllers/ \
+cd backend && go test ./internal/service/spawncred/ ./internal/httpd/... \
   ./internal/session_manager/ ./internal/cli/ ./internal/daemon/ \
-  ./internal/storage/sqlite/store/ -count=1
+  ./internal/authctx/ ./internal/storage/sqlite/store/ -count=1
 ```
 
-Includes: headerless reject; operator allow/deny; agent canSpawn true/false; terminated reject; bad capability.
+Frontend: `daemon-discovery` parseRunFile includes operatorSpawnToken.
 
 ## Ask Codex
 
-1. Accept redesigned canSpawn boundary for app-level enforcement?
-2. Proceed to read-only adapters next?
+1. Accept app-level transport with explicit cooperative same-UID residual?
+2. Ready for read-only adapters only after this accept?

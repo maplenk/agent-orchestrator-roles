@@ -28,4 +28,10 @@ export type DaemonStatus = {
 	code?: DaemonFailureCode;
 	exitCode?: number | null;
 	signal?: string | null;
+	/**
+	 * Operator spawn credential for desktop API calls (POST sessions/orchestrators).
+	 * Populated by main from running.json when ready. Session agents never receive this
+	 * via AO env; cooperative same-UID residual risk remains outside host isolation.
+	 */
+	operatorSpawnToken?: string;
 };

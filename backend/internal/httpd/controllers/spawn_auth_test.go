@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/authctx"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
@@ -250,5 +251,23 @@ func TestSpawn_AgentBadCapabilityRejected(t *testing.T) {
 	})
 	if code != http.StatusForbidden || env["code"] != "SPAWN_CAPABILITY_INVALID" {
 		t.Fatalf("status=%d env=%v", code, env)
+	}
+}
+
+func TestSpawn_LANAuthenticatedTrustedWithoutOperatorHeader(t *testing.T) {
+	// Mobile LAN password auth sets request context; no operator bearer needed.
+	svc, _ := newSpawnGateSvcWithToken()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	deps := httpd.APIDeps{Sessions: svc, OperatorSpawn: opAuth{tok: "op-secret"}}
+	inner := httpd.NewRouterWithControl(config.Config{}, log, nil, deps, httpd.ControlDeps{})
+	// Simulate LAN middleware: wrap to inject LAN context for all requests.
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		inner.ServeHTTP(w, r.WithContext(authctx.WithLANAuthenticated(r.Context())))
+	})
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	code, _ := doSpawnPOST(t, srv, nil) // no operator header
+	if code != http.StatusCreated {
+		t.Fatalf("LAN-auth spawn status=%d", code)
 	}
 }

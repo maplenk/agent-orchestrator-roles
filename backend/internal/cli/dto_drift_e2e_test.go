@@ -222,10 +222,15 @@ func startDriftTestDaemon(t *testing.T, sessions controllers.SessionService, pro
 	t.Setenv("AO_RUN_FILE", rfPath)
 	if err := runfile.Write(rfPath, runfile.Info{
 		PID: os.Getpid(), Port: port, StartedAt: time.Now(),
-		OperatorSpawnToken: "e2e-operator-token",
+		// Operator token is NOT auto-read from runfile by CLI (prevents worker
+		// unset-AO_SESSION_ID escalation). Privileged parents set env instead.
+		OperatorSpawnToken: "must-not-be-used-from-runfile",
 	}); err != nil {
 		t.Fatalf("write run-file: %v", err)
 	}
+	t.Setenv("AO_OPERATOR_SPAWN_TOKEN", "e2e-operator-token")
+	t.Setenv("AO_SESSION_ID", "")
+	t.Setenv("AO_SPAWN_CAPABILITY", "")
 }
 
 type fixedOperatorSpawn string

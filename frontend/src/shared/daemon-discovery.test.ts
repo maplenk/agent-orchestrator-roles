@@ -79,12 +79,14 @@ describe("parseRunFile", () => {
 					port: 3037,
 					browserRuntimeToken: "token",
 					browserRuntimeAddress: String.raw`\\.\pipe\ao-browser-dev`,
+					operatorSpawnToken: "op-secret",
 				}),
 			),
 		).toEqual(
 			expect.objectContaining({
 				browserRuntimeToken: "token",
 				browserRuntimeAddress: String.raw`\\.\pipe\ao-browser-dev`,
+				operatorSpawnToken: "op-secret",
 			}),
 		);
 	});

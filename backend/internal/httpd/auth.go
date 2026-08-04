@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/authctx"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 )
@@ -172,7 +173,8 @@ func authMiddleware(state *authState, lock *lockout) func(http.Handler) http.Han
 			if tok := connectionToken(r); mobilebridge.PasswordMatches(state.currentHash(), tok) {
 				lock.reset(src)
 				maybeSetPreviewAuthCookie(w, r, tok)
-				next.ServeHTTP(w, r)
+				// Trusted operator context for mobile spawn (no bearer operator token).
+				next.ServeHTTP(w, r.WithContext(authctx.WithLANAuthenticated(r.Context())))
 				return
 			}
 			lock.fail(src)

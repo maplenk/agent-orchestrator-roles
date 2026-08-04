@@ -201,9 +201,21 @@ async function runtimeFetch(input: Request): Promise<Response> {
 		// every POST would fail in the packaged app. API bodies are small JSON;
 		// buffering sidesteps streaming-duplex semantics entirely.
 		const body = input.method === "GET" || input.method === "HEAD" ? undefined : await input.arrayBuffer();
+		const headers = new Headers(input.headers);
+		// Privileged desktop spawn: operator token from main process (runfile via daemon status).
+		const path = target.pathname;
+		if (
+			(input.method === "POST" || input.method === "post") &&
+			(path === "/api/v1/sessions" || path === "/api/v1/orchestrators") &&
+			daemonStatus.operatorSpawnToken &&
+			!headers.has("X-AO-Operator-Spawn-Token") &&
+			!headers.has("X-AO-Caller-Session-Id")
+		) {
+			headers.set("X-AO-Operator-Spawn-Token", daemonStatus.operatorSpawnToken);
+		}
 		return fetch(target, {
 			method: input.method,
-			headers: input.headers,
+			headers,
 			body,
 			signal: input.signal,
 			credentials: input.credentials,

@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/authctx"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope"
@@ -243,11 +244,17 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 
 // authorizeCallerSpawn requires a trusted caller path:
 //
-//  1. Operator token (runfile secret — never in session env), or
-//  2. Live session with valid random capability (hash on row) and canSpawn.
+//  1. LAN password-authenticated request (mobile) — request context only, or
+//  2. Operator token (desktop/CLI; never auto-read by session CLI from runfile), or
+//  3. Live session with valid random capability (hash on row) and canSpawn.
 //
-// Omitting headers is not an operator path (closes worker unset-env escalate).
+// Omitting credentials is not an operator path. Same-UID agents that can read
+// the host filesystem are outside host-enforced isolation (cooperative policy).
 func (c *SessionsController) authorizeCallerSpawn(w http.ResponseWriter, r *http.Request) bool {
+	if authctx.IsLANAuthenticated(r.Context()) {
+		return true
+	}
+
 	opTok := strings.TrimSpace(r.Header.Get(operatorSpawnHeader))
 	caller := strings.TrimSpace(r.Header.Get(callerSessionHeader))
 	capTok := strings.TrimSpace(r.Header.Get(spawnCapabilityHeader))
@@ -264,7 +271,7 @@ func (c *SessionsController) authorizeCallerSpawn(w http.ResponseWriter, r *http
 
 	if caller == "" {
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_AUTH_REQUIRED",
-			"Spawn requires X-AO-Operator-Spawn-Token or session spawn capability headers", nil)
+			"Spawn requires operator credential, LAN auth, or session spawn capability headers", nil)
 		return false
 	}
 

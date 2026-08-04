@@ -226,6 +226,19 @@ function applyRuntimeAppIcon(): void {
 }
 
 function setDaemonStatus(nextStatus: DaemonStatus): void {
+	// Attach operator spawn token from running.json when becoming ready so the
+	// renderer can authorize privileged spawn (session workers never get this via env).
+	if (nextStatus.state === "ready" && !nextStatus.operatorSpawnToken) {
+		const rfp = runFilePath();
+		if (rfp) {
+			try {
+				const tok = parseRunFile(readFileSync(rfp, "utf8"))?.operatorSpawnToken;
+				if (tok) nextStatus = { ...nextStatus, operatorSpawnToken: tok };
+			} catch {
+				// runfile may still be settling; spawn will 403 until next status refresh
+			}
+		}
+	}
 	daemonStatus = nextStatus;
 	mainWindow?.webContents.send("daemon:status", daemonStatus);
 	if (nextStatus.state === "ready" && browserViewHost) {

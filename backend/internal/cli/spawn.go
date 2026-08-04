@@ -14,9 +14,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
-
-	"github.com/aoagents/agent-orchestrator/backend/internal/config"
-	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 // maxDisplayNameLen caps the sidebar label set by `--name`. Mirrored by the
@@ -197,8 +194,12 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 }
 
 // spawnCallerHeaders authenticates ao spawn:
-//   - Inside a session: X-AO-Caller-Session-Id + X-AO-Spawn-Capability (agent)
-//   - Outside: X-AO-Operator-Spawn-Token from running.json (never session env)
+//   - Inside a session (AO_SESSION_ID set): agent capability only — never
+//     operator. Workers control their env and must not be auto-upgraded by
+//     reading ~/.ao/running.json after unsetting AO_SESSION_ID.
+//   - Outside a session: operator token only from AO_OPERATOR_SPAWN_TOKEN env
+//     (set by a privileged parent such as desktop tooling). The CLI does NOT
+//     read the operator secret from running.json.
 func spawnCallerHeaders() map[string]string {
 	if sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID")); sid != "" {
 		h := map[string]string{"X-AO-Caller-Session-Id": sid}
@@ -207,15 +208,7 @@ func spawnCallerHeaders() map[string]string {
 		}
 		return h
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil
-	}
-	info, err := runfile.Read(cfg.RunFilePath)
-	if err != nil || info == nil {
-		return nil
-	}
-	if tok := strings.TrimSpace(info.OperatorSpawnToken); tok != "" {
+	if tok := strings.TrimSpace(os.Getenv("AO_OPERATOR_SPAWN_TOKEN")); tok != "" {
 		return map[string]string{"X-AO-Operator-Spawn-Token": tok}
 	}
 	return nil

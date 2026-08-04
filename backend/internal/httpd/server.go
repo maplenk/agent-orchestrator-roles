@@ -25,6 +25,11 @@ type Server struct {
 	http   *http.Server
 	listen net.Listener
 
+	// operatorSpawnToken is written to running.json for the desktop main
+	// process only. It is never process-global env (session runtimes inherit
+	// os.Environ via tmux/ConPTY).
+	operatorSpawnToken string
+
 	shutdownRequested chan struct{}
 	shutdownOnce      sync.Once
 }
@@ -41,7 +46,7 @@ type Server struct {
 // supervisor stuck on "daemon not ready". The actual bound port is logged
 // ("daemon listening") and written to running.json, both of which the supervisor
 // reads, so the fallback propagates to the renderer with no UI changes.
-func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, deps APIDeps) (*Server, error) {
+func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager, operatorSpawnToken string, deps APIDeps) (*Server, error) {
 	log = loggerOrDefault(log)
 	ln, err := net.Listen("tcp", cfg.Addr())
 	if err != nil {
@@ -59,10 +64,11 @@ func NewWithDeps(cfg config.Config, log *slog.Logger, termMgr *terminal.Manager,
 	}
 
 	srv := &Server{
-		cfg:               cfg,
-		log:               log,
-		listen:            ln,
-		shutdownRequested: make(chan struct{}),
+		cfg:                cfg,
+		log:                log,
+		listen:             ln,
+		operatorSpawnToken: operatorSpawnToken,
+		shutdownRequested:  make(chan struct{}),
 	}
 	srv.http = &http.Server{
 		Handler: NewRouterWithControl(cfg, log, termMgr, deps, ControlDeps{
@@ -96,7 +102,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Owner:                 os.Getenv("AO_OWNER"),
 		BrowserRuntimeToken:   os.Getenv("AO_BROWSER_RUNTIME_TOKEN"),
 		BrowserRuntimeAddress: os.Getenv("AO_BROWSER_RUNTIME_ADDRESS"),
-		OperatorSpawnToken:    os.Getenv("AO_OPERATOR_SPAWN_TOKEN"),
+		OperatorSpawnToken:    s.operatorSpawnToken,
 	}
 	if err := runfile.Write(s.cfg.RunFilePath, info); err != nil {
 		_ = s.listen.Close()

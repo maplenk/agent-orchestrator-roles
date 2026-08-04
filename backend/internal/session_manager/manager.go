@@ -93,6 +93,9 @@ const (
 	// Combined with AO_SESSION_ID (sent as X-AO-Caller-Session-Id), the daemon
 	// enforces RoleExecutionPolicy.CanSpawn. Not spoofable via AO_SESSION_ID alone.
 	EnvSpawnCapability = "AO_SPAWN_CAPABILITY"
+	// EnvOperatorSpawnToken must never reach session processes (tmux/ConPTY
+	// inherit os.Environ). Cleared explicitly in runtimeEnv.
+	EnvOperatorSpawnToken = "AO_OPERATOR_SPAWN_TOKEN" //nolint:gosec // env name, not a secret
 )
 
 // hookBinaryName is the executable name the workspace hook commands invoke:
@@ -2764,8 +2767,10 @@ func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issu
 	if spawnToken != "" {
 		env[EnvSpawnCapability] = spawnToken
 	}
-	// Never inherit operator or browser runtime secrets into session processes.
+	// Never inherit operator or browser runtime secrets into session processes
+	// (tmux exec and Windows ConPTY merge os.Environ() into children).
 	env[EnvBrowserRuntimeToken] = ""
+	env[EnvOperatorSpawnToken] = ""
 	path, err := HookPATH(m.executable, os.Getenv, projectEnv)
 	if err != nil {
 		m.logger.Warn("session PATH not pinned to the daemon binary; `ao hooks` callbacks may resolve to a different ao and activity tracking will stall",

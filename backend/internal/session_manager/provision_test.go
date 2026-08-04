@@ -48,6 +48,32 @@ func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 	if env[EnvSpawnCapability] != "spawn-cap-plain" {
 		t.Fatalf("%s = %q", EnvSpawnCapability, env[EnvSpawnCapability])
 	}
+	if env[EnvOperatorSpawnToken] != "" {
+		t.Fatalf("%s must be cleared for session runtimes, got %q", EnvOperatorSpawnToken, env[EnvOperatorSpawnToken])
+	}
+	if env[EnvBrowserRuntimeToken] != "" {
+		t.Fatalf("%s must be cleared", EnvBrowserRuntimeToken)
+	}
+}
+
+func TestRuntimeEnvClearsAmbientOperatorToken(t *testing.T) {
+	// Even if the parent env would have carried an operator secret, runtimeEnv
+	// must blank it so tmux/ConPTY children cannot inherit it.
+	t.Setenv(EnvOperatorSpawnToken, "should-not-leak")
+	manager := &Manager{
+		dataDir:    "/data",
+		executable: func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
+		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	env := manager.runtimeEnv("mer-1", "mer", "", map[string]string{
+		EnvOperatorSpawnToken: "project-leak",
+	}, "cap")
+	if env[EnvOperatorSpawnToken] != "" {
+		t.Fatalf("operator token leaked into session env: %q", env[EnvOperatorSpawnToken])
+	}
+	if env[EnvSpawnCapability] != "cap" {
+		t.Fatalf("spawn cap = %q", env[EnvSpawnCapability])
+	}
 }
 
 func TestHookPATH(t *testing.T) {

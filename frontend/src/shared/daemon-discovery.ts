@@ -76,6 +76,12 @@ export type RunFileInfo = {
 	owner?: string;
 	browserRuntimeToken?: string;
 	browserRuntimeAddress?: string;
+	/**
+	 * Daemon-launch operator spawn credential for privileged desktop API calls.
+	 * Main process only — not for session/agent use. CLI must not auto-load this
+	 * from the runfile (worker unset-env escalation).
+	 */
+	operatorSpawnToken?: string;
 };
 
 /** Parse running.json contents. Returns null for malformed JSON or an invalid port. */
@@ -87,14 +93,16 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		return null;
 	}
 	if (typeof raw !== "object" || raw === null) return null;
-	const { pid, port, startedAt, owner, browserRuntimeToken, browserRuntimeAddress } = raw as {
-		pid?: unknown;
-		port?: unknown;
-		startedAt?: unknown;
-		owner?: unknown;
-		browserRuntimeToken?: unknown;
-		browserRuntimeAddress?: unknown;
-	};
+	const { pid, port, startedAt, owner, browserRuntimeToken, browserRuntimeAddress, operatorSpawnToken } =
+		raw as {
+			pid?: unknown;
+			port?: unknown;
+			startedAt?: unknown;
+			owner?: unknown;
+			browserRuntimeToken?: unknown;
+			browserRuntimeAddress?: unknown;
+			operatorSpawnToken?: unknown;
+		};
 	if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) return null;
 	const startedAtMs = typeof startedAt === "string" ? Date.parse(startedAt) : NaN;
 	return {
@@ -104,6 +112,7 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		owner: typeof owner === "string" ? owner : undefined,
 		browserRuntimeToken: typeof browserRuntimeToken === "string" ? browserRuntimeToken : undefined,
 		browserRuntimeAddress: typeof browserRuntimeAddress === "string" ? browserRuntimeAddress : undefined,
+		operatorSpawnToken: typeof operatorSpawnToken === "string" ? operatorSpawnToken : undefined,
 	};
 }
 
