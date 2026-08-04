@@ -32,16 +32,16 @@ func For(h domain.AgentHarness) Caps {
 		// See docs/roles/READ_ONLY_CONTRACT.md and Claude permissions docs.
 		return Caps{
 			SpawnSupported:   true,
-			SwitchSupported:  true,
+			SwitchSupported:  false, // promote only after ownership fence + dogfood
 			ReadOnlyEnforced: false,
-			Notes:            "spawn+switch; read_only_enforced=false until dontAsk/OS-sandbox RO path lands",
+			Notes:            "spawn supported; switch_supported=false until Phase 2A gates; RO deferred",
 		}
 	case domain.HarnessCodex:
 		return Caps{
 			SpawnSupported:   true,
-			SwitchSupported:  true,
+			SwitchSupported:  false, // promote only after ownership fence + dogfood
 			ReadOnlyEnforced: true,
-			Notes:            "RO via --sandbox read-only; switch pair with claude-code",
+			Notes:            "RO via --sandbox read-only; switch_supported=false until Phase 2A gates",
 		}
 	case domain.HarnessPi:
 		return Caps{

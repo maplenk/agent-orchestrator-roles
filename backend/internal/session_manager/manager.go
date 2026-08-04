@@ -22,6 +22,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 	"github.com/aoagents/agent-orchestrator/backend/internal/roles/readonly"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
@@ -70,6 +71,9 @@ var (
 	// ErrSwitchNothingToRecover means no incomplete post_stop saga exists for
 	// the session (already acked, never reached post_stop, or not a switch).
 	ErrSwitchNothingToRecover = errors.New("session: no incomplete post_stop switch to recover")
+	// ErrSwitchUncertain means destroy/probe could not establish source/target
+	// runtime liveness; recovery must not invent a second live generation.
+	ErrSwitchUncertain = errors.New("session: switch runtime state uncertain")
 	// ErrResumeInProgress prevents concurrent resume requests from replacing the
 	// same runtime twice.
 	ErrResumeInProgress = errors.New("session: agent resume already in progress")
@@ -248,10 +252,13 @@ type Manager struct {
 	// workspace hook commands resolve back to this daemon. Tests inject a stub.
 	executable  func() (string, error)
 	newLaunchID func() string
-	resumeMu    sync.Mutex
+	// ownershipMu protects both resuming and switching maps (single lock order).
+	ownershipMu sync.Mutex
 	resuming    map[domain.SessionID]struct{}
-	switchMu    sync.Mutex
 	switching   map[domain.SessionID]struct{}
+	// switchCapsOverride is tests-only: when set, SwitchWorker uses it instead
+	// of capabilities.For so incomplete production matrix can still be unit-tested.
+	switchCapsOverride func(domain.AgentHarness) capabilities.Caps
 	// sendConfirm bounds the best-effort post-send confirmation that the session
 	// actually became active (the agent accepted the prompt). New fills in the
 	// sendConfirm* defaults; tests in this package shrink the timings directly.
@@ -1230,7 +1237,7 @@ func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (Res
 }
 
 func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo) (RestoreResult, error) {
-	return m.relaunchSession(ctx, "restore", rec, project, ws, nil)
+	return m.relaunchSession(ctx, "restore", rec, project, ws, nil /* restart */, relaunchOpts{})
 }
 
 // ResumeAgentWithMode replaces an exited agent inside its still-live session.
@@ -1272,20 +1279,16 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 		ProjectID: rec.ProjectID,
 	}
 	handle := ports.RuntimeHandle{ID: meta.RuntimeHandleID}
-	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle)
+	return m.relaunchSession(ctx, "resume agent", rec, project, ws, &handle, relaunchOpts{})
 }
 
 func (m *Manager) beginAgentResume(id domain.SessionID) bool {
-	m.resumeMu.Lock()
-	defer m.resumeMu.Unlock()
+	m.ownershipMu.Lock()
+	defer m.ownershipMu.Unlock()
 	if _, exists := m.resuming[id]; exists {
 		return false
 	}
-	// Refuse resume while switch holds the worktree/runtime.
-	m.switchMu.Lock()
-	_, switching := m.switching[id]
-	m.switchMu.Unlock()
-	if switching {
+	if _, switching := m.switching[id]; switching {
 		return false
 	}
 	m.resuming[id] = struct{}{}
@@ -1293,15 +1296,31 @@ func (m *Manager) beginAgentResume(id domain.SessionID) bool {
 }
 
 func (m *Manager) endAgentResume(id domain.SessionID) {
-	m.resumeMu.Lock()
+	m.ownershipMu.Lock()
 	delete(m.resuming, id)
-	m.resumeMu.Unlock()
+	m.ownershipMu.Unlock()
 }
 
-func (m *Manager) relaunchSession(ctx context.Context, operation string, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, restartHandle *ports.RuntimeHandle) (RestoreResult, error) {
-	agent, ok := m.agents.Agent(rec.Harness)
+// relaunchOpts optional overrides for switch launches (pending target harness +
+// forced generation id matching the lifecycle ledger).
+type relaunchOpts struct {
+	LaunchHarness domain.AgentHarness
+	ForceLaunchID string
+	RoleModel     string // when set, overrides agent config model for this launch
+}
+
+func (m *Manager) relaunchSession(ctx context.Context, operation string, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, restartHandle *ports.RuntimeHandle, opts ...relaunchOpts) (RestoreResult, error) {
+	var o relaunchOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	launchHarness := rec.Harness
+	if o.LaunchHarness != "" {
+		launchHarness = o.LaunchHarness
+	}
+	agent, ok := m.agents.Agent(launchHarness)
 	if !ok {
-		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, rec.Harness)
+		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, launchHarness)
 	}
 	// Refresh live standing instructions, but restore the role body exclusively
 	// from the immutable template artifact pinned on the session.
@@ -1309,7 +1328,7 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt: %w", operation, rec.ID, err)
 	}
-	systemPromptFile, err := m.prepareSystemPromptFile(rec.ID, rec.Harness, systemPrompt)
+	systemPromptFile, err := m.prepareSystemPromptFile(rec.ID, launchHarness, systemPrompt)
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt file: %w", operation, rec.ID, err)
@@ -1318,6 +1337,10 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	// Restore re-applies the host-resolved role model over the current project
 	// config, matching fresh spawn while preserving the pinned role target.
 	agentConfig := restoreAgentConfig(rec, project)
+	if o.RoleModel != "" || (o.LaunchHarness != "" && o.LaunchHarness != rec.Harness) {
+		// Cross-harness: apply explicit target model (may be empty = provider default).
+		agentConfig.Model = o.RoleModel
+	}
 	// Rotate spawn capability on every relaunch so a terminated/killed session's
 	// prior token cannot be reused after hash is rewritten.
 	spawnToken, spawnHash, err := spawncred.Issue()
@@ -1334,7 +1357,8 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
 	}
-	argv, delivery, mode, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Kind, rec.Harness, m.dataDir, rec.Metadata.Role.ResolvedPermissions)
+	// For switch pending target, RO policy still follows pinned role permissions.
+	argv, delivery, mode, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Kind, launchHarness, m.dataDir, rec.Metadata.Role.ResolvedPermissions)
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
@@ -1344,7 +1368,7 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
 	}
 	m.augmentRuntimePATHForLaunchBinary(ctx, env, argv)
-	argv, launchID, err := m.superviseAgentProcess(agent, rec.ID, env, argv)
+	argv, launchID, err := m.superviseAgentProcess(agent, rec.ID, env, argv, o.ForceLaunchID)
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: supervisor: %w", operation, rec.ID, err)
@@ -3470,17 +3494,34 @@ func (m *Manager) validateRuntimePrerequisites() error {
 	return nil
 }
 
-func (m *Manager) superviseAgentProcess(agent ports.Agent, id domain.SessionID, env map[string]string, argv []string) ([]string, string, error) {
+func (m *Manager) superviseAgentProcess(agent ports.Agent, id domain.SessionID, env map[string]string, argv []string, forceLaunchID ...string) ([]string, string, error) {
 	detector, ok := agent.(ports.AgentExitDetector)
 	if !ok || detector.ExitDetectionMode() != ports.AgentExitDetectionSupervisor {
+		// Non-supervised agents still need a stable generation id for switch fencing.
+		launchID := ""
+		if len(forceLaunchID) > 0 {
+			launchID = strings.TrimSpace(forceLaunchID[0])
+		}
+		if launchID == "" {
+			launchID = m.newLaunchID()
+		}
+		if strings.TrimSpace(launchID) == "" {
+			return nil, "", errors.New("generated empty launch id")
+		}
 		delete(env, EnvRuntimeLaunchID)
-		return argv, "", nil
+		return argv, launchID, nil
 	}
 	executable, err := m.executable()
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve AO executable: %w", err)
 	}
-	launchID := m.newLaunchID()
+	launchID := ""
+	if len(forceLaunchID) > 0 {
+		launchID = strings.TrimSpace(forceLaunchID[0])
+	}
+	if launchID == "" {
+		launchID = m.newLaunchID()
+	}
 	if strings.TrimSpace(launchID) == "" {
 		return nil, "", errors.New("generated empty launch id")
 	}

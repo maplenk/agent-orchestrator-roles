@@ -16,7 +16,7 @@ import (
 const getSession = `-- name: GetSession :one
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -26,9 +26,49 @@ SELECT id, project_id, num, issue_id, kind, harness,
 FROM sessions WHERE id = ?
 `
 
-func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (Session, error) {
+type GetSessionRow struct {
+	ID                      domain.SessionID
+	ProjectID               domain.ProjectID
+	Num                     int64
+	IssueID                 domain.IssueID
+	Kind                    domain.SessionKind
+	Harness                 domain.AgentHarness
+	ActivityState           domain.ActivityState
+	ActivityLastAt          time.Time
+	IsTerminated            bool
+	Branch                  string
+	WorkspacePath           string
+	RuntimeHandleID         string
+	AgentSessionID          string
+	Prompt                  string
+	SwitchPendingJson       string
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+	DisplayName             string
+	FirstSignalAt           sql.NullTime
+	PreviewURL              string
+	PreviewRevision         int64
+	CleanupGeneration       int64
+	RuntimeLaunchID         string
+	WorkspaceRepoPath       string
+	TerminateOnPRMerge      bool
+	DiffBaseSha             string
+	DiffBaseRef             string
+	RoleID                  string
+	RoleMapSchemaVersion    int64
+	RoleMapSha256           string
+	RoleConfigRevision      int64
+	TemplateArtifactID      string
+	TemplateSha256          string
+	ResolvedModel           string
+	ResolvedWorkspaceWrites int64
+	ResolvedCanSpawn        int64
+	SpawnCapabilityHash     string
+}
+
+func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
 	row := q.db.QueryRowContext(ctx, getSession, id)
-	var i Session
+	var i GetSessionRow
 	err := row.Scan(
 		&i.ID,
 		&i.ProjectID,
@@ -44,6 +84,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (Session,
 		&i.RuntimeHandleID,
 		&i.AgentSessionID,
 		&i.Prompt,
+		&i.SwitchPendingJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisplayName,
@@ -78,10 +119,10 @@ INSERT INTO sessions (
     resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash, display_name,
     activity_state, activity_last_at, first_signal_at, is_terminated,
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
-    runtime_launch_id, agent_session_id, prompt,
+    runtime_launch_id, agent_session_id, prompt, switch_pending_json,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation,
     created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertSessionParams struct {
@@ -115,6 +156,7 @@ type InsertSessionParams struct {
 	RuntimeLaunchID         string
 	AgentSessionID          string
 	Prompt                  string
+	SwitchPendingJson       string
 	PreviewURL              string
 	PreviewRevision         int64
 	TerminateOnPRMerge      bool
@@ -155,6 +197,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.RuntimeLaunchID,
 		arg.AgentSessionID,
 		arg.Prompt,
+		arg.SwitchPendingJson,
 		arg.PreviewURL,
 		arg.PreviewRevision,
 		arg.TerminateOnPRMerge,
@@ -168,7 +211,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 const listAllSessions = `-- name: ListAllSessions :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -178,15 +221,55 @@ SELECT id, project_id, num, issue_id, kind, harness,
 FROM sessions ORDER BY project_id, num
 `
 
-func (q *Queries) ListAllSessions(ctx context.Context) ([]Session, error) {
+type ListAllSessionsRow struct {
+	ID                      domain.SessionID
+	ProjectID               domain.ProjectID
+	Num                     int64
+	IssueID                 domain.IssueID
+	Kind                    domain.SessionKind
+	Harness                 domain.AgentHarness
+	ActivityState           domain.ActivityState
+	ActivityLastAt          time.Time
+	IsTerminated            bool
+	Branch                  string
+	WorkspacePath           string
+	RuntimeHandleID         string
+	AgentSessionID          string
+	Prompt                  string
+	SwitchPendingJson       string
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+	DisplayName             string
+	FirstSignalAt           sql.NullTime
+	PreviewURL              string
+	PreviewRevision         int64
+	CleanupGeneration       int64
+	RuntimeLaunchID         string
+	WorkspaceRepoPath       string
+	TerminateOnPRMerge      bool
+	DiffBaseSha             string
+	DiffBaseRef             string
+	RoleID                  string
+	RoleMapSchemaVersion    int64
+	RoleMapSha256           string
+	RoleConfigRevision      int64
+	TemplateArtifactID      string
+	TemplateSha256          string
+	ResolvedModel           string
+	ResolvedWorkspaceWrites int64
+	ResolvedCanSpawn        int64
+	SpawnCapabilityHash     string
+}
+
+func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listAllSessions)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Session{}
+	items := []ListAllSessionsRow{}
 	for rows.Next() {
-		var i Session
+		var i ListAllSessionsRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ProjectID,
@@ -202,6 +285,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]Session, error) {
 			&i.RuntimeHandleID,
 			&i.AgentSessionID,
 			&i.Prompt,
+			&i.SwitchPendingJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DisplayName,
@@ -241,7 +325,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]Session, error) {
 const listSessionsByProject = `-- name: ListSessionsByProject :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -251,15 +335,55 @@ SELECT id, project_id, num, issue_id, kind, harness,
 FROM sessions WHERE project_id = ? ORDER BY num
 `
 
-func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.ProjectID) ([]Session, error) {
+type ListSessionsByProjectRow struct {
+	ID                      domain.SessionID
+	ProjectID               domain.ProjectID
+	Num                     int64
+	IssueID                 domain.IssueID
+	Kind                    domain.SessionKind
+	Harness                 domain.AgentHarness
+	ActivityState           domain.ActivityState
+	ActivityLastAt          time.Time
+	IsTerminated            bool
+	Branch                  string
+	WorkspacePath           string
+	RuntimeHandleID         string
+	AgentSessionID          string
+	Prompt                  string
+	SwitchPendingJson       string
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+	DisplayName             string
+	FirstSignalAt           sql.NullTime
+	PreviewURL              string
+	PreviewRevision         int64
+	CleanupGeneration       int64
+	RuntimeLaunchID         string
+	WorkspaceRepoPath       string
+	TerminateOnPRMerge      bool
+	DiffBaseSha             string
+	DiffBaseRef             string
+	RoleID                  string
+	RoleMapSchemaVersion    int64
+	RoleMapSha256           string
+	RoleConfigRevision      int64
+	TemplateArtifactID      string
+	TemplateSha256          string
+	ResolvedModel           string
+	ResolvedWorkspaceWrites int64
+	ResolvedCanSpawn        int64
+	SpawnCapabilityHash     string
+}
+
+func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.ProjectID) ([]ListSessionsByProjectRow, error) {
 	rows, err := q.db.QueryContext(ctx, listSessionsByProject, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []Session{}
+	items := []ListSessionsByProjectRow{}
 	for rows.Next() {
-		var i Session
+		var i ListSessionsByProjectRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.ProjectID,
@@ -275,6 +399,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 			&i.RuntimeHandleID,
 			&i.AgentSessionID,
 			&i.Prompt,
+			&i.SwitchPendingJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DisplayName,
@@ -411,7 +536,7 @@ UPDATE sessions SET
     resolved_workspace_writes = ?, resolved_can_spawn = ?, spawn_capability_hash = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
-    runtime_launch_id = ?, agent_session_id = ?, prompt = ?,
+    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, updated_at = ?
 WHERE id = ?
@@ -445,6 +570,7 @@ type UpdateSessionParams struct {
 	RuntimeLaunchID         string
 	AgentSessionID          string
 	Prompt                  string
+	SwitchPendingJson       string
 	PreviewURL              string
 	PreviewRevision         int64
 	TerminateOnPRMerge      bool
@@ -482,6 +608,7 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.RuntimeLaunchID,
 		arg.AgentSessionID,
 		arg.Prompt,
+		arg.SwitchPendingJson,
 		arg.PreviewURL,
 		arg.PreviewRevision,
 		arg.TerminateOnPRMerge,

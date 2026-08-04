@@ -1,51 +1,29 @@
-# Phase 2A — worker switch (execution notes)
+# Phase 2A — worker switch (status after review fixes)
 
-## Landed
+## Closed against P1 review (this pass)
 
-| Slice | Status | Detail |
-|-------|--------|--------|
-| **2A.0** | Done | SemanticHandoff / ObservedWorkspace / Compile / migration 0044 ledger |
-| **2A.1** | Done | Switch fence (`ErrSwitchInProgress`), durable phases → ledger |
-| **2A.2** | Done | `handoff.ObserveWorkspace` (git branch/HEAD/porcelain) |
-| **2A.3** | Done | `SwitchWorker` Claude↔Codex (destroy runtime, keep worktree, relaunch) |
-| **2A.4** | Done | `FreshConversation` same-harness via switch saga |
-| Caps | Done | Claude + Codex `switch_supported=true` (limit still false) |
-| **2A.5** | Done | Crash recovery from `post_stop` + boot `Reconcile` integration |
+| Finding | Fix |
+|---------|-----|
+| Ledger gen ≠ runtime gen | Single `ForceLaunchID` through `superviseAgentProcess` / relaunch; assert equality |
+| Promote harness before ack | Durable `SwitchPending` (0045 `switch_pending_json`); promote only after durable `target_ack` |
+| Recovery double-launch | Live wrong-gen → `ErrSwitchUncertain`; matching live gen → ack only |
+| Mutex deadlock | Single `ownershipMu` for switch+resume |
+| Destroy error ≠ source usable | Probe `IsAlive` after Destroy; dead → post_stop even if Destroy erred |
+| Source model leak | Cross-harness empty TargetModel → clear (provider default) |
+| switch_supported premature | Claude/Codex back to **false**; tests use `switchCapsOverride` |
+| Handoff stacking | Always `stripCompiledHandoff` before compose; store `OriginalTask` |
+| Stable ledger ids | `{session}:{gen}:{phase}` with skip-if-exists |
+| Input gate | sessionguard suppresses when `SwitchPending` set |
 
-## API surface (session_manager)
+## API (manager only — not production-capable until switch_supported)
 
 ```go
-SwitchWorker(ctx, SwitchRequest) (SwitchResult, error)
-FreshConversation(ctx, sessionID, SemanticHandoffV1) (SwitchResult, error)
-RecoverSwitchFromPostStop(ctx, sessionID) (SwitchResult, error)
+SwitchWorker / FreshConversation / RecoverSwitchFromPostStop
 ```
 
-Saga phases written to `lifecycle_ledger`:
-`requested` → `pre_stop` → `post_stop` → `target_ack` (or `failed`)
+## Still open before accept / API / CLI
 
-| Failure mode | Behavior |
-|--------------|----------|
-| Pre-stop (destroy fails) | Source usable; phase `failed` |
-| Post-stop (relaunch fails) | Handoff in ledger; `ErrSwitchPostStop`; recover via `RecoverSwitchFromPostStop` |
-| Daemon crash after post_stop | Boot `Reconcile` re-drives before live teardown pass |
-
-### Recovery rules
-
-- Newest `post_stop` generation without `target_ack` is recoverable (a later `failed` does not clear it).
-- Payload JSON supplies compiled handoff; target harness/model come from the ledger row.
-- `reconcileLive` refuses to terminate sessions with incomplete post_stop (defense in depth).
-- Idempotent: second recover returns `ErrSwitchNothingToRecover`.
-
-## Still open
-
-1. HTTP/CLI surface for switch + fresh + recover  
-2. Input ownership fence in sessionguard/lifecycle during switch  
-3. Service-layer wiring + API errors (409/400)  
-4. Real dogfood + review pack  
-5. Phase 2B orchestrator ownership transfer  
-
-## Non-goals
-
-- Orchestrator switch (2B)  
-- Synara ports  
-- Full chat ledger  
+1. Broader adversarial + dogfood Claude↔Codex
+2. Promote `switch_supported` only after dogfood
+3. Service/API/CLI with host role-map authorized targets (no free-form harness exposure)
+4. Pre_stop uncertain recovery paths beyond post_stop (partial)

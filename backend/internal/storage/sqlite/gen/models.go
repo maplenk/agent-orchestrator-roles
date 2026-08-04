@@ -218,6 +218,7 @@ type Session struct {
 	ResolvedWorkspaceWrites int64
 	ResolvedCanSpawn        int64
 	SpawnCapabilityHash     string
+	SwitchPendingJson       string
 }
 
 type SessionCleanupFact struct {

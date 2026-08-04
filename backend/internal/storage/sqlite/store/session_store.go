@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -175,7 +177,7 @@ func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.Ses
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session %s: %w", id, err)
 	}
-	return rowToRecord(row), true, nil
+	return rowToRecord(sessionFromGetRow(row)), true, nil
 }
 
 // ListSessions returns every session in a project, ordered by num.
@@ -184,7 +186,11 @@ func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]d
 	if err != nil {
 		return nil, fmt.Errorf("list sessions for %s: %w", project, err)
 	}
-	return mapSessionRows(rows), nil
+	out := make([]domain.SessionRecord, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, rowToRecord(sessionFromProjectListRow(r)))
+	}
+	return out, nil
 }
 
 // ListAllSessions returns every session across all projects.
@@ -193,15 +199,71 @@ func (s *Store) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, er
 	if err != nil {
 		return nil, fmt.Errorf("list all sessions: %w", err)
 	}
-	return mapSessionRows(rows), nil
-}
-
-func mapSessionRows(rows []gen.Session) []domain.SessionRecord {
 	out := make([]domain.SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, rowToRecord(r))
+		out = append(out, rowToRecord(sessionFromAllListRow(r)))
 	}
-	return out
+	return out, nil
+}
+
+func sessionFromGetRow(row gen.GetSessionRow) gen.Session {
+	return gen.Session{
+		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
+		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
+		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
+		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
+		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
+		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
+		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
+		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
+		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
+		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
+		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
+		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
+		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
+		SpawnCapabilityHash: row.SpawnCapabilityHash,
+	}
+}
+
+func sessionFromProjectListRow(row gen.ListSessionsByProjectRow) gen.Session {
+	return gen.Session{
+		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
+		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
+		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
+		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
+		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
+		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
+		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
+		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
+		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
+		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
+		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
+		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
+		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
+		SpawnCapabilityHash: row.SpawnCapabilityHash,
+	}
+}
+
+func sessionFromAllListRow(row gen.ListAllSessionsRow) gen.Session {
+	return gen.Session{
+		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
+		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
+		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
+		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
+		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
+		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
+		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
+		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
+		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
+		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
+		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
+		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
+		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
+		SpawnCapabilityHash: row.SpawnCapabilityHash,
+	}
 }
 
 func rowToRecord(row gen.Session) domain.SessionRecord {
@@ -225,24 +287,48 @@ func rowToRecord(row gen.Session) domain.SessionRecord {
 		IsTerminated:       row.IsTerminated,
 		TerminateOnPRMerge: row.TerminateOnPRMerge,
 		Metadata: domain.SessionMetadata{
-			Branch:            row.Branch,
-			WorkspacePath:     row.WorkspacePath,
-			WorkspaceRepoPath: row.WorkspaceRepoPath,
-			DiffBaseSHA:       row.DiffBaseSha,
-			DiffBaseRef:       row.DiffBaseRef,
-			RuntimeHandleID:   row.RuntimeHandleID,
-			RuntimeLaunchID:   row.RuntimeLaunchID,
-			AgentSessionID:    row.AgentSessionID,
-			Prompt:            row.Prompt,
+			Branch:              row.Branch,
+			WorkspacePath:       row.WorkspacePath,
+			WorkspaceRepoPath:   row.WorkspaceRepoPath,
+			DiffBaseSHA:         row.DiffBaseSha,
+			DiffBaseRef:         row.DiffBaseRef,
+			RuntimeHandleID:     row.RuntimeHandleID,
+			RuntimeLaunchID:     row.RuntimeLaunchID,
+			AgentSessionID:      row.AgentSessionID,
+			Prompt:              row.Prompt,
 			PreviewURL:          row.PreviewURL,
 			PreviewRevision:     row.PreviewRevision,
 			Role:                role,
+			SwitchPending:       decodeSwitchPending(row.SwitchPendingJson),
 			SpawnCapabilityHash: row.SpawnCapabilityHash,
 		},
 		CleanupGeneration: row.CleanupGeneration,
 		CreatedAt:         row.CreatedAt,
 		UpdatedAt:         row.UpdatedAt,
 	}
+}
+
+func encodeSwitchPending(p *domain.SwitchPending) string {
+	if p == nil || strings.TrimSpace(p.GenerationID) == "" {
+		return ""
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return ""
+	}
+	return string(b)
+}
+
+func decodeSwitchPending(raw string) *domain.SwitchPending {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" || raw == "null" {
+		return nil
+	}
+	var p domain.SwitchPending
+	if err := json.Unmarshal([]byte(raw), &p); err != nil || strings.TrimSpace(p.GenerationID) == "" {
+		return nil
+	}
+	return &p
 }
 
 func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {
@@ -280,6 +366,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		RuntimeLaunchID:         rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:          rec.Metadata.AgentSessionID,
 		Prompt:                  rec.Metadata.Prompt,
+		SwitchPendingJson:       encodeSwitchPending(rec.Metadata.SwitchPending),
 		PreviewURL:              rec.Metadata.PreviewURL,
 		PreviewRevision:         rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge:      rec.TerminateOnPRMerge,
@@ -322,6 +409,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		RuntimeLaunchID:         rec.Metadata.RuntimeLaunchID,
 		AgentSessionID:          rec.Metadata.AgentSessionID,
 		Prompt:                  rec.Metadata.Prompt,
+		SwitchPendingJson:       encodeSwitchPending(rec.Metadata.SwitchPending),
 		PreviewURL:              rec.Metadata.PreviewURL,
 		PreviewRevision:         rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge:      rec.TerminateOnPRMerge,

@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -53,6 +54,9 @@ const (
 	// SuppressedBusy means the session is mid-turn on a harness that cannot
 	// safely steer an active turn (NudgeCoordination only).
 	SuppressedBusy
+	// SuppressedSwitchPending means a worker switch/fresh has stopped the source
+	// and not yet durable target_ack; no generation owns input for pane writes.
+	SuppressedSwitchPending
 )
 
 // String names the outcome for logs.
@@ -70,6 +74,8 @@ func (o Outcome) String() string {
 		return "suppressed_awaiting_user"
 	case SuppressedBusy:
 		return "suppressed_busy"
+	case SuppressedSwitchPending:
+		return "suppressed_switch_pending"
 	default:
 		return "suppressed_unknown"
 	}
@@ -169,6 +175,11 @@ func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, refus
 	if rec.IsTerminated {
 		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "terminated")
 		return SuppressedTerminated, nil
+	}
+	if rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
+		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "switch_pending",
+			"generation", rec.Metadata.SwitchPending.GenerationID)
+		return SuppressedSwitchPending, nil
 	}
 	if rec.Activity.State == domain.ActivityExited {
 		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "agent_exited")

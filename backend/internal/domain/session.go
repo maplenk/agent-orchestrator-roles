@@ -48,10 +48,31 @@ type SessionMetadata struct {
 	// until then it is carried in-memory for the spawn path and tests.
 	Role SessionRoleBinding `json:"role,omitempty"`
 
+	// SwitchPending is set while a worker switch/fresh saga has stopped the
+	// source and not yet durable target_ack. Current Harness / Role.Resolved*
+	// remain the SOURCE until ack promotes the pending target. Non-nil pending
+	// gates session input (sessionguard).
+	SwitchPending *SwitchPending `json:"switchPending,omitempty"`
+
 	// SpawnCapabilityHash is SHA-256 hex of the random per-session spawn
 	// capability. The plaintext token is never stored — only injected as
 	// AO_SPAWN_CAPABILITY for the owning process.
 	SpawnCapabilityHash string `json:"-"`
+}
+
+// SwitchPending is the durable in-flight target pin for a worker switch/fresh.
+// Promoted into Harness / Role only after lifecycle target_ack is persisted.
+type SwitchPending struct {
+	GenerationID string             `json:"generationId"`
+	Kind         LifecycleLedgerKind `json:"kind"`
+	FromHarness  AgentHarness       `json:"fromHarness,omitempty"`
+	ToHarness    AgentHarness       `json:"toHarness"`
+	FromModel    string             `json:"fromModel,omitempty"`
+	ToModel      string             `json:"toModel,omitempty"`
+	// OriginalTask is the immutable user task prompt without compiled handoffs.
+	OriginalTask string `json:"originalTask,omitempty"`
+	// RoleID preserved across switch (never changes).
+	RoleID string `json:"roleId,omitempty"`
 }
 
 // SessionRecord is the persistence shape. It intentionally stores only durable
