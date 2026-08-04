@@ -90,5 +90,8 @@ Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Override only; **pr
 
 1. ~~Manager-level dogfood checklist~~ — **recorded in PHASE2A_DOGFOOD.md**
 2. ~~Service/API/CLI role-map targets + auth~~ — **accepted** @ `83f7abfb`
-3. ~~Live Claude↔Codex + crash/restart dogfood~~ — **recorded in PHASE2A_LIVE_DOGFOOD.md** (local-only `AO_DOGFOOD_SWITCH`, non-committable patch; production caps still false)
-4. Promote `switch_supported` in a **separate** final change (only after live log acceptance)
+3. ~~Target-authoritative switch prompt~~ — **done** @ `a3bc32be` (live footer `Harness: codex`)
+4. ~~Live Claude↔Codex + crash protocol~~ — **evidence** in PHASE2A_LIVE_DOGFOOD.md (offline inject); **residual:** unexplained ledger `failed`→`target_ack`
+5. Promote `switch_supported` in a **separate** final change — only after residual crash-ledger provenance accepted
+
+Living plan status: `REMAINING_PLAN.md` (keep in sync on each phase land).
