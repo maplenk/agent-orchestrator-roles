@@ -118,9 +118,60 @@ func TestSwitch_ManagedWorkerCanSpawnFalseForbidden(t *testing.T) {
 	}
 }
 
-func TestSwitch_ManagedOrchestratorCanSpawnAllowed(t *testing.T) {
+func TestSwitch_ManagedOrchestratorCanSpawnAllowedSameProject(t *testing.T) {
+	svc, plain := newSpawnGateSvcWithToken()
+	// Caller and target share project "ao".
+	s := svc.sessions["ao-1"]
+	s.ProjectID = "ao"
+	s.Metadata.Role = domain.SessionRoleBinding{
+		RoleID: "orchestrator",
+		ResolvedPermissions: domain.RoleExecutionPolicy{
+			WorkspaceWrites: false,
+			CanSpawn:        true,
+		},
+	}
+	svc.sessions["ao-1"] = s
+	svc.sessions["ao-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "ao-worker", ProjectID: "ao", Kind: domain.KindWorker}}
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, _ := doSwitchPOST(t, srv, "/api/v1/sessions/ao-worker/fresh-conversation", `{"objective":"x"}`, map[string]string{
+		"X-AO-Caller-Session-Id": "ao-1",
+		"X-AO-Spawn-Capability":  plain,
+	})
+	if code != http.StatusOK {
+		t.Fatalf("status=%d", code)
+	}
+	if svc.freshCalls != 1 {
+		t.Fatalf("freshCalls=%d", svc.freshCalls)
+	}
+}
+
+func TestSwitch_RolelessCapabilityForbidden(t *testing.T) {
+	// Valid capability but no durable role pin must not pass canSpawn gate.
 	svc, plain := newSpawnGateSvcWithToken()
 	s := svc.sessions["ao-1"]
+	s.ProjectID = "ao"
+	s.Metadata.Role = domain.SessionRoleBinding{} // roleless
+	// Capability hash already set by Issue() in newSpawnGateSvcWithToken.
+	svc.sessions["ao-1"] = s
+	svc.sessions["ao-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "ao-worker", ProjectID: "ao", Kind: domain.KindWorker}}
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, env := doSwitchPOST(t, srv, "/api/v1/sessions/ao-worker/switch", `{"targetHarness":"codex"}`, map[string]string{
+		"X-AO-Caller-Session-Id": "ao-1",
+		"X-AO-Spawn-Capability":  plain,
+	})
+	if code != http.StatusForbidden || env["code"] != "SWITCH_FORBIDDEN" {
+		t.Fatalf("status=%d env=%v want SWITCH_FORBIDDEN", code, env)
+	}
+	if svc.switchCalls != 0 {
+		t.Fatal("must not switch")
+	}
+}
+
+func TestSwitch_SessionPrincipalProjectScoped(t *testing.T) {
+	// canSpawn orchestrator in project ao must not switch workers in project mer.
+	svc, plain := newSpawnGateSvcWithToken()
+	s := svc.sessions["ao-1"]
+	s.ProjectID = "ao"
 	s.Metadata.Role = domain.SessionRoleBinding{
 		RoleID: "orchestrator",
 		ResolvedPermissions: domain.RoleExecutionPolicy{
@@ -131,15 +182,31 @@ func TestSwitch_ManagedOrchestratorCanSpawnAllowed(t *testing.T) {
 	svc.sessions["ao-1"] = s
 	svc.sessions["mer-1"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}}
 	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
-	code, _ := doSwitchPOST(t, srv, "/api/v1/sessions/mer-1/fresh-conversation", `{"objective":"x"}`, map[string]string{
+	code, env := doSwitchPOST(t, srv, "/api/v1/sessions/mer-1/switch", `{"targetHarness":"codex"}`, map[string]string{
 		"X-AO-Caller-Session-Id": "ao-1",
 		"X-AO-Spawn-Capability":  plain,
 	})
-	if code != http.StatusOK {
-		t.Fatalf("status=%d", code)
+	if code != http.StatusForbidden || env["code"] != "SWITCH_PROJECT_MISMATCH" {
+		t.Fatalf("status=%d env=%v want SWITCH_PROJECT_MISMATCH", code, env)
 	}
-	if svc.freshCalls != 1 {
-		t.Fatalf("freshCalls=%d", svc.freshCalls)
+	if svc.switchCalls != 0 {
+		t.Fatal("must not switch cross-project")
+	}
+}
+
+func TestSwitch_OperatorCrossProjectAllowed(t *testing.T) {
+	// Operator remains daemon-global (may switch any project).
+	svc, _ := newSpawnGateSvcWithToken()
+	svc.sessions["mer-1"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker}}
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, _ := doSwitchPOST(t, srv, "/api/v1/sessions/mer-1/switch", `{"targetHarness":"codex"}`, map[string]string{
+		"X-AO-Operator-Spawn-Token": "op-secret",
+	})
+	if code != http.StatusOK {
+		t.Fatalf("operator cross-project status=%d", code)
+	}
+	if svc.switchCalls != 1 {
+		t.Fatalf("switchCalls=%d", svc.switchCalls)
 	}
 }
 

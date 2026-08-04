@@ -80,7 +80,7 @@ Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Override only; **pr
 | Surface | Detail |
 |---------|--------|
 | Service | Exact `(harness, model)` via `ResolveAuthorizedSwitchModel`; ambiguous omitted model → `TARGET_MODEL_REQUIRED` |
-| HTTP | `POST …/switch`, `…/fresh-conversation` — **operator / LAN / canSpawn session auth required** (headerless 403) |
+| HTTP | `POST …/switch`, `…/fresh-conversation` — operator/LAN global; session principals need role pin + canSpawn + **same project** |
 | CLI | `ao session switch|fresh` attach `spawnCallerHeaders()` (managed-session no-upgrade) |
 | Desktop | `applyOperatorSpawnHeaders` covers switch/fresh paths |
 | Errors | `SWITCH_AUTH_REQUIRED`, `SWITCH_TARGET_UNAUTHORIZED`, `TARGET_MODEL_REQUIRED`, `SWITCH_NOT_SUPPORTED` |

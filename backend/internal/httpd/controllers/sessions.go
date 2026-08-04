@@ -1075,12 +1075,13 @@ func (c *SessionsController) freshConversation(w http.ResponseWriter, r *http.Re
 // authorizeCallerSwitch gates destructive switch/fresh routes.
 //
 // Trusted callers (same family as spawn, different codes):
-//  1. LAN password-authenticated request (mobile operator context), or
-//  2. Daemon operator token (desktop/CLI; never auto-read by managed-session CLI), or
-//  3. Live session with valid spawn capability and canSpawn (orchestrator path).
+//  1. LAN password-authenticated request (mobile operator context) — global, or
+//  2. Daemon operator token (desktop/CLI; never auto-read by managed-session CLI) — global, or
+//  3. Live session with durable role pin, canSpawn=true, valid spawn capability,
+//     and same project as the target session (not daemon-global).
 //
-// Headerless loopback is not trusted. Managed workers without canSpawn cannot
-// elevate via runfile operator token (CLI no-upgrade rule).
+// Headerless loopback is not trusted. Roleless or canSpawn=false sessions cannot
+// switch. Managed workers cannot elevate via runfile operator token (CLI no-upgrade).
 func (c *SessionsController) authorizeCallerSwitch(w http.ResponseWriter, r *http.Request) bool {
 	if authctx.IsLANAuthenticated(r.Context()) {
 		return true
@@ -1122,9 +1123,28 @@ func (c *SessionsController) authorizeCallerSwitch(w http.ResponseWriter, r *htt
 		return false
 	}
 	role := sess.Metadata.Role
-	if strings.TrimSpace(role.RoleID) != "" && !role.ResolvedPermissions.CanSpawn {
+	// Require durable role pin + canSpawn; roleless sessions must not pass.
+	if strings.TrimSpace(role.RoleID) == "" || !role.ResolvedPermissions.CanSpawn {
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_FORBIDDEN",
-			"Calling session role does not allow switch (canSpawn=false)", nil)
+			"Calling session must have a durable role pin with canSpawn=true", nil)
+		return false
+	}
+
+	// Session principals are project-scoped; operator/LAN remain global.
+	targetID := sessionID(r)
+	if targetID == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "SESSION_ID_REQUIRED",
+			"Session id is required", nil)
+		return false
+	}
+	target, err := c.Svc.Get(r.Context(), targetID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if sess.ProjectID != target.ProjectID {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_PROJECT_MISMATCH",
+			"Session callers may only switch workers in their own project", nil)
 		return false
 	}
 	return true
