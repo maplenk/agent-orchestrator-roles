@@ -191,6 +191,11 @@ type Store interface {
 	CreateSession(ctx context.Context, rec domain.SessionRecord) (domain.SessionRecord, error)
 	UpdateSession(ctx context.Context, rec domain.SessionRecord) error
 	GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error)
+	// GetSessionByRuntimeHandleID looks up by live runtime_handle_id (tmux name).
+	GetSessionByRuntimeHandleID(ctx context.Context, handleID string) (domain.SessionRecord, bool, error)
+	// GetSessionByPendingSourceHandle looks up pending.sourceRuntimeHandleId after
+	// source destroy clears runtime_handle_id.
+	GetSessionByPendingSourceHandle(ctx context.Context, handleID string) (domain.SessionRecord, bool, error)
 	ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error)
 	ListAllSessions(ctx context.Context) ([]domain.SessionRecord, error)
 	// DeleteSession removes a session row only if it is still in seed state
@@ -3128,24 +3133,23 @@ func (m *Manager) AllowTerminalInput(ctx context.Context, terminalID string) err
 	if terminalID == "" {
 		return nil
 	}
-	// Fast path: handle often equals session id.
+	// Fast path: handle often equals session id (short un-sanitized ids).
 	if rec, ok, err := m.store.GetSession(ctx, domain.SessionID(terminalID)); err != nil {
 		return fmt.Errorf("terminal input: %w", err)
 	} else if ok {
 		return gateTerminalPending(rec)
 	}
-	recs, err := m.store.ListAllSessions(ctx)
-	if err != nil {
-		// Fail closed: cannot prove the handle is not mid-switch.
-		return fmt.Errorf("terminal input: list sessions: %w", err)
+	// Indexed lookup by live runtime handle (tmux-normalized name).
+	if rec, ok, err := m.store.GetSessionByRuntimeHandleID(ctx, terminalID); err != nil {
+		return fmt.Errorf("terminal input: %w", err)
+	} else if ok {
+		return gateTerminalPending(rec)
 	}
-	for _, rec := range recs {
-		if strings.TrimSpace(rec.Metadata.RuntimeHandleID) == terminalID {
-			return gateTerminalPending(rec)
-		}
-		if p := rec.Metadata.SwitchPending; p != nil && strings.TrimSpace(p.SourceRuntimeHandleID) == terminalID {
-			return gateTerminalPending(rec)
-		}
+	// After source destroy, handle is only on pending JSON (indexed via json_extract).
+	if rec, ok, err := m.store.GetSessionByPendingSourceHandle(ctx, terminalID); err != nil {
+		return fmt.Errorf("terminal input: %w", err)
+	} else if ok {
+		return gateTerminalPending(rec)
 	}
 	// Not an agent session handle (e.g. shell terminal) — allow.
 	return nil

@@ -184,6 +184,48 @@ func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.Ses
 	return rec, true, nil
 }
 
+// GetSessionByRuntimeHandleID finds a session whose live runtime_handle_id matches
+// the terminal mux key (tmux session name). ok=false when no row matches.
+func (s *Store) GetSessionByRuntimeHandleID(ctx context.Context, handleID string) (domain.SessionRecord, bool, error) {
+	handleID = strings.TrimSpace(handleID)
+	if handleID == "" {
+		return domain.SessionRecord{}, false, nil
+	}
+	row, err := s.qr.GetSessionByRuntimeHandleID(ctx, handleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get session by runtime handle %q: %w", handleID, err)
+	}
+	rec, err := rowToRecord(sessionFromRuntimeHandleRow(row))
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get session by runtime handle %q: %w", handleID, err)
+	}
+	return rec, true, nil
+}
+
+// GetSessionByPendingSourceHandle finds a session whose SwitchPending still
+// records the pre-stop runtime handle (handle cleared after source destroy).
+func (s *Store) GetSessionByPendingSourceHandle(ctx context.Context, handleID string) (domain.SessionRecord, bool, error) {
+	handleID = strings.TrimSpace(handleID)
+	if handleID == "" {
+		return domain.SessionRecord{}, false, nil
+	}
+	row, err := s.qr.GetSessionByPendingSourceHandle(ctx, handleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.SessionRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get session by pending source handle %q: %w", handleID, err)
+	}
+	rec, err := rowToRecord(sessionFromPendingSourceHandleRow(row))
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get session by pending source handle %q: %w", handleID, err)
+	}
+	return rec, true, nil
+}
+
 // ListSessions returns every session in a project, ordered by num.
 func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]domain.SessionRecord, error) {
 	rows, err := s.qr.ListSessionsByProject(ctx, project)
@@ -219,6 +261,46 @@ func (s *Store) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, er
 }
 
 func sessionFromGetRow(row gen.GetSessionRow) gen.Session {
+	return gen.Session{
+		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
+		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
+		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
+		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
+		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
+		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
+		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
+		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
+		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
+		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
+		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
+		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
+		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
+		SpawnCapabilityHash: row.SpawnCapabilityHash,
+	}
+}
+
+func sessionFromRuntimeHandleRow(row gen.GetSessionByRuntimeHandleIDRow) gen.Session {
+	return gen.Session{
+		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
+		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
+		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
+		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
+		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
+		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
+		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
+		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
+		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
+		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
+		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
+		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
+		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
+		SpawnCapabilityHash: row.SpawnCapabilityHash,
+	}
+}
+
+func sessionFromPendingSourceHandleRow(row gen.GetSessionByPendingSourceHandleRow) gen.Session {
 	return gen.Session{
 		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
 		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,

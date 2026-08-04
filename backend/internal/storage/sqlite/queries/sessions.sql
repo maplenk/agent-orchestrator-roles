@@ -39,6 +39,36 @@ SELECT id, project_id, num, issue_id, kind, harness,
     resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
 FROM sessions WHERE id = ?;
 
+-- name: GetSessionByRuntimeHandleID :one
+-- Terminal mux keys panes by runtime handle (tmux session name), not always SessionID.
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    created_at, updated_at, display_name, first_signal_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+FROM sessions WHERE runtime_handle_id = ? LIMIT 1;
+
+-- name: GetSessionByPendingSourceHandle :one
+-- After source destroy, RuntimeHandleID is cleared but pending still records the
+-- pre-stop handle for terminal ownership fencing.
+SELECT id, project_id, num, issue_id, kind, harness,
+    activity_state, activity_last_at, is_terminated, branch, workspace_path,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    created_at, updated_at, display_name, first_signal_at, preview_url,
+    preview_revision, cleanup_generation, runtime_launch_id,
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+FROM sessions
+WHERE switch_pending_json != ''
+  AND json_extract(switch_pending_json, '$.sourceRuntimeHandleId') = ?
+LIMIT 1;
+
 -- name: ListSessionsByProject :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,

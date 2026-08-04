@@ -180,7 +180,7 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 		// Confirmed alive: restore exact pre-switch usability (clear pending + prompt).
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", payload)
 		if rbErr := m.rollbackSwitchPending(ctx, rec, preSwitchPrompt, preSwitchAgentSession, preSwitchHandle, preSwitchLaunch); rbErr != nil {
-			return SwitchResult{}, fmt.Errorf("switch %s: pre-stop source alive; rollback pending failed: %w (source usable uncertain)", req.SessionID, rbErr)
+			return SwitchResult{}, fmt.Errorf("switch %s: pre-stop source alive; rollback pending failed: %w: %v", req.SessionID, ErrSwitchUncertain, rbErr)
 		}
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
 	}

@@ -3,6 +3,8 @@ package terminal
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -98,6 +100,44 @@ func TestServeOpenStreamsAndWritesTerminal(t *testing.T) {
 		rs := pty.resizeCalls()
 		return len(rs) == 1 && rs[0] == [2]uint16{30, 100}
 	})
+}
+
+// blockingGate refuses PTY client writes (switch-pending fence).
+type blockingGate struct{}
+
+func (blockingGate) AllowTerminalInput(context.Context, string) error {
+	return errors.New("switch pending gen g1")
+}
+
+// InputGate must suppress client PTY writes while a worker switch is pending.
+func TestServeWriteSuppressedWhenInputGateBlocks(t *testing.T) {
+	pty := newFakePTY()
+	sp := &fakeSpawner{ptys: []*fakePTY{pty}}
+	src := &fakeSource{alive: true, spawner: sp}
+	mgr := NewManager(src, nil, testLogger(), WithHeartbeat(0), WithInputGate(blockingGate{}))
+	defer mgr.Close()
+
+	conn := newFakeConn()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go mgr.Serve(ctx, conn)
+
+	conn.in <- clientMsg{Ch: chTerminal, ID: "ao-mer.dots-hash-handle", Type: msgOpen}
+	recv(t, conn, chTerminal, msgOpened, time.Second)
+
+	conn.in <- clientMsg{
+		Ch: chTerminal, ID: "ao-mer.dots-hash-handle", Type: msgData,
+		Data: base64.StdEncoding.EncodeToString([]byte("whoami\n")),
+	}
+	errFrame := recv(t, conn, chTerminal, msgError, time.Second)
+	if errFrame.Error == "" || !strings.Contains(errFrame.Error, "input blocked") {
+		t.Fatalf("error frame = %+v, want input blocked", errFrame)
+	}
+	// Brief wait: write must never reach the PTY.
+	time.Sleep(50 * time.Millisecond)
+	if got := string(pty.writtenBytes()); got != "" {
+		t.Fatalf("PTY write leaked under switch fence: %q", got)
+	}
 }
 
 func TestServeBuffersInputUntilAttachReady(t *testing.T) {

@@ -1214,6 +1214,64 @@ func TestSessionWorktreesRoundTrip(t *testing.T) {
 	}
 }
 
+// Terminal mux keys panes by runtime handle (tmux name), not SessionID.
+func TestGetSessionByRuntimeHandleID(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.Metadata.RuntimeHandleID = "ao-mer.dots-hash-handle"
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, ok, err := s.GetSessionByRuntimeHandleID(ctx, "ao-mer.dots-hash-handle")
+	if err != nil || !ok {
+		t.Fatalf("lookup by handle: ok=%v err=%v", ok, err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("id = %s, want %s", got.ID, created.ID)
+	}
+	_, ok, err = s.GetSessionByRuntimeHandleID(ctx, "missing-handle")
+	if err != nil || ok {
+		t.Fatalf("missing handle: ok=%v err=%v", ok, err)
+	}
+}
+
+// After source destroy, runtime_handle_id is cleared but pending still records
+// the pre-stop handle for terminal ownership fencing.
+func TestGetSessionByPendingSourceHandle(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.Metadata.RuntimeHandleID = "" // cleared after source death
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID:          "gen-1",
+		ToHarness:             domain.HarnessCodex,
+		SourceRuntimeHandleID: "ao-mer.dots-hash-handle",
+	}
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, ok, err := s.GetSessionByPendingSourceHandle(ctx, "ao-mer.dots-hash-handle")
+	if err != nil || !ok {
+		t.Fatalf("lookup by pending source handle: ok=%v err=%v", ok, err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("id = %s, want %s", got.ID, created.ID)
+	}
+	if got.Metadata.SwitchPending == nil || got.Metadata.SwitchPending.GenerationID != "gen-1" {
+		t.Fatalf("pending = %+v", got.Metadata.SwitchPending)
+	}
+	// Live runtime handle path must not match once cleared.
+	_, ok, err = s.GetSessionByRuntimeHandleID(ctx, "ao-mer.dots-hash-handle")
+	if err != nil || ok {
+		t.Fatalf("cleared handle must not hit runtime index: ok=%v err=%v", ok, err)
+	}
+}
+
 // TestUpsertSessionWorktreeEmptyStateDefaultsToActive exercises the guard in
 // UpsertSessionWorktree: when State is left at its zero value "", the store
 // must default it to "active" so the SQLite CHECK constraint is satisfied.

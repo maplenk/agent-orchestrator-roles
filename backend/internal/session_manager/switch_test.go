@@ -574,6 +574,142 @@ func TestAllowTerminalInput_BlocksPending(t *testing.T) {
 	}
 }
 
+// After source destroy, RuntimeHandleID is cleared; gate must still resolve via
+// SwitchPending.SourceRuntimeHandleID (indexed store path).
+func TestAllowTerminalInput_BlocksByPendingSourceHandleAfterClear(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", Kind: domain.KindWorker,
+		Metadata: domain.SessionMetadata{
+			RuntimeHandleID: "", // cleared after source death
+			SwitchPending: &domain.SwitchPending{
+				GenerationID: "g-post", ToHarness: domain.HarnessCodex,
+				SourceRuntimeHandleID: "ao-mer.dots-hash-handle",
+			},
+		},
+	}
+	m := New(Deps{Store: st, Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: func(string) (string, error) { return "/bin/true", nil }})
+	err := m.AllowTerminalInput(ctx, "ao-mer.dots-hash-handle")
+	if err == nil {
+		t.Fatal("expected block by pending source handle after runtime handle clear")
+	}
+	if !errors.Is(err, ErrSwitchInProgress) {
+		t.Fatalf("err = %v, want ErrSwitchInProgress", err)
+	}
+}
+
+// Confirmed-alive source + rollback UpdateSession failure → ErrSwitchUncertain
+// (pending may remain; source usability is uncertain).
+func TestSwitchWorker_RollbackFailWrapsErrSwitchUncertain(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+
+	// Switch path: 1× UpdateSession installs pending, then destroy probes alive,
+	// then rollback UpdateSession must fail → ErrSwitchUncertain.
+	st.updateFailAfter = 2
+	st.updateErr = errors.New("disk full on rollback")
+
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	if !errors.Is(err, ErrSwitchUncertain) {
+		t.Fatalf("err = %v, want ErrSwitchUncertain", err)
+	}
+	if rt.created != 0 {
+		t.Fatalf("must not launch target after failed pre-stop: create=%d", rt.created)
+	}
+	// Pending remains installed (rollback never persisted clear).
+	if st.sessions[id].Metadata.SwitchPending == nil {
+		t.Fatal("pending should remain when rollback fails")
+	}
+}
+
+// post_stop ledger append failure must block target launch (and ack).
+func TestSwitchWorker_PostStopAppendFailBlocksLaunch(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+
+	st.failLedgerPhase = domain.LifecyclePhasePostStop
+	st.appendLedgerErr = errors.New("ledger disk full")
+
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": false}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	if !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("err = %v, want ErrSwitchPostStop", err)
+	}
+	if rt.created != 0 {
+		t.Fatalf("must not launch target without durable post_stop: create=%d", rt.created)
+	}
+	// Source is dead with pending retained for recovery.
+	if st.sessions[id].Metadata.SwitchPending == nil {
+		t.Fatal("pending must remain for recovery after post_stop fail")
+	}
+	for _, e := range st.ledger {
+		if e.Phase == domain.LifecyclePhaseTargetAck {
+			t.Fatal("must not ack without post_stop")
+		}
+	}
+}
+
+// Recovery path: post_stop append fail also blocks launch.
+func TestRecover_PostStopAppendFailBlocksLaunch(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	payload := `{"semantic":{"schemaVersion":1,"objective":"o"},"observed":{"schemaVersion":1},"compiled":"## Host-compiled handoff\n\nx"}`
+	rec := st.sessions[id]
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-ps-fail", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		OriginalTask: "implement feature", RoleID: "implementor", PayloadJSON: payload,
+		SourceRuntimeHandleID: "rt-1",
+	}
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	st.sessions[id] = rec
+	st.ledger = []domain.LifecycleLedgerRecord{
+		{ID: "mer-1:gen-ps-fail:pre_stop", SessionID: id, ProjectID: "mer", Kind: domain.LifecycleKindSwitch, Phase: domain.LifecyclePhasePreStop, GenerationID: "gen-ps-fail", PayloadJSON: payload},
+	}
+	st.failLedgerPhase = domain.LifecyclePhasePostStop
+	st.appendLedgerErr = errors.New("ledger unavailable")
+
+	rt := &fakeRuntime{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "gen-ps-fail" },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	_, err := m.RecoverSwitchFromPostStop(ctx, id)
+	if !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("err = %v, want ErrSwitchPostStop", err)
+	}
+	if rt.created != 0 {
+		t.Fatalf("must not launch without post_stop: create=%d", rt.created)
+	}
+}
+
 func TestRecover_EnsuresPostStopBeforeLaunch(t *testing.T) {
 	st := newFakeStore()
 	ws := t.TempDir()

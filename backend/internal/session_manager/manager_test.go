@@ -40,6 +40,14 @@ type fakeStore struct {
 	deleteErr      error
 	upsertWTErr    error
 	putTemplateErr error
+	// updateCount / updateFailAfter inject UpdateSession failures for adversarial
+	// switch tests (e.g. rollback after confirmed-alive source).
+	updateCount     int
+	updateFailAfter int // 0 = never; fail on the Nth UpdateSession (1-based)
+	updateErr       error
+	// failLedgerPhase, when non-empty, makes AppendLifecycleLedger fail for that phase.
+	failLedgerPhase domain.LifecycleLedgerPhase
+	appendLedgerErr error
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
 	// sharedLog, when non-nil, receives an ordered call entry for each
@@ -58,6 +66,12 @@ func newFakeStore() *fakeStore {
 	}
 }
 func (f *fakeStore) AppendLifecycleLedger(_ context.Context, rec domain.LifecycleLedgerRecord) error {
+	if f.failLedgerPhase != "" && rec.Phase == f.failLedgerPhase {
+		if f.appendLedgerErr != nil {
+			return f.appendLedgerErr
+		}
+		return errors.New("injected ledger append failure")
+	}
 	f.ledger = append(f.ledger, rec)
 	return nil
 }
@@ -109,12 +123,35 @@ func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (
 	return rec, nil
 }
 func (f *fakeStore) UpdateSession(_ context.Context, rec domain.SessionRecord) error {
+	f.updateCount++
+	if f.updateFailAfter > 0 && f.updateCount >= f.updateFailAfter {
+		if f.updateErr != nil {
+			return f.updateErr
+		}
+		return errors.New("injected update failure")
+	}
 	f.sessions[rec.ID] = rec
 	return nil
 }
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
 	r, ok := f.sessions[id]
 	return r, ok, nil
+}
+func (f *fakeStore) GetSessionByRuntimeHandleID(_ context.Context, handleID string) (domain.SessionRecord, bool, error) {
+	for _, r := range f.sessions {
+		if strings.TrimSpace(r.Metadata.RuntimeHandleID) == handleID {
+			return r, true, nil
+		}
+	}
+	return domain.SessionRecord{}, false, nil
+}
+func (f *fakeStore) GetSessionByPendingSourceHandle(_ context.Context, handleID string) (domain.SessionRecord, bool, error) {
+	for _, r := range f.sessions {
+		if p := r.Metadata.SwitchPending; p != nil && strings.TrimSpace(p.SourceRuntimeHandleID) == handleID {
+			return r, true, nil
+		}
+	}
+	return domain.SessionRecord{}, false, nil
 }
 func (f *fakeStore) ListSessions(_ context.Context, p domain.ProjectID) ([]domain.SessionRecord, error) {
 	var out []domain.SessionRecord
