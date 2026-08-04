@@ -3,17 +3,23 @@ SELECT COALESCE(MAX(num), 0) + 1 AS next FROM sessions WHERE project_id = ?;
 
 -- name: InsertSession :exec
 INSERT INTO sessions (
-    id, project_id, num, issue_id, kind, harness, display_name,
+    id, project_id, num, issue_id, kind, harness,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn, display_name,
     activity_state, activity_last_at, first_signal_at, is_terminated,
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
     runtime_launch_id, agent_session_id, prompt,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation,
     created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateSession :exec
 UPDATE sessions SET
-    issue_id = ?, kind = ?, harness = ?, display_name = ?,
+    issue_id = ?, kind = ?, harness = ?,
+    role_id = ?, role_map_schema_version = ?, role_map_sha256 = ?, role_config_revision = ?,
+    template_artifact_id = ?, template_sha256 = ?, resolved_model = ?,
+    resolved_workspace_writes = ?, resolved_can_spawn = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
     runtime_launch_id = ?, agent_session_id = ?, prompt = ?,
@@ -27,7 +33,10 @@ SELECT id, project_id, num, issue_id, kind, harness,
     runtime_handle_id, agent_session_id, prompt,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn
 FROM sessions WHERE id = ?;
 
 -- name: ListSessionsByProject :many
@@ -36,7 +45,10 @@ SELECT id, project_id, num, issue_id, kind, harness,
     runtime_handle_id, agent_session_id, prompt,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn
 FROM sessions WHERE project_id = ? ORDER BY num;
 
 -- name: ListAllSessions :many
@@ -45,7 +57,10 @@ SELECT id, project_id, num, issue_id, kind, harness,
     runtime_handle_id, agent_session_id, prompt,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn
 FROM sessions ORDER BY project_id, num;
 
 

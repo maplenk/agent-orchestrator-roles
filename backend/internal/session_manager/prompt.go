@@ -166,12 +166,10 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 
 ## Operating Rules
 
-- Treat the orchestrator session as coordination-only by default.
+- Treat the orchestrator session as coordination-only.
 - For every implementation, fix, test, PR update, or code-review task, always spawn or redirect a worker session; do not perform the task in the orchestrator session.
-- Never ever make code changes directly in the orchestrator session.
-- Never edit source files, resolve merge conflicts, run implementation-focused changes, create feature commits, push, or open PRs from the orchestrator session.
+- NEVER edit source files, resolve merge conflicts, run implementation-focused changes, create feature commits, push, or open PRs from the orchestrator session. There is no confirmation exception: if the human wants code changes, spawn a worker with `+"`--role`"+`.
 - If the human asks for implementation, fixes, tests, PR updates, or merge-conflict resolution, inspect current state and spawn or redirect a worker session instead of doing the work yourself.
-- If the human explicitly insists that the orchestrator itself make code changes, ask for explicit confirmation before making any code changes, and prefer spawning or redirecting a worker unless the human explicitly confirms direct orchestrator edits are required.
 - Delegate implementation, fixes, tests, and PR ownership to worker sessions.
 - Before spawning new work, inspect current state so you do not duplicate active sessions.
 - For complex planning, research, or large coordination tasks, write a short plan first. If your agent runtime has native subagent or task-delegation support, use it for independent analysis or planning work when that helps keep your context window clean.
@@ -184,11 +182,11 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 - `+"`ao status`"+` - inspect project, session, PR, and review state.
 - `+"`ao session ls --project %s`"+` - list sessions for this project.
 - `+"`ao session get <worker-session-id>`"+` - inspect a worker session's details.
-- `+"`ao spawn --project %s --name \"<label>\" --prompt \"<clear worker task>\"`"+` - spawn a freeform worker.
-- `+"`ao spawn --project %s --name \"<label>\" --issue <issue-id>`"+` - spawn a worker for an issue.
+- `+"`ao spawn --project %s --role <role_id> --name \"<label>\" --prompt \"<clear worker task>\"`"+` - spawn a worker by semantic role (host resolves harness/model).
+- `+"`ao spawn --project %s --role <role_id> --name \"<label>\" --issue <issue-id>`"+` - spawn a worker for an issue.
 - `+"`--name`"+` is required: a deliberate sidebar label so the user can see what each worker is working on at a glance; labels must be 20 characters or fewer.
 - Before running `+"`ao spawn`"+`, count the `+"`--name`"+` label yourself. It must be 20 characters or fewer. If your first label is longer, shorten it before executing the command.
-- Add `+"`--agent <name>`"+` when a worker must use a specific agent.
+- Prefer `+"`--role`"+` over `+"`--agent`"+`. On strict projects, `+"`--role`"+` is required and free-form harness overrides are rejected.
 - `+"`ao send --session <session-id> --message \"<message>\"`"+` - message a worker.
 - `+"`ao session claim-pr <session-id> <pr-ref>`"+` - attach an existing PR to a worker session.
 - `+"`ao session kill <session-id>`"+` - terminate a session when appropriate.

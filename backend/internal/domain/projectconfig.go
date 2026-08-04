@@ -63,6 +63,11 @@ type ProjectConfig struct {
 	// opt-out travels with the container at `docker run` time rather than
 	// drifting out of sync with a project-config list.
 	ContainerReap ContainerReapConfig `json:"containerReap,omitempty"`
+
+	// RoleMap is the multi-sub role routing document (spawn --role). When
+	// StrictDelegation is set, worker spawns require a role_id and free-form
+	// harness overrides are rejected on the ordinary path.
+	RoleMap RoleMap `json:"roleMap,omitempty"`
 }
 
 // ContainerReapConfig is the project-level opt-out for #2652's Docker
@@ -165,6 +170,9 @@ func (c ProjectConfig) Validate() error {
 	}
 	if err := c.TrackerIntake.Validate(); err != nil {
 		return err
+	}
+	if err := c.RoleMap.Validate(); err != nil {
+		return fmt.Errorf("roleMap: %w", err)
 	}
 	return nil
 }

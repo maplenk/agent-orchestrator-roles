@@ -80,14 +80,23 @@ func TestBuildSystemPrompt_OrchestratorRequiresConfirmationAndNativeSubagents(t 
 		Project: promptProject{ID: "mer", Name: "Mercury"},
 	})
 	for _, want := range []string{
-		"Never ever make code changes directly in the orchestrator session",
-		"ask for explicit confirmation before making any code changes",
-		"prefer spawning or redirecting a worker unless the human explicitly confirms",
+		"NEVER edit source files",
+		"There is no confirmation exception",
+		"spawn a worker with `--role`",
 		"native subagent or task-delegation support",
 		"keep your context window clean",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orchestrator prompt missing %q:\n%s", want, got)
+		}
+	}
+	// Contradictory "confirm then edit" must not return.
+	for _, banned := range []string{
+		"ask for explicit confirmation before making any code changes",
+		"explicitly confirms direct orchestrator edits",
+	} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("orchestrator prompt must not allow confirm-and-edit: found %q", banned)
 		}
 	}
 }

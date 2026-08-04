@@ -30,6 +30,14 @@ type SpawnConfig struct {
 	// the agent can read them (CLI agents receive the prompt as text and cannot
 	// consume inline binary data).
 	Attachments []SpawnAttachment
+
+	// RoleID selects a semantic role from the project's RoleMap (e.g. "implementor").
+	// When set, the daemon resolves harness/model/template/permissions and ignores
+	// free-form Harness for routing (strict projects require this for workers).
+	RoleID string
+	// RoleBinding is filled by the session manager after resolving RoleID.
+	// Callers should leave it empty.
+	RoleBinding domain.SessionRoleBinding
 }
 
 // SpawnAttachment is a single image attached to a spawn request. Data holds the

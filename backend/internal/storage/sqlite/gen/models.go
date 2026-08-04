@@ -164,32 +164,41 @@ type ReviewRun struct {
 }
 
 type Session struct {
-	ID                 domain.SessionID
-	ProjectID          domain.ProjectID
-	Num                int64
-	IssueID            domain.IssueID
-	Kind               domain.SessionKind
-	Harness            domain.AgentHarness
-	ActivityState      domain.ActivityState
-	ActivityLastAt     time.Time
-	IsTerminated       bool
-	Branch             string
-	WorkspacePath      string
-	RuntimeHandleID    string
-	AgentSessionID     string
-	Prompt             string
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	DisplayName        string
-	FirstSignalAt      sql.NullTime
-	PreviewURL         string
-	PreviewRevision    int64
-	CleanupGeneration  int64
-	RuntimeLaunchID    string
-	WorkspaceRepoPath  string
-	TerminateOnPRMerge bool
-	DiffBaseSha        string
-	DiffBaseRef        string
+	ID                      domain.SessionID
+	ProjectID               domain.ProjectID
+	Num                     int64
+	IssueID                 domain.IssueID
+	Kind                    domain.SessionKind
+	Harness                 domain.AgentHarness
+	ActivityState           domain.ActivityState
+	ActivityLastAt          time.Time
+	IsTerminated            bool
+	Branch                  string
+	WorkspacePath           string
+	RuntimeHandleID         string
+	AgentSessionID          string
+	Prompt                  string
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
+	DisplayName             string
+	FirstSignalAt           sql.NullTime
+	PreviewURL              string
+	PreviewRevision         int64
+	CleanupGeneration       int64
+	RuntimeLaunchID         string
+	WorkspaceRepoPath       string
+	TerminateOnPRMerge      bool
+	DiffBaseSha             string
+	DiffBaseRef             string
+	RoleID                  string
+	RoleMapSchemaVersion    int64
+	RoleMapSha256           string
+	RoleConfigRevision      int64
+	TemplateArtifactID      string
+	TemplateSha256          string
+	ResolvedModel           string
+	ResolvedWorkspaceWrites int64
+	ResolvedCanSpawn        int64
 }
 
 type SessionCleanupFact struct {
@@ -233,6 +242,13 @@ type TelemetryEvent struct {
 	SessionID   sql.NullString
 	RequestID   string
 	PayloadJson string
+}
+
+type TemplateArtifact struct {
+	ID        string
+	Sha256    string
+	Content   []byte
+	CreatedAt time.Time
 }
 
 type WorkspaceRepo struct {

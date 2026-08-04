@@ -12,6 +12,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
+	sqlitestore "github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite/store"
 )
 
 func newTestStore(t *testing.T) *sqlite.Store {
@@ -90,6 +91,150 @@ func TestSessionPersistsDiffBaseMetadata(t *testing.T) {
 	}
 	if updated.Metadata.DiffBaseSHA != "base-sha-2" || updated.Metadata.DiffBaseRef != "develop" {
 		t.Fatalf("updated diff base = sha:%q ref:%q", updated.Metadata.DiffBaseSHA, updated.Metadata.DiffBaseRef)
+	}
+}
+
+func TestSessionPersistsRoleMetadata(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.Metadata.Role = domain.SessionRoleBinding{
+		RoleID:               "implementor",
+		RoleMapSchemaVersion: 1,
+		RoleMapSHA256:        "role-map-sha-1",
+		RoleConfigRevision:   7,
+		TemplateArtifactID:   "template-artifact-1",
+		TemplateSHA256:       "template-sha-1",
+		ResolvedHarness:      rec.Harness,
+		ResolvedModel:        "claude-sonnet-5",
+		ResolvedPermissions: domain.RoleExecutionPolicy{
+			WorkspaceWrites: true,
+			CanSpawn:        true,
+		},
+	}
+
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get session: ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(got.Metadata.Role, rec.Metadata.Role) {
+		t.Fatalf("created role = %#v, want %#v", got.Metadata.Role, rec.Metadata.Role)
+	}
+
+	got.Metadata.Role.ResolvedModel = "claude-opus-5"
+	got.Metadata.Role.ResolvedPermissions = domain.RoleExecutionPolicy{}
+	got.UpdatedAt = got.UpdatedAt.Add(time.Minute)
+	if err := s.UpdateSession(ctx, got); err != nil {
+		t.Fatalf("update session: %v", err)
+	}
+	updated, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get updated session: ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(updated.Metadata.Role, got.Metadata.Role) {
+		t.Fatalf("updated role = %#v, want %#v", updated.Metadata.Role, got.Metadata.Role)
+	}
+}
+
+// Artifact-only (or any partial) role columns must survive GetSession so restore
+// can fail closed with ErrIncompleteRolePin — never silent legacy.
+func TestSessionPersistsPartialRolePin_ArtifactOnly(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.Metadata.Role = domain.SessionRoleBinding{
+		// RoleID intentionally empty — corrupt partial pin.
+		TemplateArtifactID: "sha256:orphan-artifact",
+		TemplateSHA256:     "deadbeef",
+		ResolvedModel:      "should-not-be-dropped",
+		ResolvedPermissions: domain.RoleExecutionPolicy{
+			WorkspaceWrites: true,
+		},
+	}
+
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get session: ok=%v err=%v", ok, err)
+	}
+	if got.Metadata.Role.RoleID != "" {
+		t.Fatalf("RoleID = %q, want empty", got.Metadata.Role.RoleID)
+	}
+	if got.Metadata.Role.TemplateArtifactID != "sha256:orphan-artifact" {
+		t.Fatalf("TemplateArtifactID dropped: %#v", got.Metadata.Role)
+	}
+	if got.Metadata.Role.TemplateSHA256 != "deadbeef" {
+		t.Fatalf("TemplateSHA256 dropped: %#v", got.Metadata.Role)
+	}
+	if got.Metadata.Role.ResolvedModel != "should-not-be-dropped" {
+		t.Fatalf("ResolvedModel dropped: %#v", got.Metadata.Role)
+	}
+	if !got.Metadata.Role.ResolvedPermissions.WorkspaceWrites {
+		t.Fatalf("WorkspaceWrites dropped: %#v", got.Metadata.Role)
+	}
+	// Harness is the effective resolved harness column; must still surface on pin.
+	if got.Metadata.Role.ResolvedHarness != rec.Harness {
+		t.Fatalf("ResolvedHarness = %q, want %q", got.Metadata.Role.ResolvedHarness, rec.Harness)
+	}
+}
+
+func TestTemplateArtifactCAS(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	content := []byte("template content")
+
+	if err := s.PutTemplateArtifact(ctx, "artifact-1", "sha-1", content, createdAt); err != nil {
+		t.Fatalf("put artifact: %v", err)
+	}
+	got, sha, ok, err := s.GetTemplateArtifact(ctx, "artifact-1")
+	if err != nil || !ok {
+		t.Fatalf("get artifact: ok=%v err=%v", ok, err)
+	}
+	if string(got) != string(content) || sha != "sha-1" {
+		t.Fatalf("artifact = content:%q sha:%q", got, sha)
+	}
+
+	if err := s.PutTemplateArtifact(ctx, "artifact-1", "sha-1", content, createdAt); err != nil {
+		t.Fatalf("put artifact again: %v", err)
+	}
+	if got, sha, ok, err := s.GetTemplateArtifact(ctx, "missing"); err != nil || ok || got != nil || sha != "" {
+		t.Fatalf("get missing artifact: content=%q sha=%q ok=%v err=%v", got, sha, ok, err)
+	}
+}
+
+func TestTemplateArtifactCAS_RejectsConflictingContent(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	createdAt := time.Now().UTC().Truncate(time.Second)
+	if err := s.PutTemplateArtifact(ctx, "sha256:same-id", "aaa", []byte("body-a"), createdAt); err != nil {
+		t.Fatalf("first put: %v", err)
+	}
+	// Same id, different bytes/sha must fail closed (not silent DO NOTHING success).
+	err := s.PutTemplateArtifact(ctx, "sha256:same-id", "bbb", []byte("body-b"), createdAt)
+	if !errors.Is(err, sqlitestore.ErrTemplateArtifactConflict) {
+		t.Fatalf("conflict put: err = %v, want ErrTemplateArtifactConflict", err)
+	}
+	// Original content must be unchanged.
+	got, sha, ok, err := s.GetTemplateArtifact(ctx, "sha256:same-id")
+	if err != nil || !ok {
+		t.Fatalf("get after conflict: ok=%v err=%v", ok, err)
+	}
+	if sha != "aaa" || string(got) != "body-a" {
+		t.Fatalf("stored = content:%q sha:%q; want body-a / aaa", got, sha)
+	}
+	// Exact same content remains idempotent success.
+	if err := s.PutTemplateArtifact(ctx, "sha256:same-id", "aaa", []byte("body-a"), createdAt); err != nil {
+		t.Fatalf("idempotent put: %v", err)
 	}
 }
 

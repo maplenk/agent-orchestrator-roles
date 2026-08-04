@@ -18,18 +18,27 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/workspace/scratch"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
 )
 
 var ctx = context.Background()
 
+type fakeTemplateArtifact struct {
+	sha       string
+	content   []byte
+	createdAt time.Time
+}
+
 type fakeStore struct {
-	sessions      map[domain.SessionID]domain.SessionRecord
-	pr            map[domain.SessionID]domain.PRFacts
-	projects      map[string]domain.ProjectRecord
-	workspaceRepo map[string][]domain.WorkspaceRepoRecord
-	num           int
-	deleteErr     error
-	upsertWTErr   error
+	sessions       map[domain.SessionID]domain.SessionRecord
+	pr             map[domain.SessionID]domain.PRFacts
+	projects       map[string]domain.ProjectRecord
+	workspaceRepo  map[string][]domain.WorkspaceRepoRecord
+	artifacts      map[string]fakeTemplateArtifact
+	num            int
+	deleteErr      error
+	upsertWTErr    error
+	putTemplateErr error
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
 	// sharedLog, when non-nil, receives an ordered call entry for each
@@ -43,6 +52,7 @@ func newFakeStore() *fakeStore {
 		pr:            map[domain.SessionID]domain.PRFacts{},
 		projects:      map[string]domain.ProjectRecord{},
 		workspaceRepo: map[string][]domain.WorkspaceRepoRecord{},
+		artifacts:     map[string]fakeTemplateArtifact{},
 		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
 	}
 }
@@ -52,6 +62,31 @@ func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectReco
 }
 func (f *fakeStore) ListWorkspaceRepos(_ context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error) {
 	return f.workspaceRepo[projectID], nil
+}
+func (f *fakeStore) PutTemplateArtifact(_ context.Context, id, sha256 string, content []byte, createdAt time.Time) error {
+	if f.putTemplateErr != nil {
+		return f.putTemplateErr
+	}
+	cp := append([]byte(nil), content...)
+	if existing, ok := f.artifacts[id]; ok {
+		if existing.sha != sha256 || !bytes.Equal(existing.content, cp) {
+			return fmt.Errorf("template artifact content conflict: id %q", id)
+		}
+		return nil // idempotent same content
+	}
+	f.artifacts[id] = fakeTemplateArtifact{
+		sha:       sha256,
+		content:   cp,
+		createdAt: createdAt,
+	}
+	return nil
+}
+func (f *fakeStore) GetTemplateArtifact(_ context.Context, id string) (content []byte, sha string, ok bool, err error) {
+	artifact, ok := f.artifacts[id]
+	if !ok {
+		return nil, "", false, nil
+	}
+	return append([]byte(nil), artifact.content...), artifact.sha, true, nil
 }
 func (f *fakeStore) CreateSession(_ context.Context, rec domain.SessionRecord) (domain.SessionRecord, error) {
 	f.num++
@@ -1197,7 +1232,7 @@ func TestSpawn_AssignsIDAndGoesIdle(t *testing.T) {
 func TestSpawn_ReturnsFinalPromptByteMetrics(t *testing.T) {
 	m, _, _, _ := newManager()
 	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode}
-	wantPrompt, wantSystemPrompt, err := m.buildSpawnTexts(ctx, cfg)
+	wantPrompt, wantSystemPrompt, err := m.buildSpawnTexts(ctx, cfg, roleApplyResult{})
 	if err != nil {
 		t.Fatalf("buildSpawnTexts: %v", err)
 	}
@@ -2934,11 +2969,12 @@ func TestSpawnOrchestrator_UsesCoordinatorPrompt(t *testing.T) {
 	systemPrompt := agent.lastLaunch.SystemPrompt
 	for _, want := range []string{
 		"You are the human-facing orchestrator for project mer",
-		`ao spawn --project mer --name "<label>" --prompt "<clear worker task>"`,
+		`ao spawn --project mer --role <role_id> --name "<label>" --prompt "<clear worker task>"`,
 		"Before running `ao spawn`, count the `--name` label yourself",
-		"coordination-only by default",
+		"coordination-only",
 		"always spawn or redirect a worker session",
-		"Never edit source files, resolve merge conflicts, run implementation-focused changes",
+		"NEVER edit source files",
+		"There is no confirmation exception",
 		"spawn or redirect a worker session instead of doing the work yourself",
 		"Use `ao send` for session communication",
 		"`ao session ls --project mer`",
@@ -2966,6 +3002,65 @@ func TestSpawnOrchestrator_UsesCoordinatorPrompt(t *testing.T) {
 	// must deliver nothing to the agent, leaving it idle at an empty input box.
 	if agent.lastLaunch.Prompt != "" {
 		t.Fatalf("prompt = %q, want empty (no kickoff turn)", agent.lastLaunch.Prompt)
+	}
+}
+
+func TestSpawn_StrictOrchestratorFailsClosedWithoutLaunch(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"orchestrator.md": "---\nid: orchestrator\nname: Orch\n---\n# O\n",
+		"implementor.md":  "---\nid: implementor\nname: Impl\n---\n# I\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{
+			Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+			RoleMap: domain.RoleMap{
+				SchemaVersion:    domain.RoleMapSchemaVersion,
+				StrictDelegation: true,
+				OrchestratorRole: "orchestrator",
+				Roles: map[string]domain.RoleBinding{
+					"orchestrator": {
+						Template: "orchestrator",
+						Harness:  domain.HarnessClaudeCode,
+						Permissions: domain.RoleExecutionPolicy{
+							WorkspaceWrites: false,
+							CanSpawn:        true,
+						},
+					},
+					"implementor": {
+						Template: "implementor",
+						Harness:  domain.HarnessCodex,
+						Permissions: domain.RoleExecutionPolicy{
+							WorkspaceWrites: true,
+							CanSpawn:        false,
+						},
+					},
+				},
+			},
+		},
+	}
+	agent := &recordingAgent{}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
+
+	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindOrchestrator})
+	if !errors.Is(err, ErrReadOnlyUnsupported) {
+		t.Fatalf("err = %v, want ErrReadOnlyUnsupported", err)
+	}
+	if agent.launchCalls != 0 {
+		t.Fatalf("launchCalls = %d, want 0 (no adapter launch)", agent.launchCalls)
+	}
+	if agent.lastLaunch.SessionID != "" {
+		t.Fatalf("unexpected launch: %+v", agent.lastLaunch)
 	}
 }
 

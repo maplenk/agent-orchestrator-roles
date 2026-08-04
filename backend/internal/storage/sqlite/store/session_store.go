@@ -205,6 +205,11 @@ func mapSessionRows(rows []gen.Session) []domain.SessionRecord {
 }
 
 func rowToRecord(row gen.Session) domain.SessionRecord {
+	// Hydrate Role whenever any role-specific column is populated — not only when
+	// role_id is set. Dropping partial pins (e.g. template_artifact_id without
+	// role_id) would make restore treat corrupt rows as legacy.
+	role := roleFromSessionRow(row)
+
 	return domain.SessionRecord{
 		ID:          row.ID,
 		ProjectID:   row.ProjectID,
@@ -231,6 +236,7 @@ func rowToRecord(row gen.Session) domain.SessionRecord {
 			Prompt:            row.Prompt,
 			PreviewURL:        row.PreviewURL,
 			PreviewRevision:   row.PreviewRevision,
+			Role:              role,
 		},
 		CleanupGeneration: row.CleanupGeneration,
 		CreatedAt:         row.CreatedAt,
@@ -240,63 +246,135 @@ func rowToRecord(row gen.Session) domain.SessionRecord {
 
 func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {
 	activity := normalActivity(rec.Activity, rec.CreatedAt)
+	role := rec.Metadata.Role
+	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
 	return gen.InsertSessionParams{
-		ID:                 rec.ID,
-		ProjectID:          rec.ProjectID,
-		Num:                num,
-		IssueID:            rec.IssueID,
-		Kind:               rec.Kind,
-		Harness:            rec.Harness,
-		DisplayName:        rec.DisplayName,
-		ActivityState:      activity.State,
-		ActivityLastAt:     activity.LastActivityAt,
-		FirstSignalAt:      timeToNullTime(rec.FirstSignalAt),
-		IsTerminated:       rec.IsTerminated,
-		Branch:             rec.Metadata.Branch,
-		WorkspacePath:      rec.Metadata.WorkspacePath,
-		WorkspaceRepoPath:  rec.Metadata.WorkspaceRepoPath,
-		DiffBaseSha:        rec.Metadata.DiffBaseSHA,
-		DiffBaseRef:        rec.Metadata.DiffBaseRef,
-		RuntimeHandleID:    rec.Metadata.RuntimeHandleID,
-		RuntimeLaunchID:    rec.Metadata.RuntimeLaunchID,
-		AgentSessionID:     rec.Metadata.AgentSessionID,
-		Prompt:             rec.Metadata.Prompt,
-		PreviewURL:         rec.Metadata.PreviewURL,
-		PreviewRevision:    rec.Metadata.PreviewRevision,
-		TerminateOnPRMerge: rec.TerminateOnPRMerge,
-		CleanupGeneration:  rec.CleanupGeneration,
-		CreatedAt:          rec.CreatedAt,
-		UpdatedAt:          rec.UpdatedAt,
+		ID:                      rec.ID,
+		ProjectID:               rec.ProjectID,
+		Num:                     num,
+		IssueID:                 rec.IssueID,
+		Kind:                    rec.Kind,
+		Harness:                 rec.Harness,
+		RoleID:                  role.RoleID,
+		RoleMapSchemaVersion:    int64(role.RoleMapSchemaVersion),
+		RoleMapSha256:           role.RoleMapSHA256,
+		RoleConfigRevision:      role.RoleConfigRevision,
+		TemplateArtifactID:      role.TemplateArtifactID,
+		TemplateSha256:          role.TemplateSHA256,
+		ResolvedModel:           role.ResolvedModel,
+		ResolvedWorkspaceWrites: writes,
+		ResolvedCanSpawn:        spawn,
+		DisplayName:             rec.DisplayName,
+		ActivityState:           activity.State,
+		ActivityLastAt:          activity.LastActivityAt,
+		FirstSignalAt:           timeToNullTime(rec.FirstSignalAt),
+		IsTerminated:            rec.IsTerminated,
+		Branch:                  rec.Metadata.Branch,
+		WorkspacePath:           rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath:       rec.Metadata.WorkspaceRepoPath,
+		DiffBaseSha:             rec.Metadata.DiffBaseSHA,
+		DiffBaseRef:             rec.Metadata.DiffBaseRef,
+		RuntimeHandleID:         rec.Metadata.RuntimeHandleID,
+		RuntimeLaunchID:         rec.Metadata.RuntimeLaunchID,
+		AgentSessionID:          rec.Metadata.AgentSessionID,
+		Prompt:                  rec.Metadata.Prompt,
+		PreviewURL:              rec.Metadata.PreviewURL,
+		PreviewRevision:         rec.Metadata.PreviewRevision,
+		TerminateOnPRMerge:      rec.TerminateOnPRMerge,
+		CleanupGeneration:       rec.CleanupGeneration,
+		CreatedAt:               rec.CreatedAt,
+		UpdatedAt:               rec.UpdatedAt,
 	}
 }
 
 func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
+	role := rec.Metadata.Role
+	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
 	return gen.UpdateSessionParams{
-		ID:                 rec.ID,
-		IssueID:            rec.IssueID,
-		Kind:               rec.Kind,
-		Harness:            rec.Harness,
-		DisplayName:        rec.DisplayName,
-		ActivityState:      activity.State,
-		ActivityLastAt:     activity.LastActivityAt,
-		FirstSignalAt:      timeToNullTime(rec.FirstSignalAt),
-		IsTerminated:       rec.IsTerminated,
-		Branch:             rec.Metadata.Branch,
-		WorkspacePath:      rec.Metadata.WorkspacePath,
-		WorkspaceRepoPath:  rec.Metadata.WorkspaceRepoPath,
-		DiffBaseSha:        rec.Metadata.DiffBaseSHA,
-		DiffBaseRef:        rec.Metadata.DiffBaseRef,
-		RuntimeHandleID:    rec.Metadata.RuntimeHandleID,
-		RuntimeLaunchID:    rec.Metadata.RuntimeLaunchID,
-		AgentSessionID:     rec.Metadata.AgentSessionID,
-		Prompt:             rec.Metadata.Prompt,
-		PreviewURL:         rec.Metadata.PreviewURL,
-		PreviewRevision:    rec.Metadata.PreviewRevision,
-		TerminateOnPRMerge: rec.TerminateOnPRMerge,
-		CleanupGeneration:  rec.CleanupGeneration,
-		UpdatedAt:          rec.UpdatedAt,
+		ID:                      rec.ID,
+		IssueID:                 rec.IssueID,
+		Kind:                    rec.Kind,
+		Harness:                 rec.Harness,
+		RoleID:                  role.RoleID,
+		RoleMapSchemaVersion:    int64(role.RoleMapSchemaVersion),
+		RoleMapSha256:           role.RoleMapSHA256,
+		RoleConfigRevision:      role.RoleConfigRevision,
+		TemplateArtifactID:      role.TemplateArtifactID,
+		TemplateSha256:          role.TemplateSHA256,
+		ResolvedModel:           role.ResolvedModel,
+		ResolvedWorkspaceWrites: writes,
+		ResolvedCanSpawn:        spawn,
+		DisplayName:             rec.DisplayName,
+		ActivityState:           activity.State,
+		ActivityLastAt:          activity.LastActivityAt,
+		FirstSignalAt:           timeToNullTime(rec.FirstSignalAt),
+		IsTerminated:            rec.IsTerminated,
+		Branch:                  rec.Metadata.Branch,
+		WorkspacePath:           rec.Metadata.WorkspacePath,
+		WorkspaceRepoPath:       rec.Metadata.WorkspaceRepoPath,
+		DiffBaseSha:             rec.Metadata.DiffBaseSHA,
+		DiffBaseRef:             rec.Metadata.DiffBaseRef,
+		RuntimeHandleID:         rec.Metadata.RuntimeHandleID,
+		RuntimeLaunchID:         rec.Metadata.RuntimeLaunchID,
+		AgentSessionID:          rec.Metadata.AgentSessionID,
+		Prompt:                  rec.Metadata.Prompt,
+		PreviewURL:              rec.Metadata.PreviewURL,
+		PreviewRevision:         rec.Metadata.PreviewRevision,
+		TerminateOnPRMerge:      rec.TerminateOnPRMerge,
+		CleanupGeneration:       rec.CleanupGeneration,
+		UpdatedAt:               rec.UpdatedAt,
 	}
+}
+
+// roleFromSessionRow maps sessions role columns to domain.SessionRoleBinding.
+// Returns zero only when every role-specific column is empty/default. sessions.harness
+// alone does not count — it is shared with non-role sessions.
+func roleFromSessionRow(row gen.Session) domain.SessionRoleBinding {
+	if !sessionRowHasRoleColumns(row) {
+		return domain.SessionRoleBinding{}
+	}
+	role := domain.SessionRoleBinding{
+		RoleID:               row.RoleID,
+		RoleMapSchemaVersion: int(row.RoleMapSchemaVersion),
+		RoleMapSHA256:        row.RoleMapSha256,
+		RoleConfigRevision:   row.RoleConfigRevision,
+		TemplateArtifactID:   row.TemplateArtifactID,
+		TemplateSHA256:       row.TemplateSha256,
+		ResolvedModel:        row.ResolvedModel,
+		ResolvedPermissions: domain.RoleExecutionPolicy{
+			WorkspaceWrites: row.ResolvedWorkspaceWrites != 0,
+			CanSpawn:        row.ResolvedCanSpawn != 0,
+		},
+	}
+	// Effective harness is sessions.harness; surface it on the pin when any role
+	// column is present so incomplete pins remain fully visible to restore.
+	if row.Harness != "" {
+		role.ResolvedHarness = row.Harness
+	}
+	return role
+}
+
+func sessionRowHasRoleColumns(row gen.Session) bool {
+	return row.RoleID != "" ||
+		row.TemplateArtifactID != "" ||
+		row.TemplateSha256 != "" ||
+		row.RoleMapSha256 != "" ||
+		row.ResolvedModel != "" ||
+		row.RoleMapSchemaVersion != 0 ||
+		row.RoleConfigRevision != 0 ||
+		row.ResolvedWorkspaceWrites != 0 ||
+		row.ResolvedCanSpawn != 0
+}
+
+func roleWriteFlags(p domain.RoleExecutionPolicy) (writes, spawn int64) {
+	if p.WorkspaceWrites {
+		writes = 1
+	}
+	if p.CanSpawn {
+		spawn = 1
+	}
+	return
 }
 
 // nullTimeToTime / timeToNullTime bridge the nullable first_signal_at column

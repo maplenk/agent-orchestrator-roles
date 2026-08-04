@@ -156,8 +156,10 @@ type SpawnSessionRequest struct {
 	IssueID   domain.IssueID      `json:"issueId,omitempty"`
 	Kind      domain.SessionKind  `json:"kind,omitempty" enum:"worker,orchestrator"`
 	Harness   domain.AgentHarness `json:"harness,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,kiro,kilocode,vibe,pi,autohand"`
-	Branch    string              `json:"branch,omitempty"`
-	Prompt    string              `json:"prompt,omitempty" maxLength:"4096"`
+	// RoleID selects a semantic role from the project role map (host-authoritative).
+	RoleID string `json:"roleId,omitempty"`
+	Branch string `json:"branch,omitempty"`
+	Prompt string `json:"prompt,omitempty" maxLength:"4096"`
 	// DisplayName is the sidebar label for the session, capped at 20 characters.
 	// `ao spawn --name` always sets it; other clients (e.g. the desktop new-task
 	// dialog) may omit it and fall back to the session id in the read model.

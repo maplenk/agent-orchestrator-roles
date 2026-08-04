@@ -1,0 +1,41 @@
+{
+  "role_map_schema_version": 1,
+  "strictDelegation": true,
+  "orchestratorRole": "orchestrator",
+  "roles": {
+    "orchestrator": {
+      "template": "orchestrator",
+      "harness": "claude-code",
+      "permissions": { "workspaceWrites": false, "canSpawn": true }
+    },
+    "implementor": {
+      "template": "implementor",
+      "harness": "codex",
+      "permissions": { "workspaceWrites": true, "canSpawn": false },
+      "when": ["implementation", "bugfix", "tests"]
+    },
+    "ui": {
+      "template": "ui-implementor",
+      "harness": "pi",
+      "model": "",
+      "permissions": { "workspaceWrites": true, "canSpawn": false },
+      "when": ["frontend", "ui", "css", "react"]
+    },
+    "reviewer": {
+      "template": "reviewer",
+      "harness": "codex",
+      "permissions": { "workspaceWrites": false, "canSpawn": false },
+      "when": ["review", "pr review"],
+      "_comment": "SPAWN FAILS CLOSED until adapter read-only launch exists (Codex default = full bypass)."
+    }
+  },
+  "failover": {
+    "mode": "manual",
+    "roles": {
+      "implementor": [
+        { "harness": "pi", "model": "" },
+        { "harness": "grok", "model": "" }
+      ]
+    }
+  }
+}

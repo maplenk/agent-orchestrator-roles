@@ -42,6 +42,11 @@ type SessionMetadata struct {
 	// even when PreviewURL is unchanged. The desktop browser panel keys
 	// navigation on it so a repeated `ao preview <same-url>` still refreshes.
 	PreviewRevision int64 `json:"previewRevision,omitempty"`
+
+	// Role is the durable multi-sub role identity pinned at spawn (optional).
+	// Persisted in session metadata columns once migration 0042 is applied;
+	// until then it is carried in-memory for the spawn path and tests.
+	Role SessionRoleBinding `json:"role,omitempty"`
 }
 
 // SessionRecord is the persistence shape. It intentionally stores only durable

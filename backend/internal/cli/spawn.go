@@ -23,6 +23,7 @@ const maxDisplayNameLen = 20
 type spawnOptions struct {
 	project        string
 	harness        string
+	role           string
 	kind           string
 	branch         string
 	prompt         string
@@ -40,6 +41,7 @@ type spawnRequest struct {
 	IssueID     string `json:"issueId,omitempty"`
 	Kind        string `json:"kind,omitempty"`
 	Harness     string `json:"harness,omitempty"`
+	RoleID      string `json:"roleId,omitempty"`
 	Branch      string `json:"branch,omitempty"`
 	Prompt      string `json:"prompt,omitempty"`
 	DisplayName string `json:"displayName"`
@@ -91,11 +93,21 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 			}
 			opts.project = project.ID
 
-			harness, err := resolveSpawnHarness(opts.harness, opts.kind, project)
-			if err != nil {
-				return err
+			// Host-authoritative role path: omit harness so the daemon resolves it.
+			// Strict projects reject free-form harness when --role is used.
+			roleID := strings.TrimSpace(opts.role)
+			if roleID != "" && strings.TrimSpace(opts.harness) != "" {
+				return usageError{fmt.Errorf("pass --role or --harness/--agent, not both (role is host-authoritative)")}
 			}
-			opts.harness = harness
+			if roleID == "" {
+				harness, err := resolveSpawnHarness(opts.harness, opts.kind, project)
+				if err != nil {
+					return err
+				}
+				opts.harness = harness
+			} else {
+				opts.harness = ""
+			}
 
 			if isScratchProject(project) {
 				if strings.TrimSpace(opts.branch) != "" {
@@ -106,7 +118,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				}
 			}
 
-			if !opts.skipAgentCheck {
+			if !opts.skipAgentCheck && opts.harness != "" {
 				if err := ctx.preflightSpawnAgentAuth(cmd.Context(), cmd, opts.harness); err != nil {
 					return err
 				}
@@ -123,6 +135,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				IssueID:     opts.issue,
 				Kind:        opts.kind,
 				Harness:     opts.harness,
+				RoleID:      strings.TrimSpace(opts.role),
 				Branch:      opts.branch,
 				Prompt:      opts.prompt,
 				DisplayName: name,
@@ -167,7 +180,8 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 		return pflag.NormalizedName(name)
 	})
 	f.StringVar(&opts.project, "project", "", "Project id to spawn the session in (default: AO_PROJECT_ID, current registered repo, or Scratch when it is the only project)")
-	f.StringVar(&opts.harness, "harness", "", "Agent harness / --agent: claude-code, codex, aider, opencode, grok, droid, amp, agy, crush, cursor, qwen, copilot, goose, auggie, continue, devin, cline, kimi, kiro, kilocode, vibe, pi, autohand (default: project worker.agent; orchestrator spawns default to project orchestrator.agent; required if the project has none)")
+	f.StringVar(&opts.harness, "harness", "", "Agent harness / --agent (mutually exclusive with --role; default: project worker.agent / orchestrator.agent)")
+	f.StringVar(&opts.role, "role", "", "Semantic role id from project roleMap (e.g. implementor, ui). Host resolves harness/model/template. Required when strictDelegation is enabled.")
 	f.StringVar(&opts.kind, "kind", "", "Session role: worker or orchestrator (default: worker)")
 	f.StringVar(&opts.branch, "branch", "", "Branch for git project sessions (default: ao/<session-id>/root; unsupported for Scratch)")
 	f.StringVar(&opts.prompt, "prompt", "", "Initial prompt for the agent")

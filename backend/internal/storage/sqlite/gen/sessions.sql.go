@@ -19,7 +19,10 @@ SELECT id, project_id, num, issue_id, kind, harness,
     runtime_handle_id, agent_session_id, prompt,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn
 FROM sessions WHERE id = ?
 `
 
@@ -53,48 +56,69 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (Session,
 		&i.TerminateOnPRMerge,
 		&i.DiffBaseSha,
 		&i.DiffBaseRef,
+		&i.RoleID,
+		&i.RoleMapSchemaVersion,
+		&i.RoleMapSha256,
+		&i.RoleConfigRevision,
+		&i.TemplateArtifactID,
+		&i.TemplateSha256,
+		&i.ResolvedModel,
+		&i.ResolvedWorkspaceWrites,
+		&i.ResolvedCanSpawn,
 	)
 	return i, err
 }
 
 const insertSession = `-- name: InsertSession :exec
 INSERT INTO sessions (
-    id, project_id, num, issue_id, kind, harness, display_name,
+    id, project_id, num, issue_id, kind, harness,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn, display_name,
     activity_state, activity_last_at, first_signal_at, is_terminated,
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
     runtime_launch_id, agent_session_id, prompt,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation,
     created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertSessionParams struct {
-	ID                 domain.SessionID
-	ProjectID          domain.ProjectID
-	Num                int64
-	IssueID            domain.IssueID
-	Kind               domain.SessionKind
-	Harness            domain.AgentHarness
-	DisplayName        string
-	ActivityState      domain.ActivityState
-	ActivityLastAt     time.Time
-	FirstSignalAt      sql.NullTime
-	IsTerminated       bool
-	Branch             string
-	WorkspacePath      string
-	WorkspaceRepoPath  string
-	DiffBaseSha        string
-	DiffBaseRef        string
-	RuntimeHandleID    string
-	RuntimeLaunchID    string
-	AgentSessionID     string
-	Prompt             string
-	PreviewURL         string
-	PreviewRevision    int64
-	TerminateOnPRMerge bool
-	CleanupGeneration  int64
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	ID                      domain.SessionID
+	ProjectID               domain.ProjectID
+	Num                     int64
+	IssueID                 domain.IssueID
+	Kind                    domain.SessionKind
+	Harness                 domain.AgentHarness
+	RoleID                  string
+	RoleMapSchemaVersion    int64
+	RoleMapSha256           string
+	RoleConfigRevision      int64
+	TemplateArtifactID      string
+	TemplateSha256          string
+	ResolvedModel           string
+	ResolvedWorkspaceWrites int64
+	ResolvedCanSpawn        int64
+	DisplayName             string
+	ActivityState           domain.ActivityState
+	ActivityLastAt          time.Time
+	FirstSignalAt           sql.NullTime
+	IsTerminated            bool
+	Branch                  string
+	WorkspacePath           string
+	WorkspaceRepoPath       string
+	DiffBaseSha             string
+	DiffBaseRef             string
+	RuntimeHandleID         string
+	RuntimeLaunchID         string
+	AgentSessionID          string
+	Prompt                  string
+	PreviewURL              string
+	PreviewRevision         int64
+	TerminateOnPRMerge      bool
+	CleanupGeneration       int64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) error {
@@ -105,6 +129,15 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.IssueID,
 		arg.Kind,
 		arg.Harness,
+		arg.RoleID,
+		arg.RoleMapSchemaVersion,
+		arg.RoleMapSha256,
+		arg.RoleConfigRevision,
+		arg.TemplateArtifactID,
+		arg.TemplateSha256,
+		arg.ResolvedModel,
+		arg.ResolvedWorkspaceWrites,
+		arg.ResolvedCanSpawn,
 		arg.DisplayName,
 		arg.ActivityState,
 		arg.ActivityLastAt,
@@ -135,7 +168,10 @@ SELECT id, project_id, num, issue_id, kind, harness,
     runtime_handle_id, agent_session_id, prompt,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn
 FROM sessions ORDER BY project_id, num
 `
 
@@ -175,6 +211,15 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]Session, error) {
 			&i.TerminateOnPRMerge,
 			&i.DiffBaseSha,
 			&i.DiffBaseRef,
+			&i.RoleID,
+			&i.RoleMapSchemaVersion,
+			&i.RoleMapSha256,
+			&i.RoleConfigRevision,
+			&i.TemplateArtifactID,
+			&i.TemplateSha256,
+			&i.ResolvedModel,
+			&i.ResolvedWorkspaceWrites,
+			&i.ResolvedCanSpawn,
 		); err != nil {
 			return nil, err
 		}
@@ -195,7 +240,10 @@ SELECT id, project_id, num, issue_id, kind, harness,
     runtime_handle_id, agent_session_id, prompt,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref
+    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
+    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
+    template_artifact_id, template_sha256, resolved_model,
+    resolved_workspace_writes, resolved_can_spawn
 FROM sessions WHERE project_id = ? ORDER BY num
 `
 
@@ -235,6 +283,15 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 			&i.TerminateOnPRMerge,
 			&i.DiffBaseSha,
 			&i.DiffBaseRef,
+			&i.RoleID,
+			&i.RoleMapSchemaVersion,
+			&i.RoleMapSha256,
+			&i.RoleConfigRevision,
+			&i.TemplateArtifactID,
+			&i.TemplateSha256,
+			&i.ResolvedModel,
+			&i.ResolvedWorkspaceWrites,
+			&i.ResolvedCanSpawn,
 		); err != nil {
 			return nil, err
 		}
@@ -343,7 +400,10 @@ func (q *Queries) SetSessionTerminateOnPRMerge(ctx context.Context, arg SetSessi
 
 const updateSession = `-- name: UpdateSession :exec
 UPDATE sessions SET
-    issue_id = ?, kind = ?, harness = ?, display_name = ?,
+    issue_id = ?, kind = ?, harness = ?,
+    role_id = ?, role_map_schema_version = ?, role_map_sha256 = ?, role_config_revision = ?,
+    template_artifact_id = ?, template_sha256 = ?, resolved_model = ?,
+    resolved_workspace_writes = ?, resolved_can_spawn = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
     runtime_launch_id = ?, agent_session_id = ?, prompt = ?,
@@ -353,29 +413,38 @@ WHERE id = ?
 `
 
 type UpdateSessionParams struct {
-	IssueID            domain.IssueID
-	Kind               domain.SessionKind
-	Harness            domain.AgentHarness
-	DisplayName        string
-	ActivityState      domain.ActivityState
-	ActivityLastAt     time.Time
-	FirstSignalAt      sql.NullTime
-	IsTerminated       bool
-	Branch             string
-	WorkspacePath      string
-	WorkspaceRepoPath  string
-	DiffBaseSha        string
-	DiffBaseRef        string
-	RuntimeHandleID    string
-	RuntimeLaunchID    string
-	AgentSessionID     string
-	Prompt             string
-	PreviewURL         string
-	PreviewRevision    int64
-	TerminateOnPRMerge bool
-	CleanupGeneration  int64
-	UpdatedAt          time.Time
-	ID                 domain.SessionID
+	IssueID                 domain.IssueID
+	Kind                    domain.SessionKind
+	Harness                 domain.AgentHarness
+	RoleID                  string
+	RoleMapSchemaVersion    int64
+	RoleMapSha256           string
+	RoleConfigRevision      int64
+	TemplateArtifactID      string
+	TemplateSha256          string
+	ResolvedModel           string
+	ResolvedWorkspaceWrites int64
+	ResolvedCanSpawn        int64
+	DisplayName             string
+	ActivityState           domain.ActivityState
+	ActivityLastAt          time.Time
+	FirstSignalAt           sql.NullTime
+	IsTerminated            bool
+	Branch                  string
+	WorkspacePath           string
+	WorkspaceRepoPath       string
+	DiffBaseSha             string
+	DiffBaseRef             string
+	RuntimeHandleID         string
+	RuntimeLaunchID         string
+	AgentSessionID          string
+	Prompt                  string
+	PreviewURL              string
+	PreviewRevision         int64
+	TerminateOnPRMerge      bool
+	CleanupGeneration       int64
+	UpdatedAt               time.Time
+	ID                      domain.SessionID
 }
 
 func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) error {
@@ -383,6 +452,15 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.IssueID,
 		arg.Kind,
 		arg.Harness,
+		arg.RoleID,
+		arg.RoleMapSchemaVersion,
+		arg.RoleMapSha256,
+		arg.RoleConfigRevision,
+		arg.TemplateArtifactID,
+		arg.TemplateSha256,
+		arg.ResolvedModel,
+		arg.ResolvedWorkspaceWrites,
+		arg.ResolvedCanSpawn,
 		arg.DisplayName,
 		arg.ActivityState,
 		arg.ActivityLastAt,

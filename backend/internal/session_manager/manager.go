@@ -185,6 +185,12 @@ type Store interface {
 	// Kill and successful RestoreAll must remove these rows to prevent
 	// resurrecting sessions the user intentionally terminated.
 	DeleteSessionWorktrees(ctx context.Context, id domain.SessionID) error
+	// PutTemplateArtifact durably stores immutable role template bytes so a
+	// restored session can use the exact template pinned at spawn.
+	PutTemplateArtifact(ctx context.Context, id, sha256 string, content []byte, createdAt time.Time) error
+	// GetTemplateArtifact loads the immutable role template bytes pinned on a
+	// session. ok=false means the artifact is not present and restore must fail.
+	GetTemplateArtifact(ctx context.Context, id string) (content []byte, sha string, ok bool, err error)
 }
 
 // Manager coordinates internal session spawn, restore, kill, and cleanup over
@@ -393,11 +399,23 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	if projectKind == domain.ProjectKindScratch && strings.TrimSpace(cfg.Branch) != "" {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", ErrScratchBranchUnsupported)
 	}
+	// Multi-sub role map (host-authoritative). Resolve once; prompt + launch
+	// must consume this result (never re-resolve, never ignore errors).
+	roleResult, roleErr := applyRoleMap(&cfg, project, m.dataDir)
+	if roleErr != nil {
+		return domain.SessionRecord{}, 0, 0, mapRoleError(roleErr)
+	}
+	if err := m.persistRoleTemplateArtifact(ctx, roleResult); err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: persist role template artifact: %w", err)
+	}
 	// A per-project role override picks the harness when the spawn names none,
 	// so a project can default workers to one agent and orchestrators to another.
-	cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
+	// Skip when applyRoleMap already set harness from a role binding.
+	if cfg.RoleBinding.RoleID == "" {
+		cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
+	}
 	if cfg.Harness == "" {
-		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: configure project %s.agent or pass --harness", ErrMissingHarness, roleConfigName(cfg.Kind))
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: configure project %s.agent or pass --harness / --role", ErrMissingHarness, roleConfigName(cfg.Kind))
 	}
 
 	// Reject an unknown harness before any durable state is created. Doing this
@@ -411,7 +429,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
 	}
 
-	prompt, systemPrompt, err := m.buildSpawnTexts(ctx, cfg)
+	prompt, systemPrompt, err := m.buildSpawnTexts(ctx, cfg, roleResult)
 	if err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: prompt: %w", err)
 	}
@@ -473,7 +491,8 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
 	}
-	agentConfig := effectiveAgentConfig(cfg.Kind, project.Config)
+	// Merge host-resolved role model/permissions over legacy project AgentConfig.
+	agentConfig := mergeAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
 	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
@@ -1234,9 +1253,9 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, rec.Harness)
 	}
-	// The system prompt is derived, not persisted: recompute it so a restored
-	// session keeps its standing instructions across the relaunch.
-	systemPrompt, err := m.buildSystemPrompt(ctx, rec.Kind, rec.ProjectID)
+	// Refresh live standing instructions, but restore the role body exclusively
+	// from the immutable template artifact pinned on the session.
+	systemPrompt, _, err := m.buildRestoreSystemPrompt(ctx, rec, project)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt: %w", operation, rec.ID, err)
 	}
@@ -1246,9 +1265,9 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		return RestoreResult{}, fmt.Errorf("%s %s: system prompt file: %w", operation, rec.ID, err)
 	}
 
-	// Restore re-applies the project's resolved agent config so a configured
-	// model/permissions carry across a restore, matching fresh spawn.
-	agentConfig := effectiveAgentConfig(rec.Kind, project.Config)
+	// Restore re-applies the host-resolved role model over the current project
+	// config, matching fresh spawn while preserving the pinned role target.
+	agentConfig := restoreAgentConfig(rec, project)
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
@@ -2301,7 +2320,7 @@ func (m *Manager) cleanupRecords(ctx context.Context, project domain.ProjectID) 
 // ---- helpers ----
 
 func seedRecord(cfg ports.SpawnConfig, now time.Time) domain.SessionRecord {
-	return domain.SessionRecord{
+	rec := domain.SessionRecord{
 		ProjectID:   cfg.ProjectID,
 		IssueID:     cfg.IssueID,
 		Kind:        cfg.Kind,
@@ -2311,6 +2330,14 @@ func seedRecord(cfg ports.SpawnConfig, now time.Time) domain.SessionRecord {
 		DisplayName: cfg.DisplayName,
 		Activity:    domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
 	}
+	if cfg.RoleBinding.RoleID != "" {
+		rec.Metadata.Role = cfg.RoleBinding
+		// Prefer resolved harness from role binding when set.
+		if cfg.RoleBinding.ResolvedHarness != "" {
+			rec.Harness = cfg.RoleBinding.ResolvedHarness
+		}
+	}
+	return rec
 }
 
 func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, branchNamespace string) string {
@@ -2470,9 +2497,14 @@ func appendAttachmentReferences(prompt string, refs []string) string {
 // standing instructions rather than part of the human's task request. A
 // promptless spawn delivers no user prompt at all: the agent simply lands at an
 // empty input box rather than receiving an auto-generated kickoff turn.
-func (m *Manager) buildSpawnTexts(ctx context.Context, cfg ports.SpawnConfig) (prompt, systemPrompt string, err error) {
+func (m *Manager) buildSpawnTexts(ctx context.Context, cfg ports.SpawnConfig, role roleApplyResult) (prompt, systemPrompt string, err error) {
 	prompt = buildPrompt(cfg)
 	systemPrompt, err = m.buildSystemPrompt(ctx, cfg.Kind, cfg.ProjectID)
+	if err != nil {
+		return "", "", err
+	}
+	// Use the single pinned role resolution from Spawn — fail closed if missing.
+	systemPrompt, err = composeSystemPromptWithRole(systemPrompt, role)
 	if err != nil {
 		return "", "", err
 	}
