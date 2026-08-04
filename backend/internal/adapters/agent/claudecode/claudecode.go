@@ -243,9 +243,11 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	if err != nil {
 		return nil, false, err
 	}
-	cmd = make([]string, 0, 7)
+	cmd = make([]string, 0, 11)
 	cmd = append(cmd, binary)
 	appendPermissionFlags(&cmd, cfg.Permissions)
+	// Re-apply RO tool lists on resume (permission mode alone does not deny writes).
+	appendToolFlags(&cmd, cfg.AllowedTools, cfg.DisallowedTools)
 	systemPrompt, err := resolveRestoreSystemPrompt(cfg)
 	if err != nil {
 		return nil, false, err

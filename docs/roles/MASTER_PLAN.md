@@ -1,9 +1,9 @@
 # Master plan: Multi-sub harness orchestration on AO
 
-**Status:** implementation-ready after Codex review rounds 1–2; **Target B locked** (~4–6 weeks)  
-**Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees  
-**Not base:** Intent asar; harness-orchestration as daily UI  
-**Sources:** Intent RE, AO code/PRs, harness-orchestration PLAN, deep-research-report, Codex plan reviews  
+**Status:** implementation-ready after Codex review rounds 1–2; **Target B locked** (~4–6 weeks)
+**Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
+**Not base:** Intent asar; harness-orchestration as daily UI
+**Sources:** Intent RE, AO code/PRs, harness-orchestration PLAN, deep-research-report, Codex plan reviews
 
 ---
 
@@ -45,13 +45,13 @@ ao spawn --project <id> --role <role_id> --name "<≤20>" --prompt-file <path>
 
 Daemon:
 
-1. Authenticate **calling session** (session-scoped credential; not spoofable bare `AO_SESSION_ID` alone).  
-2. Enforce caller `canSpawn` (orchestrator true; workers false).  
-3. Require `role_id` when `strictDelegation` on project.  
-4. Resolve role → template artifact + harness + model + permissions.  
-5. **Forbid** harness/model overrides on the ordinary spawn path.  
-6. Render system prompt from **pinned template artifact**.  
-7. Persist durable role fields.  
+1. Authenticate **calling session** (session-scoped credential; not spoofable bare `AO_SESSION_ID` alone).
+2. Enforce caller `canSpawn` (orchestrator true; workers false).
+3. Require `role_id` when `strictDelegation` on project.
+4. Resolve role → template artifact + harness + model + permissions.
+5. **Forbid** harness/model overrides on the ordinary spawn path.
+6. Render system prompt from **pinned template artifact**.
+7. Persist durable role fields.
 8. Launch harness.
 
 ### 2.2 Strict project reject rules (Phase 1 — required)
@@ -69,7 +69,7 @@ Non-strict projects may keep legacy `ao spawn --agent` for compatibility.
 
 ### 2.3 Why this preserves “strict prompts only”
 
-Model still decides **to** spawn and types `--role ui`.  
+Model still decides **to** spawn and types `--role ui`.
 Model **cannot** invent Codex vs Pi routing or free-form models.
 
 ---
@@ -162,13 +162,14 @@ On switch: write **immutable switch-history record** with prior harness/model + 
   "roles": {
     "orchestrator": {
       "template": "orchestrator",
-      "harness": "claude-code",
+      "harness": "codex",
       "model": null,
-      "permissions": { "workspaceWrites": false, "canSpawn": true }
+      "permissions": { "workspaceWrites": false, "canSpawn": true },
+      "_comment": "Phase 1: only codex has read_only_enforced. Claude RO deferred until dontAsk/OS sandbox."
     },
     "implementor": {
       "template": "implementor",
-      "harness": "codex",
+      "harness": "claude-code",
       "model": "…",
       "permissions": { "workspaceWrites": true, "canSpawn": false },
       "when": ["implementation", "bugfix", "tests"]
@@ -225,21 +226,21 @@ On switch: write **immutable switch-history record** with prior harness/model + 
 
 ### 5.1 Two artifacts
 
-**SemanticHandoffV1** (agent-authored, untrusted for Git/tests):  
+**SemanticHandoffV1** (agent-authored, untrusted for Git/tests):
 objective, open items, claimed decisions, rejected approaches, uncertainty, latest user intent, source generation, native session pointer.
 
-**ObservedWorkspaceV1** (AO deterministic):  
+**ObservedWorkspaceV1** (AO deterministic):
 branch, HEAD, worktree, porcelain, SHAs, timestamps, generation id, event cursor, **verified** results only when AO itself captured command + exit status + artifact provenance. Otherwise agent-reported tests stay **attributed claims** requiring re-verification.
 
 Compiler: observed Git/test facts **override** semantic claims.
 
 ### 5.2 Worker switch
 
-#3548-class saga: durable states, generation fencing, input gates, idempotency, pre/post-stop failures, crash recovery, native probe, target ack.  
+#3548-class saga: durable states, generation fencing, input gates, idempotency, pre/post-stop failures, crash recovery, native probe, target ack.
 Initial matrix: Claude↔Codex; expand by capability gate.
 
-**Pre-stop failure:** source remains usable.  
-**Post-stop failure:** handoff retained; target retry allowed.  
+**Pre-stop failure:** source remains usable.
+**Post-stop failure:** handoff retained; target retry allowed.
 **At most one generation** owns session input at a switch boundary.
 
 ### 5.3 Same-harness “fresh conversation” (P1 refinement)
@@ -252,7 +253,7 @@ Coordinator lease, nudge/routing rebind, pending message transfer, generation fe
 
 ### 5.5 Lifecycle ledger (required, not optional)
 
-Append-only records for: switch, pause, resume, failover, fresh-conversation.  
+Append-only records for: switch, pause, resume, failover, fresh-conversation.
 **Not** full per-turn chat ledger. Required for audit and restore of switch-history.
 
 ---
@@ -266,16 +267,16 @@ Append-only records for: switch, pause, resume, failover, fresh-conversation.
 | `limit_detection_supported` | Auto pause/failover reliance |
 | `read_only_enforced` | `workspaceWrites: false` roles |
 
-Unsupported → **config reject**, never silent degrade.  
+Unsupported → **config reject**, never silent degrade.
 Zai and Kimi validated **separately** on Pi.
 
 ---
 
 ## 7. Limits order
 
-1. Structured / reviewed envelopes only (never free-text “I hit a limit”).  
-2. Durable pause; **zero** automatic send/restart.  
-3. Manual continue on next ladder rung.  
+1. Structured / reviewed envelopes only (never free-text “I hit a limit”).
+2. Durable pause; **zero** automatic send/restart.
+3. Manual continue on next ladder rung.
 4. Automatic mode only if `failover.mode=automatic` (opt-in).
 
 ---
@@ -298,51 +299,51 @@ Zai and Kimi validated **separately** on Pi.
 
 ## 9. Definition-of-done invariants (must hold)
 
-1. A **strict** project cannot create a **roleless** worker or override resolved harness/model on the ordinary path.  
-2. A session with **`canSpawn: false`** cannot successfully invoke daemon spawning.  
-3. **Restore** uses the **pinned template artifact**, even if repo templates changed.  
-4. A **pre-stop** switch failure leaves the **source usable**.  
-5. A **post-stop** failure **retains the hand-off** and permits **target retry**.  
-6. At most **one generation** owns session input at any switch boundary.  
-7. A **limit** produces **durable pause** with **zero automatic send/restart**.  
-8. **Failover preserves `role_id`** and cannot exceed its **incident bound**.  
-9. **Unsupported Pi (or any harness) capabilities reject configuration** rather than degrading silently.  
-10. **Lifecycle ledger** records every switch/pause/failover/fresh-conversation.  
-11. **ObservedWorkspaceV1** marks tests **verified** only when AO captured command + exit + provenance.  
-12. **Failover default mode is manual**; automatic is opt-in.  
-13. **Read-only roles** only bind to harnesses with `read_only_enforced`.  
+1. A **strict** project cannot create a **roleless** worker or override resolved harness/model on the ordinary path.
+2. A session with **`canSpawn: false`** cannot successfully invoke daemon spawning.
+3. **Restore** uses the **pinned template artifact**, even if repo templates changed.
+4. A **pre-stop** switch failure leaves the **source usable**.
+5. A **post-stop** failure **retains the hand-off** and permits **target retry**.
+6. At most **one generation** owns session input at any switch boundary.
+7. A **limit** produces **durable pause** with **zero automatic send/restart**.
+8. **Failover preserves `role_id`** and cannot exceed its **incident bound**.
+9. **Unsupported Pi (or any harness) capabilities reject configuration** rather than degrading silently.
+10. **Lifecycle ledger** records every switch/pause/failover/fresh-conversation.
+11. **ObservedWorkspaceV1** marks tests **verified** only when AO captured command + exit + provenance.
+12. **Failover default mode is manual**; automatic is opt-in.
+13. **Read-only roles** only bind to harnesses with `read_only_enforced`.
 
 ---
 
 ## 10. Coding checklist
 
-1. [ ] Fork + pin AO baseline; own migrations  
-2. [ ] Capability matrix + config validation  
-3. [ ] Session-scoped spawn credential  
-4. [ ] Role map schema (schema_version + sha256 + revision)  
-5. [ ] Template CAS artifact by sha256  
-6. [ ] Durable session role fields + switch-history  
-7. [ ] `ao spawn --role`; strict reject roleless / overrides  
-8. [ ] RoleExecutionPolicy enforcement  
-9. [ ] Strict orch prompt builder  
-10. [ ] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler  
-11. [ ] Worker switch saga + fresh-conversation  
-12. [ ] Lifecycle ledger  
-13. [ ] Orchestrator switch protocol  
-14. [ ] Limit pause  
-15. [ ] Manual continue + opt-in auto-failover  
-16. [ ] Dogfood against all DoD invariants  
+1. [ ] Fork + pin AO baseline; own migrations
+2. [ ] Capability matrix + config validation
+3. [ ] Session-scoped spawn credential
+4. [ ] Role map schema (schema_version + sha256 + revision)
+5. [ ] Template CAS artifact by sha256
+6. [ ] Durable session role fields + switch-history
+7. [ ] `ao spawn --role`; strict reject roleless / overrides
+8. [ ] RoleExecutionPolicy enforcement
+9. [ ] Strict orch prompt builder
+10. [ ] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
+11. [ ] Worker switch saga + fresh-conversation
+12. [ ] Lifecycle ledger
+13. [ ] Orchestrator switch protocol
+14. [ ] Limit pause
+15. [ ] Manual continue + opt-in auto-failover
+16. [ ] Dogfood against all DoD invariants
 
 ---
 
 ## 11. Non-goals (v1)
 
-- Host auto-spawn of workers  
-- Free-form `--agent`/`--model` as supported orch path on strict projects  
-- OpenCode  
-- Full per-turn event ledger  
-- Silent capability degradation  
-- Auto-failover as default  
+- Host auto-spawn of workers
+- Free-form `--agent`/`--model` as supported orch path on strict projects
+- OpenCode
+- Full per-turn event ledger
+- Silent capability degradation
+- Auto-failover as default
 
 ---
 

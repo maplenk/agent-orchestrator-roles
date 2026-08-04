@@ -302,7 +302,7 @@ func TestApplyRoleMap_AppliesHarnessAndModel(t *testing.T) {
 	}
 }
 
-func TestApplyRoleMap_RejectsAllReadOnlyUntilAdapterModeExists(t *testing.T) {
+func TestApplyRoleMap_ReadOnly_OnlyCodexAllowed(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{
 		"reviewer.md":     "---\nid: reviewer\nname: Reviewer\n---\n# R\n",
@@ -315,9 +315,8 @@ func TestApplyRoleMap_RejectsAllReadOnlyUntilAdapterModeExists(t *testing.T) {
 	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
 	t.Cleanup(func() { testTemplateLoader = nil })
 
-	// Codex is the dangerous case: PermissionModeDefault maps to full bypass.
-	for _, harness := range []domain.AgentHarness{domain.HarnessCodex, domain.HarnessClaudeCode, domain.HarnessPi} {
-		project := domain.ProjectRecord{
+	mkProject := func(harness domain.AgentHarness) domain.ProjectRecord {
+		return domain.ProjectRecord{
 			ID: "mer",
 			Config: domain.ProjectConfig{
 				RoleMap: domain.RoleMap{
@@ -327,7 +326,8 @@ func TestApplyRoleMap_RejectsAllReadOnlyUntilAdapterModeExists(t *testing.T) {
 					Roles: map[string]domain.RoleBinding{
 						"orchestrator": {
 							Template: "orchestrator",
-							Harness:  domain.HarnessClaudeCode,
+							// Codex is the only Phase 1 RO-enforced harness for WW=false orch.
+							Harness: domain.HarnessCodex,
 							Permissions: domain.RoleExecutionPolicy{
 								WorkspaceWrites: false,
 								CanSpawn:        true,
@@ -345,8 +345,22 @@ func TestApplyRoleMap_RejectsAllReadOnlyUntilAdapterModeExists(t *testing.T) {
 				},
 			},
 		}
+	}
+
+	// Codex: real OS sandbox — allowed.
+	cfg := ports.SpawnConfig{Kind: domain.KindWorker, RoleID: "reviewer"}
+	res, err := applyRoleMap(&cfg, mkProject(domain.HarnessCodex), dir)
+	if err != nil {
+		t.Fatalf("codex: unexpected err %v", err)
+	}
+	if !res.Applied || res.Policy.WorkspaceWrites {
+		t.Fatalf("codex: applied=%v policy=%+v", res.Applied, res.Policy)
+	}
+
+	// Claude auto mode is not fail-closed; Pi has no sandbox — reject both.
+	for _, harness := range []domain.AgentHarness{domain.HarnessClaudeCode, domain.HarnessPi} {
 		cfg := ports.SpawnConfig{Kind: domain.KindWorker, RoleID: "reviewer"}
-		_, err := applyRoleMap(&cfg, project, dir)
+		_, err := applyRoleMap(&cfg, mkProject(harness), dir)
 		if !errors.Is(err, ErrReadOnlyUnsupported) {
 			t.Fatalf("harness %q: err = %v, want ErrReadOnlyUnsupported", harness, err)
 		}

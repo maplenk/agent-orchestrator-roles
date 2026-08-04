@@ -93,6 +93,43 @@ type trackerIntakeConfig struct {
 	Assignee string `json:"assignee,omitempty"`
 }
 
+// roleExecutionPolicy mirrors domain.RoleExecutionPolicy (CLI --config-json).
+type roleExecutionPolicy struct {
+	WorkspaceWrites bool `json:"workspaceWrites"`
+	CanSpawn        bool `json:"canSpawn"`
+}
+
+// roleBinding mirrors domain.RoleBinding.
+type roleBinding struct {
+	Template    string              `json:"template,omitempty"`
+	Harness     string              `json:"harness,omitempty"`
+	Model       string              `json:"model,omitempty"`
+	Permissions roleExecutionPolicy `json:"permissions"`
+	When        []string            `json:"when,omitempty"`
+}
+
+// failoverTarget mirrors domain.FailoverTarget.
+type failoverTarget struct {
+	Harness string `json:"harness,omitempty"`
+	Model   string `json:"model,omitempty"`
+}
+
+// failoverConfig mirrors domain.FailoverConfig.
+type failoverConfig struct {
+	Mode  string                      `json:"mode,omitempty"`
+	Roles map[string][]failoverTarget `json:"roles,omitempty"`
+}
+
+// roleMap mirrors domain.RoleMap. Without this field, --config-json silently
+// drops roleMap (encoding/json ignores unknown keys into the mirror struct).
+type roleMap struct {
+	SchemaVersion    int                    `json:"role_map_schema_version,omitempty"`
+	StrictDelegation bool                   `json:"strictDelegation,omitempty"`
+	OrchestratorRole string                 `json:"orchestratorRole,omitempty"`
+	Roles            map[string]roleBinding `json:"roles,omitempty"`
+	Failover         failoverConfig         `json:"failover,omitempty"`
+}
+
 // projectConfig mirrors the daemon's typed domain.ProjectConfig for the CLI
 // client. The CLI sets common fields via flags and the whole object via
 // --config-json.
@@ -109,6 +146,7 @@ type projectConfig struct {
 	Worker            roleOverride        `json:"worker,omitempty"`
 	Orchestrator      roleOverride        `json:"orchestrator,omitempty"`
 	TrackerIntake     trackerIntakeConfig `json:"trackerIntake,omitempty"`
+	RoleMap           *roleMap            `json:"roleMap,omitempty"`
 }
 
 // setConfigRequest mirrors the daemon's SetConfigInput body for

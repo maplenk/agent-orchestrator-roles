@@ -506,6 +506,54 @@ func TestGetLaunchCommandExplicitPermissionsOverrideConfig(t *testing.T) {
 	}
 }
 
+// Serialization coverage only: explicit AllowedTools/DisallowedTools on
+// LaunchConfig map to CLI flags. This is NOT read_only_enforced evidence
+// (Claude registry cell is false; roles package does not emit these for RO).
+func TestGetLaunchCommand_ExplicitToolListFlags(t *testing.T) {
+	p := &Plugin{resolvedBinary: "claude"}
+	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Permissions:     ports.PermissionModeAuto,
+		AllowedTools:    []string{"Read", "Grep"},
+		DisallowedTools: []string{"Edit", "Write"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSubsequence(cmd, []string{"--permission-mode", "auto"}) {
+		t.Fatalf("want --permission-mode auto: %#v", cmd)
+	}
+	if !containsSubsequence(cmd, []string{"--allowedTools", "Read,Grep"}) {
+		t.Fatalf("want allowed tools flags: %#v", cmd)
+	}
+	if !containsSubsequence(cmd, []string{"--disallowedTools", "Edit,Write"}) {
+		t.Fatalf("want disallowed tools flags: %#v", cmd)
+	}
+}
+
+// Serialization coverage only: restore re-emits explicit tool lists when set.
+// Not evidence of workspace RO enforcement.
+func TestGetRestoreCommand_ExplicitToolListFlags(t *testing.T) {
+	p := &Plugin{resolvedBinary: "claude"}
+	cmd, ok, err := p.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		Permissions:     ports.PermissionModeAuto,
+		AllowedTools:    []string{"Read"},
+		DisallowedTools: []string{"Edit"},
+		Session: ports.SessionRef{
+			ID:       "sess-tools",
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "native-1"},
+		},
+	})
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	if !containsSubsequence(cmd, []string{"--allowedTools", "Read"}) {
+		t.Fatalf("restore must re-emit allowed tools: %#v", cmd)
+	}
+	if !containsSubsequence(cmd, []string{"--disallowedTools", "Edit"}) {
+		t.Fatalf("restore must re-emit deny tools: %#v", cmd)
+	}
+}
+
 func TestGetLaunchCommandRejectsInvalidConfig(t *testing.T) {
 	p := &Plugin{resolvedBinary: "claude"}
 	if _, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{

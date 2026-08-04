@@ -17,17 +17,22 @@ Pin before feature work. Own migration numbers on this fork (do not collide with
 
 Intent-grade **role templates** + daemon-resolved **`ao spawn --role`** multi-subscription routing, durable switch/pause/failover, on top of AO’s UI.
 
-Master plan (session):  
-`~/.grok/sessions/.../plan.md` — also summarized in `MASTER_PLAN.md` in this directory.
+Master plan (design): `MASTER_PLAN.md`
+**Status + remaining execution plan:** `REMAINING_PLAN.md` (completed vs open, order, gates).
 
 ## Delivery
 
-**Target B** — ~4–6 weeks (full wishlist). Start at Phase 0 (this pin + capability matrix).
+**Target B** — full wishlist.
+- Phase 1 **foundation** accepted: roles, CAS, canSpawn, Codex RO, capability registry, CLI roleMap, template Option A.
+- Phase 1 **strict dogfood exit** remains open (see `REMAINING_PLAN.md`).
+- Claude `read_only_enforced=false` (honest); RO orch/reviewer use **Codex**.
+**Next:** Phase 2A worker switch + fresh conversation + ledger.
 
 ## Remotes
 
 ```bash
-# Add your GitHub fork when ready:
-# git remote add origin git@github.com:maplenk/<repo>.git
+git remote -v
+# origin   https://github.com/maplenk/agent-orchestrator-roles.git
+# upstream https://github.com/Untrivial-ai/agent-orchestrator.git
 git fetch upstream
 ```

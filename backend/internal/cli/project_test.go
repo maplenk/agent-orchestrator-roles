@@ -81,6 +81,56 @@ func TestProjectSetConfig_TrackerIntakeJSON(t *testing.T) {
 	}
 }
 
+func TestProjectSetConfig_RoleMapJSONPreserved(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, capture := projectServer(t, http.StatusOK, `{"project":{"id":"demo","path":"/repo/demo"}}`)
+	writeRunFileFor(t, cfg, srv)
+
+	roleJSON := `{
+		"roleMap":{
+			"role_map_schema_version":1,
+			"strictDelegation":true,
+			"orchestratorRole":"orchestrator",
+			"roles":{
+				"orchestrator":{
+					"template":"orchestrator",
+					"harness":"claude-code",
+					"permissions":{"workspaceWrites":false,"canSpawn":true}
+				},
+				"implementor":{
+					"template":"implementor",
+					"harness":"codex",
+					"permissions":{"workspaceWrites":true,"canSpawn":false}
+				}
+			}
+		}
+	}`
+	_, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "project", "set-config", "demo", "--config-json", roleJSON)
+	if err != nil {
+		t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+	}
+	var got setConfigRequest
+	if err := json.Unmarshal(capture.body, &got); err != nil {
+		t.Fatalf("decode request: %v\nbody=%s", err, capture.body)
+	}
+	if got.Config.RoleMap == nil {
+		t.Fatalf("roleMap dropped from CLI request body: %s", capture.body)
+	}
+	if !got.Config.RoleMap.StrictDelegation || got.Config.RoleMap.OrchestratorRole != "orchestrator" {
+		t.Fatalf("roleMap = %#v", got.Config.RoleMap)
+	}
+	orch, ok := got.Config.RoleMap.Roles["orchestrator"]
+	if !ok || orch.Harness != "claude-code" || orch.Permissions.WorkspaceWrites || !orch.Permissions.CanSpawn {
+		t.Fatalf("orchestrator binding = %#v", orch)
+	}
+	impl, ok := got.Config.RoleMap.Roles["implementor"]
+	if !ok || impl.Harness != "codex" || !impl.Permissions.WorkspaceWrites || impl.Permissions.CanSpawn {
+		t.Fatalf("implementor binding = %#v", impl)
+	}
+}
+
 func TestBuildProjectConfigTrackerIntakeFlags(t *testing.T) {
 	got, err := buildProjectConfig(projectSetConfigOptions{
 		trackerIntake:   true,

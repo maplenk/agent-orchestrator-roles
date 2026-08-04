@@ -207,6 +207,7 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 	tests := []struct {
 		name        string
 		permission  ports.PermissionMode
+		readOnly    bool
 		want        []string
 		notExpected string
 	}{
@@ -237,6 +238,13 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 			permission: "",
 			want:       []string{"--dangerously-bypass-approvals-and-sandbox"},
 		},
+		{
+			name:        "read-only sandbox",
+			permission: ports.PermissionModeBypassPermissions, // ignored when ReadOnly
+			readOnly:   true,
+			want:       []string{"--sandbox", "read-only", "--ask-for-approval", "never"},
+			notExpected: "--dangerously-bypass-approvals-and-sandbox",
+		},
 	}
 
 	for _, tt := range tests {
@@ -244,6 +252,7 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 			plugin := &Plugin{resolvedBinary: "codex"}
 			cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 				Permissions: tt.permission,
+				ReadOnly:    tt.readOnly,
 			})
 			if err != nil {
 				t.Fatal(err)

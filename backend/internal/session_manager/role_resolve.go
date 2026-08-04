@@ -12,6 +12,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 )
 
 // Role resolution errors (map to 400 at the API layer later).
@@ -38,14 +39,17 @@ var (
 	testTemplateLoader *roles.Loader
 )
 
-// profileRoots returns directories that may contain role templates.
-// Order: AO_ROLE_PROFILES_DIR, then <cwd>/profiles, then relative search from dataDir.
+// profileRoots returns host-approved directories for role templates (Option A).
+// Order: AO_ROLE_PROFILES_DIR (explicit approval), then host process profiles
+// under cwd/dataDir. Never includes project worktree paths or .ao/roles.
+// See docs/roles/TEMPLATE_AUTHORITY.md.
 func profileRoots(dataDir string) []string {
 	var roots []string
 	if d := os.Getenv("AO_ROLE_PROFILES_DIR"); d != "" {
 		roots = append(roots, d)
 	}
 	if cwd, err := os.Getwd(); err == nil {
+		// Host daemon cwd — not a session worktree.
 		roots = append(roots, filepath.Join(cwd, "profiles"))
 	}
 	if dataDir != "" {
@@ -120,14 +124,12 @@ func applyRoleMap(cfg *ports.SpawnConfig, project domain.ProjectRecord, dataDir 
 		return roleApplyResult{}, fmt.Errorf("%w: role %q template %q empty", ErrRolePromptRequired, resolved.RoleID, resolved.Binding.Template)
 	}
 
-	// workspaceWrites=false requires an adapter-level read-only launch mode.
-	// Prompt text and AO PermissionMode defaults are NOT enforcement: Codex maps
-	// default → --dangerously-bypass-approvals-and-sandbox; Claude default defers
-	// to user settings and may resolve to bypassPermissions. Fail closed for
-	// every harness until CAPABILITY_MATRIX marks read_only_enforced and adapters
-	// implement an explicit read-only launch path.
+	// workspaceWrites=false requires adapter-level RO (registry read_only_enforced).
+	// Prompt text is never enforcement. See docs/roles/READ_ONLY_CONTRACT.md.
 	if !resolved.Session.ResolvedPermissions.WorkspaceWrites {
-		return roleApplyResult{}, fmt.Errorf("%w: %q (no adapter read-only launch mode; do not use prompt-only policy)", ErrReadOnlyUnsupported, cfg.Harness)
+		if err := capabilities.RequireReadOnly(cfg.Harness); err != nil {
+			return roleApplyResult{}, fmt.Errorf("%w: %v", ErrReadOnlyUnsupported, err)
+		}
 	}
 
 	// Authoritative role body (appended as footer in composeSystemPromptWithRole).
@@ -227,6 +229,16 @@ func (m *Manager) restoreRoleApplyResult(ctx context.Context, rec domain.Session
 	systemPrompt := strings.TrimSpace(tmpl.SystemPrompt())
 	if systemPrompt == "" {
 		return roleApplyResult{}, fmt.Errorf("%w: restore role %q pinned template artifact %q empty", ErrRolePromptRequired, roleID, artifactID)
+	}
+	// Defense in depth: re-check RO capability on restore (not config-save only).
+	if !binding.ResolvedPermissions.WorkspaceWrites {
+		h := binding.ResolvedHarness
+		if h == "" {
+			h = rec.Harness
+		}
+		if err := capabilities.RequireReadOnly(h); err != nil {
+			return roleApplyResult{}, fmt.Errorf("%w: restore: %v", ErrReadOnlyUnsupported, err)
+		}
 	}
 	extra := []string{systemPrompt}
 	roleMap := project.Config.RoleMap

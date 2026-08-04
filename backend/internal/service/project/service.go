@@ -3,6 +3,7 @@ package project
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 )
 
 // Manager is the controller-facing contract for the /api/v1/projects surface.
@@ -204,7 +206,7 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 
 	var projectConfig domain.ProjectConfig
 	if in.Config != nil {
-		if err := in.Config.Validate(); err != nil {
+		if err := validateProjectConfig(*in.Config); err != nil {
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
 		projectConfig = *in.Config
@@ -517,7 +519,7 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	if utf8.RuneCountInString(displayName) > maxDisplayNameLen {
 		return Project{}, apierr.Invalid("DISPLAY_NAME_TOO_LONG", "Display name must be 20 characters or fewer", nil)
 	}
-	if err := in.Config.Validate(); err != nil {
+	if err := validateProjectConfig(in.Config); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
 	row, ok, err := m.store.GetProject(ctx, string(id))
@@ -601,7 +603,7 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 	if err := validateProjectID(id); err != nil {
 		return Project{}, err
 	}
-	if err := in.Config.Validate(); err != nil {
+	if err := validateProjectConfig(in.Config); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
 	row, ok, err := m.store.GetProject(ctx, string(id))
@@ -621,6 +623,18 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 		return Project{}, apierr.Internal("PROJECT_CONFIG_UPDATE_FAILED", "Failed to update project config")
 	}
 	return m.projectFromRow(row), nil
+}
+
+// validateProjectConfig runs domain structural validation plus harness
+// capability checks (read_only_enforced, spawn_supported) at config-save.
+func validateProjectConfig(cfg domain.ProjectConfig) error {
+	if err := cfg.Validate(); err != nil {
+		return err
+	}
+	if err := capabilities.ValidateRoleMap(cfg.RoleMap); err != nil {
+		return fmt.Errorf("roleMap: %w", err)
+	}
+	return nil
 }
 
 func validateScratchProjectConfig(cfg domain.ProjectConfig) error {

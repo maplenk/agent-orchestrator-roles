@@ -110,7 +110,7 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	appendNoUpdateCheckFlag(&cmd)
 	appendHideRateLimitNudgeFlag(&cmd)
 	appendHookTrustBypassFlag(&cmd)
-	appendApprovalFlags(&cmd, cfg.Permissions)
+	appendApprovalFlags(&cmd, cfg.Permissions, cfg.ReadOnly)
 	appendSessionHookFlags(&cmd)
 	appendTerminalCompatibilityFlags(&cmd)
 	appendWorkspaceTrustFlag(&cmd, cfg.WorkspacePath)
@@ -152,7 +152,7 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	appendNoUpdateCheckFlag(&cmd)
 	appendHideRateLimitNudgeFlag(&cmd)
 	appendHookTrustBypassFlag(&cmd)
-	appendApprovalFlags(&cmd, cfg.Permissions)
+	appendApprovalFlags(&cmd, cfg.Permissions, cfg.ReadOnly)
 	appendSessionHookFlags(&cmd)
 	appendTerminalCompatibilityFlags(&cmd)
 	appendWorkspaceTrustFlag(&cmd, cfg.Session.WorkspacePath)
@@ -380,7 +380,13 @@ func appendModelFlag(cmd *[]string, cfg ports.AgentConfig) {
 	}
 }
 
-func appendApprovalFlags(cmd *[]string, permissions ports.PermissionMode) {
+func appendApprovalFlags(cmd *[]string, permissions ports.PermissionMode, readOnly bool) {
+	// workspaceWrites=false: OS/CLI sandbox denies worktree writes. Never emit
+	// --dangerously-bypass-approvals-and-sandbox for RO roles (see READ_ONLY_CONTRACT).
+	if readOnly {
+		*cmd = append(*cmd, "--sandbox", "read-only", "--ask-for-approval", "never")
+		return
+	}
 	switch ports.NormalizePermissionMode(permissions) {
 	case ports.PermissionModeDefault:
 		// Codex sessions are AO-managed and run headlessly inside a terminal

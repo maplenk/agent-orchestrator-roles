@@ -1,0 +1,108 @@
+// Package capabilities is the machine-readable harness capability registry.
+// CAPABILITY_MATRIX.md is generated/mirror documentation only — validation
+// and launch/restore must consult this package, not the markdown file.
+package capabilities
+
+import (
+	"fmt"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+)
+
+// Caps describes what AO may claim for a harness at config-save, launch, and restore.
+// Phase 1 populates SpawnSupported and ReadOnlyEnforced only.
+// SwitchSupported and LimitDetectionSupported stay false until Phase 2 / 3 promote them.
+type Caps struct {
+	SpawnSupported          bool
+	SwitchSupported         bool
+	LimitDetectionSupported bool
+	ReadOnlyEnforced        bool
+	// Notes is human-readable; not parsed by validation.
+	Notes string
+}
+
+// For returns capabilities for a harness. Unknown harnesses get zeros (fail closed).
+// Platform / binary-version variants can be added later without changing call sites.
+func For(h domain.AgentHarness) Caps {
+	switch h {
+	case domain.HarnessClaudeCode:
+		// auto is classifier-based auto-approval, not deny-by-default (dontAsk).
+		// Tool allow/deny under auto cannot support read_only_enforced=true until
+		// we use dontAsk + no write-capable Bash + non-shell spawn (or an OS sandbox).
+		// See docs/roles/READ_ONLY_CONTRACT.md and Claude permissions docs.
+		return Caps{
+			SpawnSupported:   true,
+			ReadOnlyEnforced: false,
+			Notes:            "spawn supported; read_only_enforced=false until dontAsk/OS-sandbox RO path lands",
+		}
+	case domain.HarnessCodex:
+		return Caps{
+			SpawnSupported:   true,
+			ReadOnlyEnforced: true,
+			Notes:            "RO via --sandbox read-only; never --dangerously-bypass-approvals-and-sandbox",
+		}
+	case domain.HarnessPi:
+		return Caps{
+			SpawnSupported:   true,
+			ReadOnlyEnforced: false,
+			Notes:            "Pi emits no permission/sandbox flags; external sandbox required for RO",
+		}
+	case domain.HarnessGrok, domain.HarnessOpenCode, domain.HarnessAider,
+		domain.HarnessDroid, domain.HarnessAmp, domain.HarnessAgy, domain.HarnessCrush,
+		domain.HarnessCursor, domain.HarnessQwen, domain.HarnessCopilot, domain.HarnessGoose,
+		domain.HarnessAuggie, domain.HarnessContinue, domain.HarnessDevin, domain.HarnessCline,
+		domain.HarnessKimi, domain.HarnessKiro, domain.HarnessKilocode, domain.HarnessVibe,
+		domain.HarnessAutohand:
+		return Caps{
+			SpawnSupported:   true,
+			ReadOnlyEnforced: false,
+			Notes:            "spawn supported; read_only_enforced not implemented",
+		}
+	case domain.HarnessFake:
+		// Test harness: treat as spawnable with RO for unit tests that need it.
+		return Caps{
+			SpawnSupported:   true,
+			ReadOnlyEnforced: true,
+			Notes:            "test harness only",
+		}
+	default:
+		return Caps{}
+	}
+}
+
+// ValidateRoleMap rejects role bindings that claim unsupported capabilities.
+// Call at config-save (and any path that accepts a RoleMap).
+func ValidateRoleMap(m domain.RoleMap) error {
+	if m.IsZero() {
+		return nil
+	}
+	for id, b := range m.Roles {
+		caps := For(b.Harness)
+		if !caps.SpawnSupported {
+			return fmt.Errorf("roles[%s]: harness %q does not support spawn (spawn_supported=false)", id, b.Harness)
+		}
+		if !b.Permissions.WorkspaceWrites && !caps.ReadOnlyEnforced {
+			return fmt.Errorf("roles[%s]: workspaceWrites=false requires harness %q with read_only_enforced (got false)", id, b.Harness)
+		}
+	}
+	return nil
+}
+
+// RequireReadOnly reports whether harness may launch with workspaceWrites=false.
+func RequireReadOnly(h domain.AgentHarness) error {
+	caps := For(h)
+	if !caps.ReadOnlyEnforced {
+		return fmt.Errorf("harness %q cannot enforce workspaceWrites=false (read_only_enforced=false)", h)
+	}
+	return nil
+}
+
+// AllDocumented returns caps for every domain harness (for matrix docs / tests).
+func AllDocumented() map[domain.AgentHarness]Caps {
+	out := make(map[domain.AgentHarness]Caps, len(domain.AllHarnesses)+1)
+	for _, h := range domain.AllHarnesses {
+		out[h] = For(h)
+	}
+	out[domain.HarnessFake] = For(domain.HarnessFake)
+	return out
+}

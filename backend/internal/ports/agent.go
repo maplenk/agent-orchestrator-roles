@@ -224,8 +224,12 @@ type LaunchConfig struct {
 	// relies on: bypassPermissions ignores both lists, so a restricted launch
 	// must leave Permissions off bypass. Empty means no restriction, so worker
 	// sessions are unaffected.
-	AllowedTools     []string
-	DisallowedTools  []string
+	AllowedTools    []string
+	DisallowedTools []string
+	// ReadOnly requests adapter-level workspace write denial (role
+	// workspaceWrites=false). Adapters must not treat this as prompt-only:
+	// Claude applies tool lists; Codex uses --sandbox read-only.
+	ReadOnly         bool
 	SystemPrompt     string
 	SystemPromptFile string
 	WorkspacePath    string
@@ -249,6 +253,11 @@ type RestoreConfig struct {
 	Kind        domain.SessionKind
 	Permissions PermissionMode
 	Session     SessionRef
+	// AllowedTools / DisallowedTools re-apply Claude RO tool policy on resume.
+	AllowedTools    []string
+	DisallowedTools []string
+	// ReadOnly re-applies adapter workspace write denial on restore.
+	ReadOnly bool
 	// SystemPrompt carries the session's standing instructions (e.g. the
 	// orchestrator role). Agent CLIs rebuild their system prompt from flags on
 	// resume — it is not part of the transcript — so adapters whose CLI has a

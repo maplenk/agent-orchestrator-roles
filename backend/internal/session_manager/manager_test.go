@@ -189,7 +189,35 @@ func (l *fakeLCM) MarkSpawned(_ context.Context, id domain.SessionID, metadata d
 	rec := l.store.sessions[id]
 	rec.IsTerminated = false
 	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: time.Now()}
-	rec.Metadata = metadata
+	// Mirror lifecycle.mergeMetadata: preserve role pin + spawn cap from seed;
+	// overlay launch/workspace fields from the MarkSpawned payload.
+	base := rec.Metadata
+	if metadata.Branch != "" {
+		base.Branch = metadata.Branch
+	}
+	if metadata.WorkspacePath != "" {
+		base.WorkspacePath = metadata.WorkspacePath
+	}
+	if metadata.WorkspaceRepoPath != "" {
+		base.WorkspaceRepoPath = metadata.WorkspaceRepoPath
+	}
+	if metadata.RuntimeHandleID != "" {
+		base.RuntimeHandleID = metadata.RuntimeHandleID
+	}
+	base.RuntimeLaunchID = metadata.RuntimeLaunchID
+	if metadata.AgentSessionID != "" {
+		base.AgentSessionID = metadata.AgentSessionID
+	}
+	if metadata.Prompt != "" {
+		base.Prompt = metadata.Prompt
+	}
+	if metadata.DiffBaseSHA != "" {
+		base.DiffBaseSHA = metadata.DiffBaseSHA
+	}
+	if metadata.DiffBaseRef != "" {
+		base.DiffBaseRef = metadata.DiffBaseRef
+	}
+	rec.Metadata = base
 	l.store.sessions[id] = rec
 	return nil
 }
@@ -3005,7 +3033,7 @@ func TestSpawnOrchestrator_UsesCoordinatorPrompt(t *testing.T) {
 	}
 }
 
-func TestSpawn_StrictOrchestratorFailsClosedWithoutLaunch(t *testing.T) {
+func TestSpawn_StrictOrchestratorReadOnlyLaunch_Codex(t *testing.T) {
 	dir := t.TempDir()
 	for name, body := range map[string]string{
 		"orchestrator.md": "---\nid: orchestrator\nname: Orch\n---\n# O\n",
@@ -3022,7 +3050,75 @@ func TestSpawn_StrictOrchestratorFailsClosedWithoutLaunch(t *testing.T) {
 	st.projects["mer"] = domain.ProjectRecord{
 		ID: "mer",
 		Config: domain.ProjectConfig{
-			Orchestrator: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+			Orchestrator: domain.RoleOverride{Harness: domain.HarnessCodex},
+			RoleMap: domain.RoleMap{
+				SchemaVersion:    domain.RoleMapSchemaVersion,
+				StrictDelegation: true,
+				OrchestratorRole: "orchestrator",
+				Roles: map[string]domain.RoleBinding{
+					"orchestrator": {
+						Template: "orchestrator",
+						// Only Codex has read_only_enforced=true in Phase 1.
+						Harness: domain.HarnessCodex,
+						Permissions: domain.RoleExecutionPolicy{
+							WorkspaceWrites: false,
+							CanSpawn:        true,
+						},
+					},
+					"implementor": {
+						Template: "implementor",
+						Harness:  domain.HarnessClaudeCode,
+						Permissions: domain.RoleExecutionPolicy{
+							WorkspaceWrites: true,
+							CanSpawn:        false,
+						},
+					},
+				},
+			},
+		},
+	}
+	agent := &recordingAgent{}
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	m := New(Deps{Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: lookPath})
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindOrchestrator})
+	if err != nil {
+		t.Fatalf("strict orch spawn: %v", err)
+	}
+	if agent.launchCalls != 1 {
+		t.Fatalf("launchCalls = %d, want 1", agent.launchCalls)
+	}
+	if !agent.lastLaunch.ReadOnly {
+		t.Fatal("expected ReadOnly launch for workspaceWrites=false orch")
+	}
+	if agent.lastLaunch.Permissions == domain.PermissionModeDefault || agent.lastLaunch.Permissions == domain.PermissionModeBypassPermissions {
+		t.Fatalf("permissions = %q, want non-bypass for Codex RO", agent.lastLaunch.Permissions)
+	}
+	if rec.Metadata.Role.RoleID != "orchestrator" {
+		t.Fatalf("role pin = %q", rec.Metadata.Role.RoleID)
+	}
+	if rec.Harness != domain.HarnessCodex {
+		t.Fatalf("harness = %q, want codex", rec.Harness)
+	}
+}
+
+func TestSpawn_StrictOrchestratorClaudeReadOnlyRejected(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"orchestrator.md": "---\nid: orchestrator\nname: Orch\n---\n# O\n",
+		"implementor.md":  "---\nid: implementor\nname: Impl\n---\n# I\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{
 			RoleMap: domain.RoleMap{
 				SchemaVersion:    domain.RoleMapSchemaVersion,
 				StrictDelegation: true,
@@ -3054,13 +3150,10 @@ func TestSpawn_StrictOrchestratorFailsClosedWithoutLaunch(t *testing.T) {
 
 	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindOrchestrator})
 	if !errors.Is(err, ErrReadOnlyUnsupported) {
-		t.Fatalf("err = %v, want ErrReadOnlyUnsupported", err)
+		t.Fatalf("err = %v, want ErrReadOnlyUnsupported for Claude WW=false", err)
 	}
 	if agent.launchCalls != 0 {
-		t.Fatalf("launchCalls = %d, want 0 (no adapter launch)", agent.launchCalls)
-	}
-	if agent.lastLaunch.SessionID != "" {
-		t.Fatalf("unexpected launch: %+v", agent.lastLaunch)
+		t.Fatalf("launchCalls = %d, want 0", agent.launchCalls)
 	}
 }
 
