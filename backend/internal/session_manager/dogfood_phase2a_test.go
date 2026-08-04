@@ -2,9 +2,9 @@ package sessionmanager
 
 // Phase 2A dogfood harness at manager level.
 //
-// Production capabilities.For keeps SwitchSupported=false for Claude/Codex.
-// This file uses switchCapsOverride only so dogfood can exercise the saga
-// without promoting the registry. Do not flip production caps here.
+// After Phase 2A promotion, production capabilities.For advertises
+// SwitchSupported for Claude/Codex. Dogfood exercises the saga on the
+// production registry (no switchCapsOverride).
 
 import (
 	"errors"
@@ -46,7 +46,8 @@ func (e *dogfoodEvidence) dump(t *testing.T) {
 }
 
 func dogfoodManager(st *fakeStore, rt *fakeRuntime) *Manager {
-	m := New(Deps{
+	// Production Claude/Codex SwitchSupported=true — no override.
+	return New(Deps{
 		Runtime:   rt,
 		Agents:    singleAgent{agent: &recordingAgent{}},
 		Workspace: &fakeWorkspace{},
@@ -55,9 +56,6 @@ func dogfoodManager(st *fakeStore, rt *fakeRuntime) *Manager {
 		Lifecycle: &fakeLCM{store: st},
 		LookPath:  func(string) (string, error) { return "/bin/true", nil },
 	})
-	// Dogfood-only override — production registry stays SwitchSupported=false.
-	m.switchCapsOverride = testSwitchCaps
-	return m
 }
 
 func ledgerPhases(st *fakeStore, gen string) []domain.LifecycleLedgerPhase {
@@ -81,21 +79,20 @@ func ledgerIDs(st *fakeStore, gen string) []string {
 }
 
 // TestDogfood_Phase2AChecklist is the manager-level dogfood gate for Phase 2A.
-// It does not promote switch_supported; it proves the saga + recovery invariants
-// under an explicit override used only in tests/dogfood.
+// After promotion it runs on production SwitchSupported cells (no override).
 func TestDogfood_Phase2AChecklist(t *testing.T) {
 	ev := &dogfoodEvidence{}
 	ev.add("=== Phase 2A dogfood checklist (manager-level) ===")
-	ev.add("note: production SwitchSupported remains false for claude-code and codex")
-	ev.add("override: switchCapsOverride=testSwitchCaps (dogfood only)")
+	ev.add("note: production SwitchSupported=true for claude-code and codex (Phase 2A promote)")
+	ev.add("override: none (production registry)")
 
-	t.Run("0_production_caps_still_false", func(t *testing.T) {
+	t.Run("0_production_caps_promoted", func(t *testing.T) {
 		claude := capabilities.For(domain.HarnessClaudeCode)
 		codex := capabilities.For(domain.HarnessCodex)
-		if claude.SwitchSupported || codex.SwitchSupported {
-			t.Fatalf("production caps must stay false: claude=%+v codex=%+v", claude, codex)
+		if !claude.SwitchSupported || !codex.SwitchSupported {
+			t.Fatalf("production caps must be promoted: claude=%+v codex=%+v", claude, codex)
 		}
-		// Without override, SwitchWorker must refuse.
+		// Without override, Claude→Codex must succeed on production registry.
 		st := newFakeStore()
 		ws := t.TempDir()
 		art, sha := pinImplementorTemplate(t, st)
@@ -107,11 +104,14 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 			LookPath: func(string) (string, error) { return "/bin/true", nil },
 		})
 		// no switchCapsOverride
-		_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
-		if !errors.Is(err, ErrSwitchNotSupported) {
-			t.Fatalf("without override err=%v, want ErrSwitchNotSupported", err)
+		res, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+		if err != nil {
+			t.Fatalf("promoted path without override: %v", err)
 		}
-		ev.add("PASS 0: production SwitchSupported=false; SwitchWorker refuses without override")
+		if res.Session.Harness != domain.HarnessCodex {
+			t.Fatalf("harness=%q want codex", res.Session.Harness)
+		}
+		ev.add("PASS 0: production SwitchSupported=true; SwitchWorker Claude→Codex without override")
 	})
 
 	t.Run("1_claude_to_codex", func(t *testing.T) {

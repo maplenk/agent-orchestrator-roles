@@ -45,8 +45,10 @@ func workerSession(st *fakeStore, id domain.SessionID, harness domain.AgentHarne
 	}
 }
 
-// testSwitchCaps enables switch_supported for the initial matrix in unit tests
-// without advertising production capability.
+// testSwitchCaps is a unit-test helper that pins switch_supported for the
+// Claude/Codex/fake matrix. Production For() already promotes Claude/Codex;
+// the override keeps tests independent of other harness cells and documents
+// intent on older test fixtures.
 func testSwitchCaps(h domain.AgentHarness) capabilities.Caps {
 	c := capabilities.For(h)
 	switch h {
@@ -479,10 +481,31 @@ func TestSwitchWorker_RequiresCapability(t *testing.T) {
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
 		LookPath: func(string) (string, error) { return "/bin/true", nil },
 	})
-	// No override: production caps have switch_supported=false.
-	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	// Claude/Codex are promoted; Pi still has switch_supported=false.
+	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessPi})
 	if !errors.Is(err, ErrSwitchNotSupported) {
-		t.Fatalf("err = %v, want ErrSwitchNotSupported", err)
+		t.Fatalf("err = %v, want ErrSwitchNotSupported for non-promoted target", err)
+	}
+}
+
+func TestSwitchWorker_ClaudeCodexPromotedWithoutOverride(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-promo")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	// No switchCapsOverride — production registry must allow Claude↔Codex.
+	res, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	if err != nil {
+		t.Fatalf("promoted Claude→Codex without override: %v", err)
+	}
+	if res.Session.Harness != domain.HarnessCodex {
+		t.Fatalf("harness=%q want codex", res.Session.Harness)
 	}
 }
 

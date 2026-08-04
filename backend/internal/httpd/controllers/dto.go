@@ -402,7 +402,7 @@ type SendSessionMessageResponse struct {
 
 // SwitchWorkerRequest is the body of POST /api/v1/sessions/{sessionId}/switch.
 // Target harness must be host-authorized via project roleMap (binding + failover).
-// Production switch_supported remains false until dogfood promotion.
+// Claude/Codex support switch after Phase 2A promotion; other harnesses may still refuse.
 type SwitchWorkerRequest struct {
 	// TargetHarness is required for cross-harness switch. Same harness is treated as fresh.
 	TargetHarness string `json:"targetHarness,omitempty"`

@@ -43,8 +43,8 @@ type switchCommander interface {
 var ErrSwitchNotWired = errors.New("session: switch not wired on commander")
 
 // SwitchWorker authorizes the target via the project role map, then runs the
-// durable switch/fresh saga. Production switch_supported remains false until
-// promoted; this surface still fails closed with SWITCH_NOT_SUPPORTED.
+// durable switch/fresh saga. Claude/Codex advertise switch_supported after
+// Phase 2A promotion; other harnesses still fail closed with SWITCH_NOT_SUPPORTED.
 func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (SwitchWorkerOutcome, error) {
 	if req.SessionID == "" {
 		return SwitchWorkerOutcome{}, apierr.Invalid("SESSION_ID_REQUIRED", "Session id is required", nil)

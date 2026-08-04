@@ -15,21 +15,30 @@ func TestFor_Phase1Cells(t *testing.T) {
 	if claude.ReadOnlyEnforced {
 		t.Fatalf("claude-code must not claim read_only_enforced until dontAsk/OS sandbox: %+v", claude)
 	}
-	if claude.SwitchSupported || claude.LimitDetectionSupported {
-		t.Fatalf("claude-code must keep switch/limit false until dogfood: %+v", claude)
+	if !claude.SwitchSupported {
+		t.Fatalf("claude-code switch_supported must be true after Phase 2A promotion: %+v", claude)
+	}
+	if claude.LimitDetectionSupported {
+		t.Fatalf("claude-code limit_detection must stay false until Phase 3: %+v", claude)
 	}
 
 	codex := For(domain.HarnessCodex)
 	if !codex.SpawnSupported || !codex.ReadOnlyEnforced {
 		t.Fatalf("codex: %+v", codex)
 	}
-	if codex.SwitchSupported {
-		t.Fatalf("codex switch_supported must stay false until dogfood: %+v", codex)
+	if !codex.SwitchSupported {
+		t.Fatalf("codex switch_supported must be true after Phase 2A promotion: %+v", codex)
+	}
+	if codex.LimitDetectionSupported {
+		t.Fatalf("codex limit_detection must stay false until Phase 3: %+v", codex)
 	}
 
 	pi := For(domain.HarnessPi)
 	if !pi.SpawnSupported || pi.ReadOnlyEnforced {
 		t.Fatalf("pi must spawn but not RO: %+v", pi)
+	}
+	if pi.SwitchSupported {
+		t.Fatalf("pi switch_supported must stay false until a dedicated promote: %+v", pi)
 	}
 }
 
@@ -152,8 +161,37 @@ func TestValidateRoleMap_FailoverAllowsCodexForWriterRole(t *testing.T) {
 			},
 		},
 	}
-	// switch_supported still false on production cells — authoring ladders is allowed.
+	// Claude/Codex both advertise switch_supported after Phase 2A promotion.
 	if err := ValidateRoleMap(m); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestValidateRoleMap_FailoverRungsRequireSwitch(t *testing.T) {
+	// After promotion, failover rungs must advertise SwitchSupported.
+	// Pi spawns but has switch_supported=false.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.HarnessPi}},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "switch_supported") {
+		t.Fatalf("err=%v want switch_supported reject on failover", err)
+	}
+}
+
+func TestSwitchSupportedPromoted(t *testing.T) {
+	if !switchSupportedPromoted() {
+		t.Fatal("switchSupportedPromoted must be true once Claude/Codex cells are on")
 	}
 }

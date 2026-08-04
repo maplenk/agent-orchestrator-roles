@@ -10,8 +10,7 @@ import (
 )
 
 // Caps describes what AO may claim for a harness at config-save, launch, and restore.
-// Phase 1 populates SpawnSupported and ReadOnlyEnforced only.
-// SwitchSupported and LimitDetectionSupported stay false until Phase 2 / 3 promote them.
+// LimitDetectionSupported stays false until Phase 3 promotes it.
 type Caps struct {
 	SpawnSupported          bool
 	SwitchSupported         bool
@@ -32,16 +31,16 @@ func For(h domain.AgentHarness) Caps {
 		// See docs/roles/READ_ONLY_CONTRACT.md and Claude permissions docs.
 		return Caps{
 			SpawnSupported:   true,
-			SwitchSupported:  false, // promote only after ownership fence + dogfood
+			SwitchSupported:  true, // Phase 2A dogfood + datadirlock close-out accepted
 			ReadOnlyEnforced: false,
-			Notes:            "spawn supported; switch_supported=false until Phase 2A gates; RO deferred",
+			Notes:            "spawn + switch supported; RO deferred (dontAsk/OS sandbox)",
 		}
 	case domain.HarnessCodex:
 		return Caps{
 			SpawnSupported:   true,
-			SwitchSupported:  false, // promote only after ownership fence + dogfood
+			SwitchSupported:  true, // Phase 2A dogfood + datadirlock close-out accepted
 			ReadOnlyEnforced: true,
-			Notes:            "RO via --sandbox read-only; switch_supported=false until Phase 2A gates",
+			Notes:            "RO via --sandbox read-only; switch supported (Phase 2A)",
 		}
 	case domain.HarnessPi:
 		return Caps{

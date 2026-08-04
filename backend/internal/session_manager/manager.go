@@ -262,7 +262,7 @@ type Manager struct {
 	resuming    map[domain.SessionID]struct{}
 	switching   map[domain.SessionID]struct{}
 	// switchCapsOverride is tests-only: when set, SwitchWorker uses it instead
-	// of capabilities.For so incomplete production matrix can still be unit-tested.
+	// of capabilities.For (e.g. force-enable cells or pin a matrix for isolation).
 	switchCapsOverride func(domain.AgentHarness) capabilities.Caps
 	// sendConfirm bounds the best-effort post-send confirmation that the session
 	// actually became active (the agent accepted the prompt). New fills in the

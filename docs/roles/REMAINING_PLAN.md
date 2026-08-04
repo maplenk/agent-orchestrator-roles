@@ -5,7 +5,7 @@
 **HEAD:** (see latest commit; update on each land)  
 **Baseline:** Untrivial-ai/agent-orchestrator @ `742c77bc` (see `AO_BASELINE_SHA.txt`)  
 **Target:** B (~full wishlist)  
-**Estimate:** ~4–6 **working** weeks for Target B from here (Phase 2A nearly closed; 2B/3A/3B + integration remain)
+**Estimate:** ~4–6 **working** weeks for Target B from here (Phase 2A closed; 2B/3A/3B + integration remain)
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 Canonical product design remains `MASTER_PLAN.md`; this file tracks execution status.
@@ -23,13 +23,13 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 2A manager saga | **Done** (switch / fresh / recover / ledger / fences) |
 | Phase 2A Service/API/CLI + auth | **Accepted** @ `83f7abfb` |
 | Phase 2A manager dogfood | **Done** — `PHASE2A_DOGFOOD.md` @ `2d19ad59` |
-| Phase 2A live dogfood | **Evidence** — footer + clean crash ledger after data-dir lease |
+| Phase 2A live dogfood | **Accepted** — footer + clean crash ledger after data-dir lease |
 | Target-authoritative switch prompt | **Done** @ `a3bc32be` (live footer `Harness: codex`) |
 | Concurrent daemon ownership lease | **Done** — `datadirlock` on `AO_DATA_DIR` before store/reconcile |
-| `switch_supported` production | **false** — promote only after this close-out is accepted |
+| `switch_supported` production | **true** for Claude/Codex (promoted after 2A close-out accept) |
 | Phase 2B / 3A / 3B | **Not started** |
 
-**Next eng (critical path):** accept 2A close-out (lease + clean crash ledger) → **promote `SwitchSupported`** in a separate CL, then Phase 2B.
+**Next eng (critical path):** **Phase 2B** (orchestrator ownership transfer), or Phase 1-F / Claude RO per product priority.
 
 ---
 
@@ -58,7 +58,7 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Role template loader + path containment | **Done** | `roles/templates.go`, `AO_ROLE_PROFILES_DIR` |
 | Single applyRoleMap; empty model overwrites project model | **Done** | Phase 1b |
 | Role system prompt footer after base (recency) | **Done** | Phase 1c |
-| Runtime capability registry (spawn + RO; switch/limit false) | **Done** | `roles/capabilities`; switch/limit stay false until promote |
+| Runtime capability registry (spawn + RO; switch promoted for Claude/Codex) | **Done** | `roles/capabilities`; limit stays false until Phase 3 |
 | Codex `read_only_enforced` | **Done** | OS sandbox; Claude RO still **false** by design |
 | Migration **0042** durable role columns + `template_artifacts` CAS | **Done** | Accepted |
 | Spawn dual-write CAS; restore-by-artifact | **Done** | Fail closed missing/incomplete/conflict |
@@ -70,7 +70,7 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Template authority Option A | **Done** | Host/shipped profiles; `AO_ROLE_PROFILES_DIR` |
 | Codex review packs (Phase 1 slices) | **Done** | `PHASE1*_CODEX_REVIEW.md`, `PHASE0042_*`, `PHASE_CANSPAWN_*` |
 
-### Phase 2A — landed (caps still false)
+### Phase 2A — closed (Claude/Codex switch promoted)
 
 | Item | Status | Evidence / HEAD |
 |------|--------|-----------------|
@@ -87,10 +87,12 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | HTTP + OpenAPI + FE schema | **Done** | `/switch`, `/fresh-conversation` |
 | CLI `ao session switch` / `fresh` | **Done** | `spawnCallerHeaders()` no-upgrade |
 | Switch auth (operator / LAN / canSpawn + project scope) | **Accepted** | @ `83f7abfb` |
-| Failover config-save spawn + RO | **Done** | `ValidateRoleMap`; switch_supported staged for promotion |
+| Failover config-save spawn + RO + switch | **Done** | `ValidateRoleMap`; switch_supported enforced after promotion |
 | Ephemeral target role footer on switch launch | **Done** | @ `a3bc32be` |
 | Manager dogfood checklist | **Done** | `PHASE2A_DOGFOOD.md` @ `2d19ad59` |
-| Live dogfood evidence | **Recorded** | `PHASE2A_LIVE_DOGFOOD.md` @ `a3bc32be` / docs `9d30c627` |
+| Live dogfood evidence | **Accepted** | `PHASE2A_LIVE_DOGFOOD.md` (footer + clean crash) |
+| Concurrent data-dir ownership lease | **Done** | `datadirlock` @ `9480bdc7` |
+| Promote `switch_supported` (Claude/Codex) | **Done** | separate promotion CL after close-out accept |
 
 Detail trackers: `PHASE2A_PLAN.md`, `PHASE2A_DOGFOOD.md`, `PHASE2A_LIVE_DOGFOOD.md`.
 
@@ -99,28 +101,28 @@ Detail trackers: `PHASE2A_PLAN.md`, `PHASE2A_DOGFOOD.md`, `PHASE2A_LIVE_DOGFOOD.
 - **Same-UID host isolation** is **not** claimed.
 - **Phase 1 strict operational dogfood** is **not** complete (Claude RO, full 1-F matrix).
 - **`read_only_enforced`:** **true only for Codex**. Claude/Pi/others false.
-- **`switch_supported`:** production **false** for Claude/Codex until promotion CL after live gate.
-- Live crash ledger may still show residual `failed` before `target_ack` (~5 ms, no recovery-failed log) — **not closed for promotion**.
+- **`switch_supported`:** **true** for Claude/Codex only; other production harnesses remain false until dedicated promotes.
+- **`limit_detection_supported`:** still **false** for all production harnesses (Phase 3).
 
 ---
 
 ## 2. Remaining work (ordered)
 
-### Phase 2A close-out (do before promote)
+### Phase 2A — complete
 
 | Task | Status | Detail |
 |------|--------|--------|
 | Accept target-authoritative prompt fix | **Done** | Live footer + unit tests @ `a3bc32be` |
-| Concurrent data-dir ownership lease | **Done** | `datadirlock.Acquire` before store open/reconcile; ephemeral port no longer confers second-owner mutation |
-| Concurrent-start regression | **Done** | `datadirlock` exclusive + subprocess one-reconcile-marker tests; dual-daemon smoke: one exits `ErrLocked` |
-| Clean crash ledger (no incidental `failed`) | **Done (re-dogfood)** | Offline inject after lease fix: `requested>pre_stop>post_stop>target_ack` only (`lease-crash-gen-1`) |
-| Promote `switch_supported` (Claude/Codex) | **Open** | **Separate final CL only** after accept; flips `capabilities.For` + activates failover switch_supported validation |
+| Concurrent data-dir ownership lease | **Done** | `datadirlock.Acquire` before store open/reconcile |
+| Concurrent-start regression | **Done** | exclusive + subprocess one-reconcile-marker; dual-daemon smoke |
+| Clean crash ledger (no incidental `failed`) | **Done** | `requested>pre_stop>post_stop>target_ack` only (`lease-crash-gen-1`) |
+| Promote `switch_supported` (Claude/Codex) | **Done** | `capabilities.For` + failover switch_supported validation active |
 
-**DoD (MASTER_PLAN):** pre-stop source usable; post-stop handoff retained; one generation owns input — **implemented**; re-verify after promotion.
+**DoD (MASTER_PLAN):** pre-stop source usable; post-stop handoff retained; one generation owns input — **implemented and promoted**.
 
 ---
 
-### Gate G0 / Phase 1 remainder (parallel; not blocking 2A code)
+### Gate G0 / Phase 1 remainder (parallel; not blocking 2B)
 
 Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 
@@ -128,7 +130,7 @@ Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 |-------|--------|--------|
 | 1-A RO contract doc | **Partial** | `READ_ONLY_CONTRACT.md` exists; tighten if needed |
 | 1-B Claude RO (+ negative runtime) | **Open** | Codex done; Claude stays false |
-| 1-C registry | **Done** for Phase 1 cells | Switch/limit promote later |
+| 1-C registry | **Done** for Phase 1 + 2A switch cells | Limit promote later |
 | 1-D role-map surface | **Done** | CLI/API round-trip used in live dogfood |
 | 1-E template authority | **Done** | Option A |
 | 1-F full verification + strict dogfood | **Open** | Full `go test ./...`, strict orch RO dogfood, Claude RO when ready |
@@ -174,7 +176,7 @@ Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 | Task | Detail |
 |------|--------|
 | Desktop dogfood | Real Electron + isolated or explicit data dir |
-| Crash recovery | Restore + CAS + switch mid-flight (close residual 2A ledger if still open) |
+| Crash recovery | Restore + CAS + switch mid-flight (2A path accepted; re-verify under product load) |
 | Multi-platform | macOS primary; Windows/Linux as needed |
 | DoD checklist | MASTER_PLAN §9 all checked |
 
@@ -191,18 +193,17 @@ Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 
 | Slice | Est. (working d) | Depends on |
 |-------|------------------|------------|
-| 2A promotion gate (failed-ledger + flip caps) | 1–2 | Accept live residual |
+| ~~2A promotion gate~~ | **Done** | Close-out accepted; caps flipped |
 | 1-B Claude RO (optional parallel) | 3–5 | 1-A |
 | 1-F Phase 1 strict exit | 2–3 | 1-B if Claude RO required for strict maps |
-| Phase 2B | 3–5 | 2A patterns |
+| Phase 2B | 3–5 | 2A patterns (available) |
 | Phase 3A/B | 7–11 | limit detection (promote in 3A) |
 | Integration | 3–5 | prior |
 
 ### Sequencing sketch
 
 ```text
-Now ──► 2A close: failed→ack provenance ──► promote switch_supported (separate CL)
-     ──► 2B orch transfer
+Now ──► Phase 2B orch transfer
      ──► 3A pause ──► 3B continue/failover  (then promote limit_detection)
      ──► Integration
      ║
@@ -221,20 +222,20 @@ Already satisfied (re-verify on regressions):
 4. Pre-stop switch failure → source usable
 5. Post-stop → handoff retained, target retry
 6. One generation owns input at switch boundary
-9. Unsupported capabilities reject config **and** launch/restore (spawn/RO; switch until promote)
+9. Unsupported capabilities reject config **and** launch/restore (spawn/RO/switch for promoted cells)
 10. Lifecycle ledger for switch/fresh (pause/failover later)
 11. ObservedWorkspace verified only with AO provenance
 12. Failover default manual
 14. New-session template authority Option A
 15. Role map writable via CLI/API (no silent drop)
+16. Crash-recover ledger free of unexplained `failed` (root cause was dual daemon ownership; fixed with datadirlock)
+17. Production `switch_supported` true for Claude/Codex after accepted 2A close-out
 
 Still open:
 
 7. Limit → durable pause, zero auto send/restart
 8. Failover preserves `role_id`, respects incident bound (runtime path)
 13. Read-only roles only on `read_only_enforced` harnesses with **Claude** negative proof
-16. ~~Crash-recover ledger free of unexplained `failed`~~ — root cause was dual daemon ownership; fixed with datadirlock
-17. Production `switch_supported` true only after accepted 2A close-out
 
 ---
 
@@ -258,7 +259,7 @@ Still open:
 16. [ ] Orchestrator switch protocol
 17. [ ] Limit pause
 18. [ ] Manual continue + opt-in auto-failover
-19. [~] Dogfood against switch DoD — manager + live evidence; promotion gate open
+19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
 
 ---
 
@@ -268,13 +269,13 @@ Still open:
 - **Codex review packs** + accept before promoting capability cells.
 - **Migrations:** never edit merged SQL; next numbers **0046+**.
 - **Upstream:** keep `upstream` remote; avoid colliding migration IDs.
-- **Dogfood:** isolated `AO_DATA_DIR`; local-only cap enablement must stay **non-committable** until promote CL.
-- **Promotion:** never flip `switch_supported` / `limit_detection_supported` in the same change as large feature work when possible — separate final CL.
+- **Dogfood:** isolated `AO_DATA_DIR` for risky runs.
+- **Promotion:** never flip `switch_supported` / `limit_detection_supported` in the same change as large feature work when possible — separate final CL. (2A switch promote followed this rule.)
 
 ---
 
 ## 7. Immediate next action
 
-1. **Accept** data-dir ownership lease + clean crash ledger re-dogfood (this land).
-2. On accept → **promote `SwitchSupported`** for Claude/Codex in a dedicated commit.
-3. Then **Phase 2B** (orch ownership) or **Phase 1-F / Claude RO** per product priority.
+1. ~~Accept 2A close-out + promote `SwitchSupported` for Claude/Codex~~ — **done**.
+2. Start **Phase 2B** (orch ownership transfer), or prioritize **Phase 1-F / Claude RO**.
+3. Keep `limit_detection_supported` false until Phase 3 structured-limit evidence.

@@ -195,8 +195,8 @@ func newSessionSwitchCommand(ctx *commandContext) *cobra.Command {
 		Long: `Switch a worker to a host-authorized target harness from the project role map
 (primary binding + failover.roles ladder). Free-form harnesses are rejected.
 
-Production switch_supported remains false until dogfood promotion; the daemon
-returns SWITCH_NOT_SUPPORTED until capabilities are promoted.`,
+Claude Code and Codex advertise switch_supported after Phase 2A promotion.
+Other harnesses return SWITCH_NOT_SUPPORTED until their capability cells flip.`,
 		Args: noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return ctx.switchSession(cmd.Context(), cmd, opts)

@@ -668,7 +668,7 @@ func toAPIError(err error) error {
 			"Session is paused on a permission decision; answer it in the session terminal first", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchNotSupported):
 		return apierr.Conflict("SWITCH_NOT_SUPPORTED",
-			"Harness does not support worker switch yet (switch_supported=false until dogfood promotion)", nil)
+			"Harness does not support worker switch (switch_supported=false for this source or target)", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS", "A worker switch is already in progress for this session", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchPostStop):

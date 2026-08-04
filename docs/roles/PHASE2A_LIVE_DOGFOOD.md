@@ -16,9 +16,9 @@
 - `TestSwitchWorker_SystemPromptTargetHarnessFooter_CodexToClaude`
 - `TestRecover_SystemPromptTargetHarnessFooter`
 
-### Production caps
+### Production caps (at time of live dogfood)
 
-Still **false** in `capabilities.For`. Live enablement used non-committable local patch + `AO_DOGFOOD_SWITCH=1` only.
+Were **false** in `capabilities.For` during the live runs below. Enablement used non-committable local patch + `AO_DOGFOOD_SWITCH=1` only. **Promoted** in a separate CL after this close-out was accepted (see Promotion gate).
 
 | Field | Value |
 |-------|--------|
@@ -72,7 +72,7 @@ requested → pre_stop → post_stop → target_ack
 - Session: `harness=codex`, `runtime_launch_id=lease-crash-gen-1`, pending cleared
 - Dual-start smoke: one process acquires lease; peer exits `data directory already owned`
 
-Promotion still requires explicit accept of this close-out; production `SwitchSupported` remains false until a separate promote CL.
+**Close-out accepted.** The lease re-dogfood closes the unexplained `failed`→`target_ack` provenance condition. Production `SwitchSupported` for Claude/Codex is flipped in a **separate** promotion commit (this land).
 
 ---
 
@@ -81,13 +81,16 @@ Promotion still requires explicit accept of this close-out; production `SwitchSu
 **Manager dogfood:** `PHASE2A_DOGFOOD.md` @ `2d19ad59`  
 **First live pass (accepted portions only):** base `83f7abfb`, docs commit `b5fe6b15`
 
-Accepted from first live pass (still valid): docs-only evidence commit shape, patch-hash discipline, production caps false, forward/reverse/fresh API, stable ledger IDs, input fence.
+Accepted from first live pass (still valid): docs-only evidence commit shape, patch-hash discipline, forward/reverse/fresh API, stable ledger IDs, input fence. (Production caps were false during that pass; now promoted.)
 
-**Superseded for promotion gate:** stale source footer on target; crash inject with live source handle; incomplete failed→ack provenance.
+**Superseded for promotion gate:** stale source footer on target; crash inject with live source handle; dual-daemon failed→ack provenance (fixed by `datadirlock`).
 
-## Promotion gate (unchanged)
+## Promotion gate — **closed / accepted**
 
-Do **not** promote `SwitchSupported` until:
+Conditions required before promoting `SwitchSupported` — all met:
 
-1. Target-authoritative prompt fix is accepted (**landed** `a3bc32be` + live footer evidence).
-2. Crash-recovery ledger provenance is accepted **without** unexplained `failed`→`target_ack` (still open).
+1. Target-authoritative prompt fix accepted (**landed** `a3bc32be` + live footer evidence).
+2. Crash-recovery ledger provenance accepted **without** unexplained `failed`→`target_ack` (**closed** — `lease-crash-gen-1` clean sequence after `datadirlock`).
+3. Explicit accept of Phase 2A close-out (lease + concurrent ownership + clean crash) — **accepted**.
+
+**Promotion:** Claude/Codex `SwitchSupported=true` in `capabilities.For` (this commit). `limit_detection_supported` remains false.

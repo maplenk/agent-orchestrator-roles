@@ -5,15 +5,17 @@
 **Remote:** `origin/roles/multi-sub-v1` @ `2d19ad59` (pushed before dogfood)  
 **Date (UTC+5:30):** 2026-08-04  
 
-## Production capability stance (unchanged)
+## Production capability stance (historical at this checkpoint)
+
+At `2d19ad59` (manager dogfood):
 
 | Harness | `SwitchSupported` | Evidence |
 |---------|-------------------|----------|
-| `claude-code` | **false** | `capabilities.For` + `TestDogfood…/0` + `capabilities_test` |
-| `codex` | **false** | same |
-| Dogfood exercise path | `switchCapsOverride` **only** | never flips production registry |
+| `claude-code` | **false** (then) | `capabilities.For` + `TestDogfood…/0` + `capabilities_test` |
+| `codex` | **false** (then) | same |
+| Dogfood exercise path | `switchCapsOverride` **only** | never flipped production registry in this run |
 
-**Promotion rule:** do **not** set `SwitchSupported=true` until this log’s checklist is accepted **and** live-agent desktop dogfood (when API/CLI exists) is also recorded.
+**Later:** after live dogfood + close-out accept, Claude/Codex were promoted in a **separate** CL. Re-run dogfood post-promote uses production registry (no override); item 0 asserts `SwitchSupported=true`.
 
 ## Scope of this dogfood run
 
@@ -23,9 +25,9 @@
 | Terminal `AllowTerminalInput` + mux Write suppress | **Executed** (manager fence + `TestServeWriteSuppressedWhenInputGateBlocks`) |
 | Lifecycle generation = runtime launch id | **Executed** (ledger + `RuntimeLaunchID` equality) |
 | Production refuse without override | **Executed** |
-| Live Claude/Codex binaries in desktop | **Deferred** — no production API/CLI; `switch_supported=false` blocks product path by design |
+| Live Claude/Codex binaries in desktop | **Recorded later** — see `PHASE2A_LIVE_DOGFOOD.md` (API/CLI landed @ `83f7abfb`+) |
 
-Manager-level dogfood is the recoverable evidence bound to `2d19ad59`. Live agent process dogfood remains a separate gate after API/CLI.
+Manager-level dogfood is the recoverable evidence bound to `2d19ad59`. Live agent process dogfood is recorded separately.
 
 ## How to re-run
 
@@ -80,15 +82,15 @@ PASS 7: post_stop append fail → ErrSwitchPostStop create=0 no_ack
 4. **Recovery:** post_stop-present incomplete saga launches once with pending gen; wrong-gen live → `ErrSwitchUncertain` (no second target).
 5. **Input ownership:** pending fences terminal by session id, live handle, and pending source handle.
 
-## Explicit non-claims
+## Explicit non-claims (at this checkpoint)
 
-- Did **not** run interactive Claude Code or Codex CLI agent processes end-to-end in the desktop app.
-- Did **not** promote `switch_supported`.
-- Did **not** expose Service/HTTP/CLI switch APIs.
+- Did **not** run interactive Claude Code or Codex CLI agent processes end-to-end in the desktop app in this manager run (live pass recorded later).
+- Did **not** promote `switch_supported` in this commit (promotion is a later separate CL).
+- Did **not** expose Service/HTTP/CLI switch APIs yet at `2d19ad59` (landed later @ `83f7abfb`).
 
-## Next before promotion
+## Path to promotion (completed after this document)
 
-1. Accept manager-level dogfood results above (this document).
-2. Land Service/API/CLI with host role-map authorized targets.
-3. Live desktop dogfood: real Claude↔Codex implementor session + crash kill/restart with DB ledger inspection.
-4. Only then flip `SwitchSupported` for Claude/Codex in `capabilities.For`.
+1. ~~Accept manager-level dogfood results above~~.
+2. ~~Land Service/API/CLI with host role-map authorized targets~~ @ `83f7abfb`.
+3. ~~Live desktop dogfood~~ — `PHASE2A_LIVE_DOGFOOD.md` (footer + clean crash after lease).
+4. ~~Flip `SwitchSupported` for Claude/Codex~~ in dedicated promote CL after close-out accept.
