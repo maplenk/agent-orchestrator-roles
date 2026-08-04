@@ -200,16 +200,17 @@ Not focused tests alone:
 
 ### Phase 2A — Worker switch + fresh conversation (~5–8 working days)
 
-| Task | Detail |
-|------|--------|
-| SemanticHandoffV1 | Agent-authored, untrusted for git/tests |
-| ObservedWorkspaceV1 | Host git/worktree facts; verified results only when AO captured provenance |
-| Compiler | Observed overrides semantic claims |
-| Switch saga | #3548-class: durable states, generation fencing, pre/post-stop, target ack |
-| Initial matrix | Claude ↔ Codex; expand only by promoting `switch_supported` after tests |
-| Same-harness fresh conversation | New native session + compiled handoff; same role_id / worktree |
-| Lifecycle ledger | Append-only switch/pause/resume/failover/fresh (not full chat) |
-| Registry | Promote `switch_supported` for pairs that pass tests + dogfood |
+See also `PHASE2A_PLAN.md`.
+
+| Task | Status | Detail |
+|------|--------|--------|
+| SemanticHandoffV1 + ObservedWorkspaceV1 | **Done (2A.0)** | `domain/handoff.go` |
+| Compiler | **Done (2A.0)** | `handoff/compile.go` — observed overrides semantic |
+| Lifecycle ledger migration + store | **Done (2A.0)** | 0044 + `AppendLifecycleLedger` / list |
+| Switch saga | Open | #3548-class: durable states, generation fencing, pre/post-stop, target ack |
+| Initial matrix | Open | Claude ↔ Codex; promote `switch_supported` only after tests |
+| Same-harness fresh conversation | Open | New native session + compiled handoff; same role_id / worktree |
+| Registry | Open | Promote `switch_supported` for pairs that pass dogfood |
 
 **DoD (from MASTER_PLAN):** pre-stop leaves source usable; post-stop retains handoff; one generation owns input.
 

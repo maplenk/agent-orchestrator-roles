@@ -21,6 +21,24 @@ type ChangeLog struct {
 	CreatedAt time.Time
 }
 
+type LifecycleLedger struct {
+	ID                    string
+	SessionID             string
+	ProjectID             string
+	Kind                  string
+	Phase                 string
+	GenerationID          string
+	FromHarness           string
+	ToHarness             string
+	FromModel             string
+	ToModel               string
+	RoleID                string
+	SourceNativeSessionID string
+	TargetNativeSessionID string
+	PayloadJson           string
+	CreatedAt             time.Time
+}
+
 type Notification struct {
 	ID         string
 	SessionID  domain.SessionID
