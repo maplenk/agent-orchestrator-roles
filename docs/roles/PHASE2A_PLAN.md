@@ -21,9 +21,21 @@
 SwitchWorker / FreshConversation / RecoverSwitchFromPostStop
 ```
 
+## Follow-up P1 close (after 7fdbf1aa)
+
+| Finding | Fix |
+|---------|-----|
+| Pending after destroy | Persist `SwitchPending` (+ full payload) **before** destroy |
+| Handoff lost without post_stop | `PayloadJSON` on pending; recover pre_stop payload fallback |
+| Send reports success on suppress | `SuppressedSwitchPending` → `ErrSwitchInProgress` |
+| After-start blocked | `DeliverHost` for host injection only |
+| Terminal bypass | `InputGate` + daemon `SetInputGate(sessMgr)` |
+| Recovery RO skip | `RequireReadOnly(toHarness)` on recover |
+| Observed gen wrong | Attribute observe to **source** RuntimeLaunchID |
+| Corrupt pending fail-open | `decodeSwitchPending` errors; GetSession fails closed |
+
 ## Still open before accept / API / CLI
 
 1. Broader adversarial + dogfood Claude↔Codex
 2. Promote `switch_supported` only after dogfood
 3. Service/API/CLI with host role-map authorized targets (no free-form harness exposure)
-4. Pre_stop uncertain recovery paths beyond post_stop (partial)

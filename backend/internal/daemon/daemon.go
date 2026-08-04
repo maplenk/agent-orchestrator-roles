@@ -190,6 +190,10 @@ func Run() error {
 		}
 		return fmt.Errorf("wire session service: %w", err)
 	}
+	// Gate terminal client keystrokes while a worker switch is pending target_ack.
+	if gate, ok := sessMgr.(terminal.InputGate); ok {
+		termMgr.SetInputGate(gate)
+	}
 	lcStack.LCM.SetCompletionTerminator(sessMgr)
 	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, log)
 	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink})

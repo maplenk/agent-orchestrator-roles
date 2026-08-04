@@ -177,7 +177,11 @@ func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.Ses
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session %s: %w", id, err)
 	}
-	return rowToRecord(sessionFromGetRow(row)), true, nil
+	rec, err := rowToRecord(sessionFromGetRow(row))
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("get session %s: %w", id, err)
+	}
+	return rec, true, nil
 }
 
 // ListSessions returns every session in a project, ordered by num.
@@ -188,7 +192,11 @@ func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]d
 	}
 	out := make([]domain.SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, rowToRecord(sessionFromProjectListRow(r)))
+		rec, err := rowToRecord(sessionFromProjectListRow(r))
+		if err != nil {
+			return nil, fmt.Errorf("list sessions for %s: %w", project, err)
+		}
+		out = append(out, rec)
 	}
 	return out, nil
 }
@@ -201,7 +209,11 @@ func (s *Store) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, er
 	}
 	out := make([]domain.SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, rowToRecord(sessionFromAllListRow(r)))
+		rec, err := rowToRecord(sessionFromAllListRow(r))
+		if err != nil {
+			return nil, fmt.Errorf("list all sessions: %w", err)
+		}
+		out = append(out, rec)
 	}
 	return out, nil
 }
@@ -266,11 +278,15 @@ func sessionFromAllListRow(row gen.ListAllSessionsRow) gen.Session {
 	}
 }
 
-func rowToRecord(row gen.Session) domain.SessionRecord {
+func rowToRecord(row gen.Session) (domain.SessionRecord, error) {
 	// Hydrate Role whenever any role-specific column is populated — not only when
 	// role_id is set. Dropping partial pins (e.g. template_artifact_id without
 	// role_id) would make restore treat corrupt rows as legacy.
 	role := roleFromSessionRow(row)
+	pending, err := decodeSwitchPending(row.SwitchPendingJson)
+	if err != nil {
+		return domain.SessionRecord{}, err
+	}
 
 	return domain.SessionRecord{
 		ID:          row.ID,
@@ -299,13 +315,13 @@ func rowToRecord(row gen.Session) domain.SessionRecord {
 			PreviewURL:          row.PreviewURL,
 			PreviewRevision:     row.PreviewRevision,
 			Role:                role,
-			SwitchPending:       decodeSwitchPending(row.SwitchPendingJson),
+			SwitchPending:       pending,
 			SpawnCapabilityHash: row.SpawnCapabilityHash,
 		},
 		CleanupGeneration: row.CleanupGeneration,
 		CreatedAt:         row.CreatedAt,
 		UpdatedAt:         row.UpdatedAt,
-	}
+	}, nil
 }
 
 func encodeSwitchPending(p *domain.SwitchPending) string {
@@ -319,16 +335,22 @@ func encodeSwitchPending(p *domain.SwitchPending) string {
 	return string(b)
 }
 
-func decodeSwitchPending(raw string) *domain.SwitchPending {
+// decodeSwitchPending returns (nil, nil) for empty, a pending pointer for valid
+// JSON, or an error for malformed non-empty durable state. Callers must fail
+// closed on error so corrupt ownership state cannot open input paths.
+func decodeSwitchPending(raw string) (*domain.SwitchPending, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || raw == "{}" || raw == "null" {
-		return nil
+		return nil, nil
 	}
 	var p domain.SwitchPending
-	if err := json.Unmarshal([]byte(raw), &p); err != nil || strings.TrimSpace(p.GenerationID) == "" {
-		return nil
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil, fmt.Errorf("corrupt switch_pending_json: %w", err)
 	}
-	return &p
+	if strings.TrimSpace(p.GenerationID) == "" {
+		return nil, fmt.Errorf("corrupt switch_pending_json: missing generationId")
+	}
+	return &p, nil
 }
 
 func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {

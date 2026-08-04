@@ -123,7 +123,17 @@ func (g *Guard) Send(ctx context.Context, id domain.SessionID, msg string) error
 // sitting at an idle prompt is exactly where a user message (or the Enter that
 // submits its unsent draft) belongs.
 func (g *Guard) Deliver(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
-	return g.send(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, false, func(rec domain.SessionRecord) (Outcome, bool) {
+		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
+	})
+}
+
+// DeliverHost is for AO-owned injection (after-start switch handoff prompt).
+// It still refuses terminated/exited sessions, but allows delivery while
+// SwitchPending is set so the target can receive its first host prompt before
+// durable target_ack promotes ownership for user input.
+func (g *Guard) DeliverHost(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
+	return g.send(ctx, id, msg, true, func(rec domain.SessionRecord) (Outcome, bool) {
 		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
 	})
 }
@@ -133,7 +143,7 @@ func (g *Guard) Deliver(ctx context.Context, id domain.SessionID, msg string) (O
 // decision or waiting at the prompt — because an automated paste+Enter there
 // either answers a dialog or submits text the user never saw.
 func (g *Guard) Nudge(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
-	return g.send(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, false, func(rec domain.SessionRecord) (Outcome, bool) {
 		return SuppressedAwaitingUser, rec.Activity.State.NeedsInput()
 	})
 }
@@ -146,7 +156,7 @@ func (g *Guard) Nudge(ctx context.Context, id domain.SessionID, msg string) (Out
 // predicate is treated as "cannot steer", so an unknown harness never takes an
 // unsolicited write during a live turn.
 func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg string, steersActiveTurn func(domain.AgentHarness) bool) (Outcome, error) {
-	return g.send(ctx, id, msg, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, false, func(rec domain.SessionRecord) (Outcome, bool) {
 		if rec.Activity.State.NeedsInput() {
 			return SuppressedAwaitingUser, true
 		}
@@ -163,7 +173,7 @@ func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg 
 // appear mid-paste — but the just-in-time read is the strongest guarantee
 // available without scraping the terminal. Fail closed: a store error
 // suppresses the write rather than pressing Enter on an unknown state.
-func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, refuse func(domain.SessionRecord) (Outcome, bool)) (Outcome, error) {
+func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, hostOwned bool, refuse func(domain.SessionRecord) (Outcome, bool)) (Outcome, error) {
 	rec, ok, err := g.store.GetSession(ctx, id)
 	if err != nil {
 		return SuppressedUnknown, fmt.Errorf("guard %s: read session: %w", id, err)
@@ -176,7 +186,9 @@ func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, refus
 		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "terminated")
 		return SuppressedTerminated, nil
 	}
-	if rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
+	// User/lifecycle input is gated until durable target_ack; host-owned after-start
+	// injection may proceed so the pending target receives its first prompt.
+	if !hostOwned && rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
 		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "switch_pending",
 			"generation", rec.Metadata.SwitchPending.GenerationID)
 		return SuppressedSwitchPending, nil

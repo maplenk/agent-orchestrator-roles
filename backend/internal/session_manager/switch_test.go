@@ -176,8 +176,15 @@ func TestSwitchWorker_DestroyErrorStillAliveIsPreStop(t *testing.T) {
 	if err == nil || errors.Is(err, ErrSwitchPostStop) {
 		t.Fatalf("want pre-stop failure, got %v", err)
 	}
-	if st.sessions[id].Metadata.SwitchPending != nil {
-		t.Fatal("must not stage pending when source still alive")
+	// Pending is staged before destroy so recovery can re-drive; source still alive.
+	if st.sessions[id].Metadata.SwitchPending == nil {
+		t.Fatal("pending must exist as recoverable fence before destroy completes")
+	}
+	if st.sessions[id].Harness != domain.HarnessClaudeCode {
+		t.Fatal("must not promote harness when source still alive")
+	}
+	if rt.created != 0 {
+		t.Fatal("must not launch target while source still alive")
 	}
 }
 
@@ -419,5 +426,137 @@ func TestComposeSwitchPrompt_StripsPrior(t *testing.T) {
 	}
 	if !strings.Contains(got, "task") || strings.Contains(got, "\nold\n") {
 		t.Fatalf("got %q", got)
+	}
+}
+
+func TestSwitchWorker_PendingAndPayloadBeforeDestroy(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+
+	// Fail create so we stop after post_stop path; pending must already have payload.
+	rt := &fakeRuntime{createErr: errors.New("no runtime")}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	_, err := m.SwitchWorker(ctx, SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+		Semantic: domain.SemanticHandoffV1{Objective: "keep going"},
+	})
+	if !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("err = %v", err)
+	}
+	p := st.sessions[id].Metadata.SwitchPending
+	if p == nil || p.PayloadJSON == "" {
+		t.Fatalf("pending payload missing: %+v", p)
+	}
+	if !strings.Contains(p.PayloadJSON, "keep going") {
+		t.Fatalf("payload missing semantic: %s", p.PayloadJSON)
+	}
+	if !strings.Contains(st.sessions[id].Metadata.Prompt, "Host-compiled handoff") {
+		t.Fatal("composed prompt must be durable on session")
+	}
+}
+
+func TestRecover_UsesPendingPayloadWithoutPostStop(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	payload := `{"semantic":{"schemaVersion":1,"objective":"from-pending"},"observed":{"schemaVersion":1,"branch":"b","head":"abc","generationId":"src-gen"},"compiled":"## Host-compiled handoff\n\nfrom-pending-compile"}`
+	rec := st.sessions[id]
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-p", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		OriginalTask: "implement feature", RoleID: "implementor", PayloadJSON: payload,
+	}
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	rec.Metadata.Prompt = "## Host-compiled handoff\n\nfrom-pending-compile\n\n## Prior task prompt\nimplement feature"
+	st.sessions[id] = rec
+	// No post_stop row — only pre_stop (optional).
+	st.ledger = []domain.LifecycleLedgerRecord{{
+		ID: "mer-1:gen-p:pre_stop", SessionID: id, ProjectID: "mer",
+		Kind: domain.LifecycleKindSwitch, Phase: domain.LifecyclePhasePreStop,
+		GenerationID: "gen-p", PayloadJSON: payload,
+	}}
+
+	rt := &fakeRuntime{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "should-not-use" },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	res, err := m.RecoverSwitchFromPostStop(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(res.Compiled.Text, "from-pending") && !strings.Contains(res.Session.Metadata.Prompt, "from-pending-compile") {
+		t.Fatalf("lost handoff: compiled=%q prompt=%q", res.Compiled.Text, res.Session.Metadata.Prompt)
+	}
+	if rt.created != 1 {
+		t.Fatalf("create=%d", rt.created)
+	}
+}
+
+func TestRecover_RevalidatesReadOnlyTarget(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessCodex, ws, art, sha)
+	rec := st.sessions[id]
+	// RO role but pending target is Pi (no RO).
+	rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites = false
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-ro", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessCodex, ToHarness: domain.HarnessPi,
+		OriginalTask: "task", RoleID: "orchestrator",
+		PayloadJSON: `{"compiled":"## Host-compiled handoff\n\nx"}`,
+	}
+	rec.Metadata.RuntimeHandleID = ""
+	st.sessions[id] = rec
+
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		if h == domain.HarnessPi {
+			c.SwitchSupported = true // allow switch check so RO is what fails
+		}
+		return c
+	}
+	_, err := m.RecoverSwitchFromPostStop(ctx, id)
+	if !errors.Is(err, ErrReadOnlyUnsupported) {
+		t.Fatalf("err = %v, want ErrReadOnlyUnsupported", err)
+	}
+}
+
+func TestAllowTerminalInput_BlocksPending(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	st.sessions[id] = domain.SessionRecord{
+		ID: id, ProjectID: "mer", Kind: domain.KindWorker,
+		Metadata: domain.SessionMetadata{
+			SwitchPending: &domain.SwitchPending{GenerationID: "g1", ToHarness: domain.HarnessCodex},
+		},
+	}
+	m := New(Deps{Store: st, Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: func(string) (string, error) { return "/bin/true", nil }})
+	if err := m.AllowTerminalInput(ctx, "mer-1"); err == nil {
+		t.Fatal("expected block")
+	}
+	if err := m.AllowTerminalInput(ctx, "shell-xyz"); err != nil {
+		t.Fatalf("non-session terminal should allow: %v", err)
 	}
 }

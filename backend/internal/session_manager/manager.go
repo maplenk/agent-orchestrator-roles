@@ -2146,6 +2146,10 @@ func (m *Manager) Send(ctx context.Context, id domain.SessionID, message string)
 		return fmt.Errorf("send %s: %w", id, ErrAgentExited)
 	case sessionguard.SuppressedAwaitingUser:
 		return fmt.Errorf("send %s: %w", id, ErrAwaitingDecision)
+	case sessionguard.SuppressedSwitchPending:
+		return fmt.Errorf("send %s: %w", id, ErrSwitchInProgress)
+	case sessionguard.SuppressedUnknown:
+		return fmt.Errorf("send %s: pre-write session read failed", id)
 	}
 	// confirmActive only helps — and is only SAFE — when the harness reports
 	// both a prompt-submit signal (so the loop can observe active) and a
@@ -3084,11 +3088,9 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 	if err := m.waitForPromptReadiness(ctx, agent, cfg, handle); err != nil {
 		return err
 	}
-	// Call Deliver directly (not the Guard.Send wrapper, which folds a suppressed
-	// outcome into nil): a freshly-spawned session can terminate or hit a
-	// permission dialog between readiness and prompt injection, and folding that
-	// into success would report a spawn/restore that never delivered its prompt.
-	outcome, err := m.messenger.Deliver(ctx, id, prompt)
+	// Host-owned delivery: may inject into a SwitchPending target so the first
+	// handoff prompt lands before durable target_ack. User Deliver still gated.
+	outcome, err := m.messenger.DeliverHost(ctx, id, prompt)
 	if err != nil {
 		return fmt.Errorf("send %s: %w", id, err)
 	}
@@ -3101,11 +3103,37 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 		return fmt.Errorf("send %s: %w", id, ErrAgentExited)
 	case sessionguard.SuppressedAwaitingUser:
 		return fmt.Errorf("send %s: %w", id, ErrAwaitingDecision)
+	case sessionguard.SuppressedSwitchPending:
+		// Only reached if DeliverHost is unavailable and pending is set.
+		return fmt.Errorf("send %s: %w", id, ErrSwitchInProgress)
 	case sessionguard.SuppressedUnknown:
 		return fmt.Errorf("send %s: pre-write session read failed", id)
+	case sessionguard.Sent:
+		return nil
 	default:
+		return fmt.Errorf("send %s: unexpected guard outcome %v", id, outcome)
+	}
+}
+
+// AllowTerminalInput implements terminal.InputGate: refuse PTY client writes for
+// sessions with durable SwitchPending (one-generation ownership).
+func (m *Manager) AllowTerminalInput(ctx context.Context, terminalID string) error {
+	if strings.TrimSpace(terminalID) == "" {
 		return nil
 	}
+	rec, ok, err := m.store.GetSession(ctx, domain.SessionID(terminalID))
+	if err != nil {
+		// Fail closed: store errors must not open a write path into a pending switch.
+		return fmt.Errorf("terminal input: %w", err)
+	}
+	if !ok {
+		// Not an agent session id (e.g. shell terminal) — allow.
+		return nil
+	}
+	if rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
+		return fmt.Errorf("%w: switch pending gen %s", ErrSwitchInProgress, rec.Metadata.SwitchPending.GenerationID)
+	}
+	return nil
 }
 
 func (m *Manager) waitForPromptReadiness(ctx context.Context, agent ports.Agent, cfg ports.LaunchConfig, handle ports.RuntimeHandle) error {

@@ -114,13 +114,15 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 	}
 
 	originalTask := originalTaskPrompt(meta)
+	sourceGen := strings.TrimSpace(meta.RuntimeLaunchID)
 	if err := m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseRequested, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", "{}"); err != nil {
 		return SwitchResult{}, err
 	}
 
+	// Observe while source is still the live workspace owner; attribute to source gen.
 	obs := handoff.ObserveWorkspace(ctx, handoff.ObserveInput{
 		Worktree:     meta.WorkspacePath,
-		GenerationID: targetGen,
+		GenerationID: sourceGen,
 		Now:          m.clock(),
 	})
 	compiled := handoff.Compile(handoff.CompileInput{
@@ -139,9 +141,32 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 		return SwitchResult{}, err
 	}
 
+	// Durable recoverable fence BEFORE destroying the source. If destroy succeeds
+	// but a later persist fails, boot recovery can still re-drive from pending.
+	pending := &domain.SwitchPending{
+		GenerationID:          targetGen,
+		Kind:                  kind,
+		FromHarness:           fromHarness,
+		ToHarness:             toHarness,
+		FromModel:             fromModel,
+		ToModel:               toModel,
+		OriginalTask:          originalTask,
+		RoleID:                roleID,
+		PayloadJSON:           payload,
+		SourceRuntimeHandleID: meta.RuntimeHandleID,
+	}
+	rec.Metadata.SwitchPending = pending
+	// Compose prompt now so recovery never needs to rebuild from empty payload.
+	rec.Metadata.Prompt = composeSwitchPrompt(originalTask, compiled.Text)
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(ctx, rec); err != nil {
+		return SwitchResult{}, fmt.Errorf("switch %s: persist pending before destroy: %w", req.SessionID, err)
+	}
+
 	// Stop source with probe-driven transition (Destroy error ≠ source usable).
 	sourceDead, err := m.destroyRuntimeProbed(ctx, meta.RuntimeHandleID)
 	if err != nil {
+		// Pending remains; source may still be alive — recovery/reconcile must probe.
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", payload)
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: %w", req.SessionID, err)
 	}
@@ -150,29 +175,18 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
 	}
 
-	// Stage pending target WITHOUT promoting current harness/model.
-	pending := &domain.SwitchPending{
-		GenerationID: targetGen,
-		Kind:         kind,
-		FromHarness:  fromHarness,
-		ToHarness:    toHarness,
-		FromModel:    fromModel,
-		ToModel:      toModel,
-		OriginalTask: originalTask,
-		RoleID:       roleID,
-	}
-	rec.Metadata.SwitchPending = pending
+	// Source dead: clear live handle/ids (pending still carries intent + payload).
 	rec.Metadata.AgentSessionID = ""
 	rec.Metadata.RuntimeHandleID = ""
 	rec.Metadata.RuntimeLaunchID = ""
-	rec.Metadata.Prompt = composeSwitchPrompt(originalTask, compiled.Text)
 	rec.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, rec); err != nil {
-		return SwitchResult{}, fmt.Errorf("switch %s: persist pending: %w", req.SessionID, err)
+		// Source is dead with pending set — recovery can still continue.
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: clear source handle: %v", req.SessionID, ErrSwitchPostStop, err)
 	}
 
 	if err := m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhasePostStop, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, "", "", payload); err != nil {
-		// Source is dead; leave pending for recovery even if this append fails.
+		// Source is dead and pending has full payload; leave for recovery.
 		return SwitchResult{}, fmt.Errorf("switch %s: %w: post_stop ledger: %v", req.SessionID, ErrSwitchPostStop, err)
 	}
 
@@ -238,6 +252,9 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		obs          domain.ObservedWorkspaceV1
 	)
 	if pending != nil {
+		if pending.GenerationID == "corrupt" || pending.GenerationID == "__invalid__" {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: corrupt switch_pending_json; refuse auto recovery", sessionID)
+		}
 		kind = pending.Kind
 		targetGen = pending.GenerationID
 		fromHarness = pending.FromHarness
@@ -245,6 +262,16 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		fromModel = pending.FromModel
 		toModel = pending.ToModel
 		roleID = pending.RoleID
+		// Prefer payload staged on pending (survives post_stop append failure).
+		if raw := strings.TrimSpace(pending.PayloadJSON); raw != "" && raw != "{}" {
+			payloadRaw = raw
+			var payload switchPayload
+			if err := json.Unmarshal([]byte(raw), &payload); err == nil {
+				compiledText = payload.Compiled
+				sem = payload.Semantic
+				obs = payload.Observed
+			}
+		}
 	}
 	if ok {
 		if targetGen == "" {
@@ -268,14 +295,36 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		if roleID == "" {
 			roleID = recov.PostStop.RoleID
 		}
-		payloadRaw = recov.PostStop.PayloadJSON
-		var payload switchPayload
-		if raw := strings.TrimSpace(payloadRaw); raw != "" && raw != "{}" {
-			_ = json.Unmarshal([]byte(raw), &payload)
+		// Fall back to post_stop then pre_stop payload for older sagas / missing pending payload.
+		if payloadRaw == "" {
+			payloadRaw = recov.PostStop.PayloadJSON
 		}
-		compiledText = payload.Compiled
-		sem = payload.Semantic
-		obs = payload.Observed
+		if payloadRaw == "" {
+			if pre := findPhasePayload(events, targetGen, domain.LifecyclePhasePreStop); pre != "" {
+				payloadRaw = pre
+			}
+		}
+		if compiledText == "" {
+			var payload switchPayload
+			if raw := strings.TrimSpace(payloadRaw); raw != "" && raw != "{}" {
+				_ = json.Unmarshal([]byte(raw), &payload)
+			}
+			compiledText = payload.Compiled
+			sem = payload.Semantic
+			obs = payload.Observed
+		}
+	}
+	// Also recover pre_stop-only when pending exists without post_stop (destroy
+	// after pending persist, post_stop never written).
+	if payloadRaw == "" && pending != nil {
+		if pre := findPhasePayload(events, targetGen, domain.LifecyclePhasePreStop); pre != "" {
+			payloadRaw = pre
+			var payload switchPayload
+			_ = json.Unmarshal([]byte(pre), &payload)
+			compiledText = payload.Compiled
+			sem = payload.Semantic
+			obs = payload.Observed
+		}
 	}
 	if toHarness == "" {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: missing target harness", sessionID)
@@ -283,10 +332,17 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	if _, ok := m.agents.Agent(toHarness); !ok {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %q", sessionID, ErrUnknownHarness, toHarness)
 	}
+	// Revalidate RO before launching/acking a target (capability may have changed).
+	if rec.Metadata.Role.RoleID != "" && !rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites {
+		if err := capabilities.RequireReadOnly(toHarness); err != nil {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %v", sessionID, ErrReadOnlyUnsupported, err)
+		}
+	}
 
-	// Live target for this generation: only promote ack, do not double-launch.
-	// A live runtime with a different generation is an uncertain ownership state —
-	// never clear the handle and relaunch (would create dual input owners).
+	// Live runtime handling:
+	// - matching target gen → ack only
+	// - still the source handle (destroy never completed) → probe-destroy, then continue
+	// - any other live gen → uncertain (never dual-launch)
 	if hid := strings.TrimSpace(rec.Metadata.RuntimeHandleID); hid != "" {
 		alive, probeErr := m.runtime.IsAlive(ctx, ports.RuntimeHandle{ID: hid})
 		if probeErr != nil {
@@ -296,15 +352,26 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 			if rec.Metadata.RuntimeLaunchID == targetGen {
 				return m.ackLiveTarget(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw, compiledText, sem, obs)
 			}
-			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: live runtime %q blocks relaunch (gen %q want %q)",
-				sessionID, ErrSwitchUncertain, hid, rec.Metadata.RuntimeLaunchID, targetGen)
+			// Retry source stop when pending recorded this handle as the pre-stop source.
+			if pending != nil && pending.SourceRuntimeHandleID == hid {
+				dead, dErr := m.destroyRuntimeProbed(ctx, hid)
+				if dErr != nil || !dead {
+					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: source still live: %v", sessionID, ErrSwitchUncertain, dErr)
+				}
+				// Source now dead; fall through to clear and relaunch target.
+			} else {
+				return SwitchResult{}, fmt.Errorf("recover switch %s: %w: live runtime %q blocks relaunch (gen %q want %q)",
+					sessionID, ErrSwitchUncertain, hid, rec.Metadata.RuntimeLaunchID, targetGen)
+			}
 		}
-		// Dead handle: clear and relaunch.
+		// Dead handle (or just destroyed source): clear and relaunch.
 		rec.Metadata.RuntimeHandleID = ""
 		rec.Metadata.RuntimeLaunchID = ""
 	}
 
-	if compiledText == "" {
+	if compiledText == "" && (sem.Objective != "" || obs.Head != "" || obs.Branch != "") {
+		// Only recompile when we have real semantic/observed facts — never replace
+		// a valid composed prompt with an empty handoff.
 		same := fromHarness == toHarness || kind == domain.LifecycleKindFreshConversation
 		c := handoff.Compile(handoff.CompileInput{
 			Semantic: sem, Observed: obs, RoleID: roleID, TargetGeneration: targetGen,
@@ -323,12 +390,20 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		pending = &domain.SwitchPending{
 			GenerationID: targetGen, Kind: kind, FromHarness: fromHarness, ToHarness: toHarness,
 			FromModel: fromModel, ToModel: toModel, OriginalTask: original, RoleID: roleID,
+			PayloadJSON: payloadRaw,
 		}
+	}
+	if strings.TrimSpace(pending.PayloadJSON) == "" && payloadRaw != "" {
+		pending.PayloadJSON = payloadRaw
 	}
 	rec.Metadata.SwitchPending = pending
 	rec.Metadata.AgentSessionID = ""
-	if !strings.Contains(rec.Metadata.Prompt, "Host-compiled handoff") || !strings.Contains(rec.Metadata.Prompt, compiledText) {
-		rec.Metadata.Prompt = composeSwitchPrompt(original, compiledText)
+	// Prefer existing composed prompt when it already contains the handoff;
+	// only recompose when we have compiled text and the prompt is missing it.
+	if compiledText != "" {
+		if !strings.Contains(rec.Metadata.Prompt, "Host-compiled handoff") {
+			rec.Metadata.Prompt = composeSwitchPrompt(original, compiledText)
+		}
 	}
 	rec.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, rec); err != nil {
@@ -634,6 +709,16 @@ type recoverablePostStop struct {
 
 func isSwitchLedgerKind(k domain.LifecycleLedgerKind) bool {
 	return k == domain.LifecycleKindSwitch || k == domain.LifecycleKindFreshConversation
+}
+
+func findPhasePayload(events []domain.LifecycleLedgerRecord, gen string, phase domain.LifecycleLedgerPhase) string {
+	for i := len(events) - 1; i >= 0; i-- {
+		e := events[i]
+		if e.GenerationID == gen && e.Phase == phase && isSwitchLedgerKind(e.Kind) {
+			return e.PayloadJSON
+		}
+	}
+	return ""
 }
 
 func findRecoverablePostStop(events []domain.LifecycleLedgerRecord) (recoverablePostStop, bool) {

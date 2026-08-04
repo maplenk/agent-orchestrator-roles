@@ -62,17 +62,23 @@ type SessionMetadata struct {
 
 // SwitchPending is the durable in-flight target pin for a worker switch/fresh.
 // Promoted into Harness / Role only after lifecycle target_ack is persisted.
+// Must be persisted before source destruction so boot recovery can re-drive.
 type SwitchPending struct {
-	GenerationID string             `json:"generationId"`
+	GenerationID string              `json:"generationId"`
 	Kind         LifecycleLedgerKind `json:"kind"`
-	FromHarness  AgentHarness       `json:"fromHarness,omitempty"`
-	ToHarness    AgentHarness       `json:"toHarness"`
-	FromModel    string             `json:"fromModel,omitempty"`
-	ToModel      string             `json:"toModel,omitempty"`
+	FromHarness  AgentHarness        `json:"fromHarness,omitempty"`
+	ToHarness    AgentHarness        `json:"toHarness"`
+	FromModel    string              `json:"fromModel,omitempty"`
+	ToModel      string              `json:"toModel,omitempty"`
 	// OriginalTask is the immutable user task prompt without compiled handoffs.
 	OriginalTask string `json:"originalTask,omitempty"`
 	// RoleID preserved across switch (never changes).
 	RoleID string `json:"roleId,omitempty"`
+	// PayloadJSON is the full switchPayload (semantic/observed/compiled) so
+	// recovery does not depend on a durable post_stop ledger row.
+	PayloadJSON string `json:"payloadJson,omitempty"`
+	// SourceRuntimeHandleID is the pre-stop handle (for diagnostics/recovery).
+	SourceRuntimeHandleID string `json:"sourceRuntimeHandleId,omitempty"`
 }
 
 // SessionRecord is the persistence shape. It intentionally stores only durable

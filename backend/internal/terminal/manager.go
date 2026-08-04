@@ -34,6 +34,12 @@ const (
 	defaultWriteBuffer = 1024
 )
 
+// InputGate refuses client PTY writes for terminals whose agent session has a
+// durable switch pending (one-generation ownership). Nil gate allows all input.
+type InputGate interface {
+	AllowTerminalInput(ctx context.Context, terminalID string) error
+}
+
 // Manager serves WebSocket clients, opening one attach Stream per opened pane
 // per connection. There is no shared per-pane state to outlive a connection:
 // the runtime owns the session (screen, scrollback, modes), and every fresh
@@ -44,6 +50,7 @@ type Manager struct {
 	events    EventSource
 	log       *slog.Logger
 	heartbeat time.Duration
+	inputGate InputGate
 
 	// ctx scopes every attachment's PTY lifetime; cancelled by Close.
 	ctx    context.Context
@@ -84,6 +91,17 @@ type Option func(*Manager)
 
 // WithHeartbeat overrides the ping interval.
 func WithHeartbeat(d time.Duration) Option { return func(m *Manager) { m.heartbeat = d } }
+
+// WithInputGate installs a switch-pending (or other) fence on client PTY writes.
+func WithInputGate(g InputGate) Option { return func(m *Manager) { m.inputGate = g } }
+
+// SetInputGate late-binds an input fence (session manager is often built after
+// the terminal manager during daemon startup).
+func (m *Manager) SetInputGate(g InputGate) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.inputGate = g
+}
 
 // NewManager builds a Manager. src opens attach Streams; events feeds the session
 // channel (may be nil to disable it). A nil logger falls back to slog.Default.
@@ -317,6 +335,12 @@ func (c *connState) handleTerminal(msg clientMsg) {
 		raw, err := base64.StdEncoding.DecodeString(msg.Data)
 		if err != nil {
 			return
+		}
+		if c.mgr.inputGate != nil {
+			if err := c.mgr.inputGate.AllowTerminalInput(c.mgr.ctx, msg.ID); err != nil {
+				c.enqueue(serverMsg{Ch: chTerminal, ID: msg.ID, Type: msgError, Error: "input blocked: switch in progress"})
+				return
+			}
 		}
 		if a := c.lookup(msg.ID); a != nil {
 			_ = a.write(raw)
