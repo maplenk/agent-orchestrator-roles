@@ -79,11 +79,12 @@ Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Override only; **pr
 
 | Surface | Detail |
 |---------|--------|
-| Service | `SwitchWorker` / `FreshConversation` authorize via `roleMap` binding + `failover.roles` (`domain.SwitchTargetAuthorized`) |
-| HTTP | `POST /api/v1/sessions/{id}/switch`, `POST /api/v1/sessions/{id}/fresh-conversation` |
-| CLI | `ao session switch --session … --harness …`, `ao session fresh --session …` |
-| Errors | `SWITCH_TARGET_UNAUTHORIZED` (403), `SWITCH_NOT_SUPPORTED` (409 while caps false), post_stop/uncertain/in-progress |
-| Free-form harness | **Rejected** unless on host role-map authorized set |
+| Service | Exact `(harness, model)` via `ResolveAuthorizedSwitchModel`; ambiguous omitted model → `TARGET_MODEL_REQUIRED` |
+| HTTP | `POST …/switch`, `…/fresh-conversation` — **operator / LAN / canSpawn session auth required** (headerless 403) |
+| CLI | `ao session switch|fresh` attach `spawnCallerHeaders()` (managed-session no-upgrade) |
+| Desktop | `applyOperatorSpawnHeaders` covers switch/fresh paths |
+| Errors | `SWITCH_AUTH_REQUIRED`, `SWITCH_TARGET_UNAUTHORIZED`, `TARGET_MODEL_REQUIRED`, `SWITCH_NOT_SUPPORTED` |
+| Failover config-save | `ValidateRoleMap` checks failover rungs for spawn + inherited RO; `switch_supported` after promotion |
 
 ## Still open before promotion
 

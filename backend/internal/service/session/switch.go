@@ -113,7 +113,7 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	if !to.IsKnown() {
 		return SwitchWorkerOutcome{}, apierr.Invalid("UNKNOWN_HARNESS", fmt.Sprintf("Unknown harness %q", to), nil)
 	}
-	model := strings.TrimSpace(req.TargetModel)
+	requestedModel := strings.TrimSpace(req.TargetModel)
 
 	// Same harness → fresh conversation path (no free-form cross-provider model).
 	if to == rec.Harness {
@@ -124,14 +124,14 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 		return s.switchOutcome(ctx, res)
 	}
 
-	if !domain.SwitchTargetAuthorized(roleMap, roleID, to, model) {
+	model, err := domain.ResolveAuthorizedSwitchModel(roleMap, roleID, to, requestedModel)
+	if err != nil {
+		if errors.Is(err, domain.ErrSwitchTargetModelRequired) {
+			return SwitchWorkerOutcome{}, apierr.Invalid("TARGET_MODEL_REQUIRED",
+				fmt.Sprintf("Multiple models are authorized for harness %q on role %q; pass targetModel explicitly", to, roleID), nil)
+		}
 		return SwitchWorkerOutcome{}, apierr.Forbidden("SWITCH_TARGET_UNAUTHORIZED",
-			fmt.Sprintf("Harness %q is not an authorized switch target for role %q (add it to roleMap.failover.roles)", to, roleID))
-	}
-
-	// Prefer ladder model when client omitted model and a unique model is configured.
-	if model == "" {
-		model = defaultAuthorizedModel(roleMap, roleID, to)
+			fmt.Sprintf("Harness/model %s/%q is not an authorized switch target for role %q (roleMap binding + failover.roles)", to, requestedModel, roleID))
 	}
 
 	res, err := sc.SwitchWorker(ctx, sessionmanager.SwitchRequest{
@@ -165,20 +165,4 @@ func (s *Service) switchOutcome(ctx context.Context, res sessionmanager.SwitchRe
 		GenerationID: res.GenerationID,
 		Kind:         res.Kind,
 	}, nil
-}
-
-func defaultAuthorizedModel(m domain.RoleMap, roleID string, harness domain.AgentHarness) string {
-	var found string
-	var n int
-	for _, t := range domain.RoleAuthorizedSwitchTargets(m, roleID) {
-		if t.Harness != harness {
-			continue
-		}
-		n++
-		found = strings.TrimSpace(t.Model)
-	}
-	if n == 1 {
-		return found
-	}
-	return ""
 }

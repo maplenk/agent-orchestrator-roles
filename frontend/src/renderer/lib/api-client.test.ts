@@ -324,6 +324,23 @@ describe("applyOperatorSpawnHeaders", () => {
 		expect(o.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
 	});
 
+	it("injects operator token for switch and fresh-conversation", () => {
+		const sw = applyOperatorSpawnHeaders(
+			new Headers(),
+			"POST",
+			"/api/v1/sessions/mer-1/switch",
+			"op-tok",
+		);
+		expect(sw.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
+		const fr = applyOperatorSpawnHeaders(
+			new Headers(),
+			"POST",
+			"/api/v1/sessions/mer-1/fresh-conversation",
+			"op-tok",
+		);
+		expect(fr.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
+	});
+
 	it("does not inject for GET or non-spawn paths", () => {
 		const h = applyOperatorSpawnHeaders(new Headers(), "GET", "/api/v1/sessions", "op-tok");
 		expect(h.has("X-AO-Operator-Spawn-Token")).toBe(false);

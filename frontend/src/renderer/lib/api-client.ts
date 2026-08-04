@@ -184,9 +184,15 @@ export function applyOperatorSpawnHeaders(
 	token: string | undefined = daemonStatus.operatorSpawnToken,
 ): Headers {
 	const m = method.toUpperCase();
+	// Privileged desktop mutations: spawn + worker switch/fresh (operator only;
+	// never override agent session capability headers).
+	const privileged =
+		pathname === "/api/v1/sessions" ||
+		pathname === "/api/v1/orchestrators" ||
+		/^\/api\/v1\/sessions\/[^/]+\/(switch|fresh-conversation)$/.test(pathname);
 	if (
 		m === "POST" &&
-		(pathname === "/api/v1/sessions" || pathname === "/api/v1/orchestrators") &&
+		privileged &&
 		token &&
 		!headers.has("X-AO-Operator-Spawn-Token") &&
 		!headers.has("X-AO-Caller-Session-Id")

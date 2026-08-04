@@ -75,20 +75,61 @@ func For(h domain.AgentHarness) Caps {
 
 // ValidateRoleMap rejects role bindings that claim unsupported capabilities.
 // Call at config-save (and any path that accepts a RoleMap).
+//
+// Failover rungs are executable switch/failover targets and inherit the owning
+// role's permissions for read-only enforcement. spawn_supported is always
+// required. switch_supported is enforced on failover rungs only after production
+// harnesses advertise SwitchSupported (same flip as capability promotion).
 func ValidateRoleMap(m domain.RoleMap) error {
 	if m.IsZero() {
 		return nil
 	}
 	for id, b := range m.Roles {
-		caps := For(b.Harness)
-		if !caps.SpawnSupported {
-			return fmt.Errorf("roles[%s]: harness %q does not support spawn (spawn_supported=false)", id, b.Harness)
+		if err := validateExecutableTarget(id, b.Harness, b.Permissions, false); err != nil {
+			return err
 		}
-		if !b.Permissions.WorkspaceWrites && !caps.ReadOnlyEnforced {
-			return fmt.Errorf("roles[%s]: workspaceWrites=false requires harness %q with read_only_enforced (got false)", id, b.Harness)
+	}
+	for roleID, targets := range m.Failover.Roles {
+		owner, ok := m.Roles[roleID]
+		if !ok {
+			// domain.RoleMap.Validate already rejects unknown failover roles;
+			// fail closed here if called in isolation.
+			return fmt.Errorf("failover.roles[%s]: role not present in roles", roleID)
+		}
+		for i, t := range targets {
+			if err := validateExecutableTarget(
+				fmt.Sprintf("failover.roles[%s][%d]", roleID, i),
+				t.Harness, owner.Permissions, true,
+			); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// validateExecutableTarget checks spawn and RO. When failoverRung is true and
+// production switch has been promoted, also require SwitchSupported.
+func validateExecutableTarget(label string, h domain.AgentHarness, perms domain.RoleExecutionPolicy, failoverRung bool) error {
+	caps := For(h)
+	if !caps.SpawnSupported {
+		return fmt.Errorf("%s: harness %q does not support spawn (spawn_supported=false)", label, h)
+	}
+	if !perms.WorkspaceWrites && !caps.ReadOnlyEnforced {
+		return fmt.Errorf("%s: workspaceWrites=false requires harness %q with read_only_enforced (got false)", label, h)
+	}
+	if failoverRung && switchSupportedPromoted() && !caps.SwitchSupported {
+		return fmt.Errorf("%s: harness %q does not support switch (switch_supported=false)", label, h)
+	}
+	return nil
+}
+
+// switchSupportedPromoted is true once any production switch matrix cell is on.
+// Until then, config-save allows authoring failover ladders while runtime still
+// refuses switch with SWITCH_NOT_SUPPORTED. Promotion flips For() cells and
+// this gate together.
+func switchSupportedPromoted() bool {
+	return For(domain.HarnessClaudeCode).SwitchSupported || For(domain.HarnessCodex).SwitchSupported
 }
 
 // RequireReadOnly reports whether harness may launch with workspaceWrites=false.

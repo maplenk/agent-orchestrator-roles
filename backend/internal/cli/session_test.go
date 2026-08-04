@@ -6,15 +6,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 type sessionRequestLog struct {
 	mu       sync.Mutex
 	requests []string
+	headers  []map[string]string
 }
 
 const cliInvokedRequest = "POST /internal/telemetry/cli-invoked"
@@ -39,12 +44,32 @@ func (l *sessionRequestLog) append(r *http.Request) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	appendPrimaryRequest(&l.requests, r)
+	h := map[string]string{}
+	if v := r.Header.Get("X-AO-Operator-Spawn-Token"); v != "" {
+		h["X-AO-Operator-Spawn-Token"] = v
+	}
+	if v := r.Header.Get("X-AO-Caller-Session-Id"); v != "" {
+		h["X-AO-Caller-Session-Id"] = v
+	}
+	if v := r.Header.Get("X-AO-Spawn-Capability"); v != "" {
+		h["X-AO-Spawn-Capability"] = v
+	}
+	l.headers = append(l.headers, h)
 }
 
 func (l *sessionRequestLog) all() []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return append([]string(nil), l.requests...)
+}
+
+func (l *sessionRequestLog) lastHeaders() map[string]string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if len(l.headers) == 0 {
+		return nil
+	}
+	return l.headers[len(l.headers)-1]
 }
 
 func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
@@ -88,6 +113,10 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","freed":true}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/restore":
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","session":`+sessionJSON("demo-1", "demo", "worker", "idle", false)+`}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/switch":
+			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","generationId":"gen-1","kind":"switch","session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/fresh-conversation":
+			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","generationId":"gen-f","kind":"fresh_conversation","session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/sessions/demo-1":
 			var req sessionRenameRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -339,6 +368,81 @@ func TestSessionRestore_SuccessWithProjectScope(t *testing.T) {
 	want := []string{"GET /api/v1/sessions/demo-1", "POST /api/v1/sessions/demo-1/restore"}
 	if got := log.all(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("requests = %#v, want %#v", got, want)
+	}
+}
+
+func TestSessionSwitch_ExternalCLISendsOperatorToken(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	// Runfile with operator token (external human CLI, no managed markers).
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: serverPort(t, srv.URL), StartedAt: time.Unix(100, 0).UTC(),
+		OperatorSpawnToken: "op-switch-tok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"AO_SESSION_ID", "AO_SPAWN_CAPABILITY", "AO_MANAGED_SESSION", "AO_OPERATOR_SPAWN_TOKEN"} {
+		t.Setenv(k, "")
+	}
+
+	out, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "session", "switch", "--session", "demo-1", "--harness", "codex", "--objective", "go")
+	if err != nil {
+		t.Fatalf("session switch failed: %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(out, "switched demo-1") || !strings.Contains(out, "generation=gen-1") {
+		t.Fatalf("output=%s", out)
+	}
+	want := []string{"POST /api/v1/sessions/demo-1/switch"}
+	if got := log.all(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests = %#v, want %#v", got, want)
+	}
+	h := log.lastHeaders()
+	if h["X-AO-Operator-Spawn-Token"] != "op-switch-tok" {
+		t.Fatalf("headers=%v want operator token", h)
+	}
+}
+
+func TestSessionFresh_ManagedSessionNeverSendsOperatorToken(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: serverPort(t, srv.URL), StartedAt: time.Unix(100, 0).UTC(),
+		OperatorSpawnToken: "runfile-op",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AO_OPERATOR_SPAWN_TOKEN", "")
+	t.Setenv("AO_SESSION_ID", "demo-1")
+	t.Setenv("AO_SPAWN_CAPABILITY", "cap-tok")
+	t.Setenv("AO_MANAGED_SESSION", "1")
+
+	out, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "session", "fresh", "--session", "demo-1", "--objective", "refresh")
+	if err != nil {
+		t.Fatalf("session fresh failed: %v\nstderr=%s", err, errOut)
+	}
+	if !strings.Contains(out, "fresh demo-1") {
+		t.Fatalf("output=%s", out)
+	}
+	h := log.lastHeaders()
+	if _, ok := h["X-AO-Operator-Spawn-Token"]; ok {
+		t.Fatalf("managed session must not send operator token: %v", h)
+	}
+	if h["X-AO-Caller-Session-Id"] != "demo-1" || h["X-AO-Spawn-Capability"] != "cap-tok" {
+		t.Fatalf("want agent capability headers, got %v", h)
+	}
+}
+
+func TestSessionSwitch_RequiresHarness(t *testing.T) {
+	_, errOut, err := executeCLI(t, Deps{}, "session", "switch", "--session", "demo-1")
+	if err == nil {
+		t.Fatal("expected usage error")
+	}
+	if ExitCode(err) != 2 {
+		t.Fatalf("exit=%d err=%v stderr=%s", ExitCode(err), err, errOut)
 	}
 }
 

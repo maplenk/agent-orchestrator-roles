@@ -146,3 +146,53 @@ func TestSwitchWorker_SameHarnessIsFresh(t *testing.T) {
 		t.Fatalf("fresh=%d switch=%d", cmd.freshCalls, cmd.switchCalls)
 	}
 }
+
+func TestSwitchWorker_EmptyConfiguredModelRejectsExplicitModel(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	// failover codex has empty model (= provider default only)
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex, TargetModel: "o3",
+	})
+	var ae *apierr.Error
+	if !errors.As(err, &ae) || ae.Code != "SWITCH_TARGET_UNAUTHORIZED" {
+		t.Fatalf("err=%v want SWITCH_TARGET_UNAUTHORIZED", err)
+	}
+}
+
+func TestSwitchWorker_AmbiguousModelRequiresExplicit(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	proj := st.projects["mer"]
+	proj.Config.RoleMap.Failover.Roles["implementor"] = []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: "o3"},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+	}
+	st.projects["mer"] = proj
+	cmd := &fakeCommander{}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+
+	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+	var ae *apierr.Error
+	if !errors.As(err, &ae) || ae.Code != "TARGET_MODEL_REQUIRED" {
+		t.Fatalf("err=%v want TARGET_MODEL_REQUIRED", err)
+	}
+
+	out, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex, TargetModel: "o3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cmd.lastSwitch.TargetModel != "o3" {
+		t.Fatalf("model=%q", cmd.lastSwitch.TargetModel)
+	}
+	if out.GenerationID == "" {
+		t.Fatal("missing generation")
+	}
+}

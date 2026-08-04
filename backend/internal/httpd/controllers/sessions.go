@@ -1014,6 +1014,9 @@ func (c *SessionsController) switchWorker(w http.ResponseWriter, r *http.Request
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/switch")
 		return
 	}
+	if !c.authorizeCallerSwitch(w, r) {
+		return
+	}
 	var in SwitchWorkerRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1045,6 +1048,9 @@ func (c *SessionsController) freshConversation(w http.ResponseWriter, r *http.Re
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/fresh-conversation")
 		return
 	}
+	if !c.authorizeCallerSwitch(w, r) {
+		return
+	}
 	var in FreshConversationRequest
 	// Empty body is allowed (EOF); other decode errors are client errors.
 	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
@@ -1064,6 +1070,64 @@ func (c *SessionsController) freshConversation(w http.ResponseWriter, r *http.Re
 		OK: true, SessionID: sessionID(r), GenerationID: out.GenerationID,
 		Kind: string(out.Kind), Session: sessionView(out.Session),
 	})
+}
+
+// authorizeCallerSwitch gates destructive switch/fresh routes.
+//
+// Trusted callers (same family as spawn, different codes):
+//  1. LAN password-authenticated request (mobile operator context), or
+//  2. Daemon operator token (desktop/CLI; never auto-read by managed-session CLI), or
+//  3. Live session with valid spawn capability and canSpawn (orchestrator path).
+//
+// Headerless loopback is not trusted. Managed workers without canSpawn cannot
+// elevate via runfile operator token (CLI no-upgrade rule).
+func (c *SessionsController) authorizeCallerSwitch(w http.ResponseWriter, r *http.Request) bool {
+	if authctx.IsLANAuthenticated(r.Context()) {
+		return true
+	}
+
+	opTok := strings.TrimSpace(r.Header.Get(operatorSpawnHeader))
+	caller := strings.TrimSpace(r.Header.Get(callerSessionHeader))
+	capTok := strings.TrimSpace(r.Header.Get(spawnCapabilityHeader))
+
+	if opTok != "" {
+		if c.OperatorAuth != nil && c.OperatorAuth.Valid(opTok) {
+			return true
+		}
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "OPERATOR_SWITCH_INVALID",
+			"Operator credential is missing or invalid", nil)
+		return false
+	}
+
+	if caller == "" {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_AUTH_REQUIRED",
+			"Switch requires operator credential, LAN auth, or session spawn capability headers", nil)
+		return false
+	}
+
+	callerID := domain.SessionID(caller)
+	sess, err := c.Svc.Get(r.Context(), callerID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if sess.IsTerminated {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_SESSION_TERMINATED",
+			"Calling session is terminated and cannot switch workers", nil)
+		return false
+	}
+	if !spawncred.ValidToken(capTok, sess.Metadata.SpawnCapabilityHash) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_CAPABILITY_INVALID",
+			"Spawn capability is missing or invalid for the calling session", nil)
+		return false
+	}
+	role := sess.Metadata.Role
+	if strings.TrimSpace(role.RoleID) != "" && !role.ResolvedPermissions.CanSpawn {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_FORBIDDEN",
+			"Calling session role does not allow switch (canSpawn=false)", nil)
+		return false
+	}
+	return true
 }
 
 // activity records an agent activity-state signal reported by an agent hook

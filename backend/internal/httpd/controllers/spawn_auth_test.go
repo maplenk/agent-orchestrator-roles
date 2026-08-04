@@ -26,8 +26,10 @@ type opAuth struct{ tok string }
 func (o opAuth) Valid(t string) bool { return o.tok != "" && t == o.tok }
 
 type spawnGateSvc struct {
-	sessions map[domain.SessionID]domain.Session
-	spawned  int
+	sessions    map[domain.SessionID]domain.Session
+	spawned     int
+	switchCalls int
+	freshCalls  int
 }
 
 func newSpawnGateSvcWithToken() (*spawnGateSvc, string) {
@@ -91,11 +93,25 @@ func (f *spawnGateSvc) SetTerminateOnPRMerge(context.Context, domain.SessionID, 
 	return domain.Session{}, nil
 }
 func (f *spawnGateSvc) Send(context.Context, domain.SessionID, string) error { return nil }
-func (f *spawnGateSvc) SwitchWorker(context.Context, sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error) {
-	return sessionsvc.SwitchWorkerOutcome{}, nil
+func (f *spawnGateSvc) SwitchWorker(_ context.Context, req sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error) {
+	f.switchCalls++
+	s := f.sessions[req.SessionID]
+	if s.ID == "" {
+		s = domain.Session{SessionRecord: domain.SessionRecord{ID: req.SessionID, Kind: domain.KindWorker}}
+	}
+	return sessionsvc.SwitchWorkerOutcome{
+		Session: s, GenerationID: "gen-test", Kind: domain.LifecycleKindSwitch,
+	}, nil
 }
-func (f *spawnGateSvc) FreshConversation(context.Context, domain.SessionID, string) (sessionsvc.SwitchWorkerOutcome, error) {
-	return sessionsvc.SwitchWorkerOutcome{}, nil
+func (f *spawnGateSvc) FreshConversation(_ context.Context, id domain.SessionID, _ string) (sessionsvc.SwitchWorkerOutcome, error) {
+	f.freshCalls++
+	s := f.sessions[id]
+	if s.ID == "" {
+		s = domain.Session{SessionRecord: domain.SessionRecord{ID: id, Kind: domain.KindWorker}}
+	}
+	return sessionsvc.SwitchWorkerOutcome{
+		Session: s, GenerationID: "gen-fresh", Kind: domain.LifecycleKindFreshConversation,
+	}, nil
 }
 func (f *spawnGateSvc) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {
 	return nil, nil

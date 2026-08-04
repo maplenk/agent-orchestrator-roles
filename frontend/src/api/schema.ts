@@ -504,6 +504,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/fresh-conversation": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Start a same-harness fresh conversation with host-compiled handoff */
+        post: operations["freshConversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/kill": {
         parameters: {
             query?: never;
@@ -763,6 +780,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/switch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Switch a worker session harness or start a fresh conversation (role-map authorized targets) */
+        post: operations["switchWorker"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/workspace/events": {
         parameters: {
             query?: never;
@@ -1012,8 +1046,41 @@ export interface components {
             lastActivityAt: string;
             state: string;
         };
+        DomainFailoverConfig: {
+            mode?: string;
+            roles?: {
+                [key: string]: components["schemas"]["DomainFailoverTarget"][];
+            };
+        };
+        DomainFailoverTarget: {
+            harness: string;
+            model?: string;
+        };
         DomainReviewerConfig: {
             harness: string;
+        };
+        DomainRoleBinding: {
+            harness: string;
+            model?: string;
+            permissions: components["schemas"]["DomainRoleExecutionPolicy"];
+            template: string;
+            when?: string[];
+        };
+        DomainRoleExecutionPolicy: {
+            canSpawn: boolean;
+            workspaceWrites: boolean;
+        };
+        DomainRoleMap: {
+            failover?: components["schemas"]["DomainFailoverConfig"];
+            orchestratorRole?: string;
+            role_map_schema_version: number;
+            roles?: {
+                [key: string]: components["schemas"]["DomainRoleBinding"];
+            };
+            strictDelegation?: boolean;
+        };
+        FreshConversationRequest: {
+            objective?: string;
         };
         ImportReport: {
             dryRun: boolean;
@@ -1205,6 +1272,7 @@ export interface components {
             orchestratorRules?: string;
             postCreate?: string[];
             reviewers?: components["schemas"]["DomainReviewerConfig"][];
+            roleMap?: components["schemas"]["DomainRoleMap"];
             sessionPrefix?: string;
             symlinks?: string[];
             trackerIntake?: components["schemas"]["TrackerIntakeConfig"];
@@ -1498,6 +1566,7 @@ export interface components {
             kind?: "worker" | "orchestrator";
             projectId: string;
             prompt?: string;
+            roleId?: string;
         };
         SpawnSessionResponse: {
             promptBytes: number;
@@ -1529,6 +1598,20 @@ export interface components {
             runId: string;
             /** @description Review verdict: approved or changes_requested. */
             verdict: string;
+        };
+        SwitchWorkerRequest: {
+            fresh?: boolean;
+            objective?: string;
+            targetHarness?: string;
+            targetModel?: string;
+        };
+        SwitchWorkerResponse: {
+            generationId: string;
+            /** @enum {string} */
+            kind: "switch" | "fresh_conversation";
+            ok: boolean;
+            session: components["schemas"]["ControllersSessionView"];
+            sessionId: string;
         };
         TrackerIntakeConfig: {
             assignee?: string;
@@ -3361,6 +3444,69 @@ export interface operations {
             };
         };
     };
+    freshConversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FreshConversationRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchWorkerResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     killSession: {
         parameters: {
             query?: never;
@@ -4470,6 +4616,78 @@ export interface operations {
             };
             /** @description Bad Request */
             400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    switchWorker: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SwitchWorkerRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SwitchWorkerResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -239,11 +239,12 @@ func (c *commandContext) switchSession(ctx context.Context, cmd *cobra.Command, 
 	}
 	path := "sessions/" + url.PathEscape(session) + "/switch"
 	var out switchWorkerAPIResponse
-	if err := c.postJSON(ctx, path, switchWorkerAPIRequest{
+	// Operator / managed-session headers (same no-upgrade rules as spawn).
+	if err := c.postJSONWithHeaders(ctx, path, switchWorkerAPIRequest{
 		TargetHarness: harness,
 		TargetModel:   strings.TrimSpace(opts.targetModel),
 		Objective:     opts.objective,
-	}, &out); err != nil {
+	}, &out, spawnCallerHeaders()); err != nil {
 		return err
 	}
 	if opts.json {
@@ -261,7 +262,7 @@ func (c *commandContext) freshSession(ctx context.Context, cmd *cobra.Command, o
 	}
 	path := "sessions/" + url.PathEscape(session) + "/fresh-conversation"
 	var out switchWorkerAPIResponse
-	if err := c.postJSON(ctx, path, freshConversationAPIRequest{Objective: opts.objective}, &out); err != nil {
+	if err := c.postJSONWithHeaders(ctx, path, freshConversationAPIRequest{Objective: opts.objective}, &out, spawnCallerHeaders()); err != nil {
 		return err
 	}
 	if opts.json {

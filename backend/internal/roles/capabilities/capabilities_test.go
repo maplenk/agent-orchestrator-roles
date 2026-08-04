@@ -85,3 +85,75 @@ func TestValidateRoleMap_AllowsCodexReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestValidateRoleMap_FailoverRungsInheritRO(t *testing.T) {
+	// RO orchestrator failover to Claude (no RO) must fail at config-save.
+	m := domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		StrictDelegation: true,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {
+				Template: "orchestrator",
+				Harness:  domain.HarnessCodex,
+				Permissions: domain.RoleExecutionPolicy{
+					WorkspaceWrites: false,
+					CanSpawn:        true,
+				},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Mode: domain.FailoverModeManual,
+			Roles: map[string][]domain.FailoverTarget{
+				"orchestrator": {{Harness: domain.HarnessClaudeCode}},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "read_only_enforced") {
+		t.Fatalf("err=%v want failover RO reject", err)
+	}
+}
+
+func TestValidateRoleMap_FailoverRungsRequireSpawn(t *testing.T) {
+	// Unknown harness has spawn_supported=false.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.AgentHarness("not-a-real-harness")}},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "spawn_supported") {
+		t.Fatalf("err=%v want spawn reject on failover", err)
+	}
+}
+
+func TestValidateRoleMap_FailoverAllowsCodexForWriterRole(t *testing.T) {
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.HarnessCodex}},
+			},
+		},
+	}
+	// switch_supported still false on production cells — authoring ladders is allowed.
+	if err := ValidateRoleMap(m); err != nil {
+		t.Fatal(err)
+	}
+}
