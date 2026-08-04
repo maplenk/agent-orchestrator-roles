@@ -34,6 +34,15 @@ SwitchWorker / FreshConversation / RecoverSwitchFromPostStop
 | Observed gen wrong | Attribute observe to **source** RuntimeLaunchID |
 | Corrupt pending fail-open | `decodeSwitchPending` errors; GetSession fails closed |
 
+## Follow-up P1 close (d511dfa2+)
+
+| Finding | Fix |
+|---------|-----|
+| Confirmed-alive source unusable | Rollback pending + restore pre-switch metadata on probe-alive |
+| Terminal handle ≠ session id | Resolve by RuntimeHandleID / SourceRuntimeHandleID |
+| Recovery skips post_stop | `ensurePostStopLedger` before launch and ack |
+| Optional gate wiring | `AllowTerminalInput` on `sessionLifecycle` (compile-time) |
+
 ## Still open before accept / API / CLI
 
 1. Broader adversarial + dogfood Claude↔Codex

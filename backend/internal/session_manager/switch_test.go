@@ -176,9 +176,15 @@ func TestSwitchWorker_DestroyErrorStillAliveIsPreStop(t *testing.T) {
 	if err == nil || errors.Is(err, ErrSwitchPostStop) {
 		t.Fatalf("want pre-stop failure, got %v", err)
 	}
-	// Pending is staged before destroy so recovery can re-drive; source still alive.
-	if st.sessions[id].Metadata.SwitchPending == nil {
-		t.Fatal("pending must exist as recoverable fence before destroy completes")
+	// Confirmed-alive: pending rolled back so source remains usable for input.
+	if st.sessions[id].Metadata.SwitchPending != nil {
+		t.Fatal("pending must be cleared when source is confirmed alive")
+	}
+	if st.sessions[id].Metadata.Prompt != "implement feature" {
+		t.Fatalf("prompt restored: %q", st.sessions[id].Metadata.Prompt)
+	}
+	if st.sessions[id].Metadata.RuntimeHandleID != "rt-1" {
+		t.Fatalf("source handle restored: %q", st.sessions[id].Metadata.RuntimeHandleID)
 	}
 	if st.sessions[id].Harness != domain.HarnessClaudeCode {
 		t.Fatal("must not promote harness when source still alive")
@@ -549,14 +555,84 @@ func TestAllowTerminalInput_BlocksPending(t *testing.T) {
 	st.sessions[id] = domain.SessionRecord{
 		ID: id, ProjectID: "mer", Kind: domain.KindWorker,
 		Metadata: domain.SessionMetadata{
-			SwitchPending: &domain.SwitchPending{GenerationID: "g1", ToHarness: domain.HarnessCodex},
+			RuntimeHandleID: "ao-mer.dots-hash-handle", // sanitized handle ≠ session id
+			SwitchPending: &domain.SwitchPending{
+				GenerationID: "g1", ToHarness: domain.HarnessCodex,
+				SourceRuntimeHandleID: "ao-mer.dots-hash-handle",
+			},
 		},
 	}
 	m := New(Deps{Store: st, Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{}, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st}, LookPath: func(string) (string, error) { return "/bin/true", nil }})
 	if err := m.AllowTerminalInput(ctx, "mer-1"); err == nil {
-		t.Fatal("expected block")
+		t.Fatal("expected block by session id")
+	}
+	if err := m.AllowTerminalInput(ctx, "ao-mer.dots-hash-handle"); err == nil {
+		t.Fatal("expected block by runtime handle id (normalized/sanitized)")
 	}
 	if err := m.AllowTerminalInput(ctx, "shell-xyz"); err != nil {
 		t.Fatalf("non-session terminal should allow: %v", err)
+	}
+}
+
+func TestRecover_EnsuresPostStopBeforeLaunch(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	payload := `{"semantic":{"schemaVersion":1,"objective":"o"},"observed":{"schemaVersion":1},"compiled":"## Host-compiled handoff\n\nx"}`
+	rec := st.sessions[id]
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-ps", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		OriginalTask: "implement feature", RoleID: "implementor", PayloadJSON: payload,
+		SourceRuntimeHandleID: "rt-1",
+	}
+	// Source already dead, handles cleared; no post_stop row yet.
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	st.sessions[id] = rec
+	st.ledger = []domain.LifecycleLedgerRecord{
+		{ID: "mer-1:gen-ps:requested", SessionID: id, ProjectID: "mer", Kind: domain.LifecycleKindSwitch, Phase: domain.LifecyclePhaseRequested, GenerationID: "gen-ps"},
+		{ID: "mer-1:gen-ps:pre_stop", SessionID: id, ProjectID: "mer", Kind: domain.LifecycleKindSwitch, Phase: domain.LifecyclePhasePreStop, GenerationID: "gen-ps", PayloadJSON: payload},
+	}
+
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "gen-ps" },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	if _, err := m.RecoverSwitchFromPostStop(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	var sawPost, sawAck bool
+	for _, e := range st.ledger {
+		if e.GenerationID != "gen-ps" {
+			continue
+		}
+		if e.Phase == domain.LifecyclePhasePostStop {
+			sawPost = true
+		}
+		if e.Phase == domain.LifecyclePhaseTargetAck {
+			sawAck = true
+		}
+	}
+	if !sawPost || !sawAck {
+		t.Fatalf("want post_stop then target_ack, post=%v ack=%v ledger=%+v", sawPost, sawAck, st.ledger)
+	}
+	// Ordering: post_stop index before target_ack
+	postIdx, ackIdx := -1, -1
+	for i, e := range st.ledger {
+		if e.GenerationID == "gen-ps" && e.Phase == domain.LifecyclePhasePostStop {
+			postIdx = i
+		}
+		if e.GenerationID == "gen-ps" && e.Phase == domain.LifecyclePhaseTargetAck {
+			ackIdx = i
+		}
+	}
+	if postIdx < 0 || ackIdx < 0 || postIdx > ackIdx {
+		t.Fatalf("post_stop must precede target_ack: post=%d ack=%d", postIdx, ackIdx)
 	}
 }

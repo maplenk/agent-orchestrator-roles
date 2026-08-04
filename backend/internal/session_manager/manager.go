@@ -3117,19 +3117,41 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 
 // AllowTerminalInput implements terminal.InputGate: refuse PTY client writes for
 // sessions with durable SwitchPending (one-generation ownership).
+//
+// terminalID is the runtime handle id (tmux session name), which is not always
+// equal to SessionID (dots / long ids are sanitized). Resolve by:
+//  1. SessionID match (common short-id case)
+//  2. Metadata.RuntimeHandleID match
+//  3. SwitchPending.SourceRuntimeHandleID match (pending before handle clear)
 func (m *Manager) AllowTerminalInput(ctx context.Context, terminalID string) error {
-	if strings.TrimSpace(terminalID) == "" {
+	terminalID = strings.TrimSpace(terminalID)
+	if terminalID == "" {
 		return nil
 	}
-	rec, ok, err := m.store.GetSession(ctx, domain.SessionID(terminalID))
-	if err != nil {
-		// Fail closed: store errors must not open a write path into a pending switch.
+	// Fast path: handle often equals session id.
+	if rec, ok, err := m.store.GetSession(ctx, domain.SessionID(terminalID)); err != nil {
 		return fmt.Errorf("terminal input: %w", err)
+	} else if ok {
+		return gateTerminalPending(rec)
 	}
-	if !ok {
-		// Not an agent session id (e.g. shell terminal) — allow.
-		return nil
+	recs, err := m.store.ListAllSessions(ctx)
+	if err != nil {
+		// Fail closed: cannot prove the handle is not mid-switch.
+		return fmt.Errorf("terminal input: list sessions: %w", err)
 	}
+	for _, rec := range recs {
+		if strings.TrimSpace(rec.Metadata.RuntimeHandleID) == terminalID {
+			return gateTerminalPending(rec)
+		}
+		if p := rec.Metadata.SwitchPending; p != nil && strings.TrimSpace(p.SourceRuntimeHandleID) == terminalID {
+			return gateTerminalPending(rec)
+		}
+	}
+	// Not an agent session handle (e.g. shell terminal) — allow.
+	return nil
+}
+
+func gateTerminalPending(rec domain.SessionRecord) error {
 	if rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
 		return fmt.Errorf("%w: switch pending gen %s", ErrSwitchInProgress, rec.Metadata.SwitchPending.GenerationID)
 	}

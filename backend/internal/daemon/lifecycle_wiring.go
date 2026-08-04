@@ -121,6 +121,9 @@ type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
+	// AllowTerminalInput is the terminal mux input gate (switch-pending fence).
+	// Required so daemon wiring cannot silently drop the security boundary.
+	AllowTerminalInput(ctx context.Context, terminalID string) error
 	// SetShellTerminalCloser late-binds Kill/Cleanup to close a session's
 	// scoped shell terminals before its worktree is torn down. shellterm.Service
 	// is built after Session Manager during boot (see startShellTerminals), so

@@ -141,6 +141,12 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 		return SwitchResult{}, err
 	}
 
+	// Snapshot exact pre-switch metadata for confirmed-alive rollback (pre-stop guarantee).
+	preSwitchPrompt := meta.Prompt
+	preSwitchAgentSession := meta.AgentSessionID
+	preSwitchHandle := meta.RuntimeHandleID
+	preSwitchLaunch := meta.RuntimeLaunchID
+
 	// Durable recoverable fence BEFORE destroying the source. If destroy succeeds
 	// but a later persist fails, boot recovery can still re-drive from pending.
 	pending := &domain.SwitchPending{
@@ -166,12 +172,16 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 	// Stop source with probe-driven transition (Destroy error ≠ source usable).
 	sourceDead, err := m.destroyRuntimeProbed(ctx, meta.RuntimeHandleID)
 	if err != nil {
-		// Pending remains; source may still be alive — recovery/reconcile must probe.
+		// Uncertain liveness: keep pending so recovery can probe/retry destroy.
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", payload)
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: %w", req.SessionID, err)
 	}
 	if !sourceDead {
+		// Confirmed alive: restore exact pre-switch usability (clear pending + prompt).
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", payload)
+		if rbErr := m.rollbackSwitchPending(ctx, rec, preSwitchPrompt, preSwitchAgentSession, preSwitchHandle, preSwitchLaunch); rbErr != nil {
+			return SwitchResult{}, fmt.Errorf("switch %s: pre-stop source alive; rollback pending failed: %w (source usable uncertain)", req.SessionID, rbErr)
+		}
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
 	}
 
@@ -185,12 +195,36 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 		return SwitchResult{}, fmt.Errorf("switch %s: %w: clear source handle: %v", req.SessionID, ErrSwitchPostStop, err)
 	}
 
-	if err := m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhasePostStop, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, "", "", payload); err != nil {
-		// Source is dead and pending has full payload; leave for recovery.
-		return SwitchResult{}, fmt.Errorf("switch %s: %w: post_stop ledger: %v", req.SessionID, ErrSwitchPostStop, err)
+	if err := m.ensurePostStopLedger(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payload); err != nil {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: %v", req.SessionID, ErrSwitchPostStop, err)
 	}
 
 	return m.finishSwitchTarget(ctx, rec, project, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payload, compiled)
+}
+
+// rollbackSwitchPending restores pre-switch prompt/handles and clears pending so
+// a confirmed-alive source remains usable for user/terminal input.
+func (m *Manager) rollbackSwitchPending(ctx context.Context, rec domain.SessionRecord, prompt, agentSession, handleID, launchID string) error {
+	rec.Metadata.SwitchPending = nil
+	rec.Metadata.Prompt = prompt
+	rec.Metadata.AgentSessionID = agentSession
+	rec.Metadata.RuntimeHandleID = handleID
+	rec.Metadata.RuntimeLaunchID = launchID
+	rec.UpdatedAt = m.clock()
+	return m.store.UpdateSession(ctx, rec)
+}
+
+// ensurePostStopLedger idempotently records post_stop after source death and
+// before target launch/ack. Required saga ordering.
+func (m *Manager) ensurePostStopLedger(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	kind domain.LifecycleLedgerKind,
+	gen string,
+	from, to domain.AgentHarness,
+	fromModel, toModel, roleID, payload string,
+) error {
+	return m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhasePostStop, gen, from, to, fromModel, toModel, roleID, "", "", payload)
 }
 
 // FreshConversation is same-harness switch with a new native session + handoff.
@@ -340,8 +374,8 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	}
 
 	// Live runtime handling:
-	// - matching target gen → ack only
-	// - still the source handle (destroy never completed) → probe-destroy, then continue
+	// - matching target gen → ensure post_stop then ack only
+	// - still the source handle (destroy never completed) → probe-destroy, ensure post_stop, then continue
 	// - any other live gen → uncertain (never dual-launch)
 	if hid := strings.TrimSpace(rec.Metadata.RuntimeHandleID); hid != "" {
 		alive, probeErr := m.runtime.IsAlive(ctx, ports.RuntimeHandle{ID: hid})
@@ -350,6 +384,9 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		}
 		if alive {
 			if rec.Metadata.RuntimeLaunchID == targetGen {
+				if err := m.ensurePostStopLedger(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw); err != nil {
+					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: post_stop before ack: %v", sessionID, ErrSwitchPostStop, err)
+				}
 				return m.ackLiveTarget(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw, compiledText, sem, obs)
 			}
 			// Retry source stop when pending recorded this handle as the pre-stop source.
@@ -358,7 +395,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 				if dErr != nil || !dead {
 					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: source still live: %v", sessionID, ErrSwitchUncertain, dErr)
 				}
-				// Source now dead; fall through to clear and relaunch target.
+				// Source now dead; fall through to post_stop + relaunch.
 			} else {
 				return SwitchResult{}, fmt.Errorf("recover switch %s: %w: live runtime %q blocks relaunch (gen %q want %q)",
 					sessionID, ErrSwitchUncertain, hid, rec.Metadata.RuntimeLaunchID, targetGen)
@@ -367,6 +404,11 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		// Dead handle (or just destroyed source): clear and relaunch.
 		rec.Metadata.RuntimeHandleID = ""
 		rec.Metadata.RuntimeLaunchID = ""
+	}
+
+	// Source is dead (or never had a handle). Require durable post_stop before target launch.
+	if err := m.ensurePostStopLedger(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw); err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: post_stop before launch: %v", sessionID, ErrSwitchPostStop, err)
 	}
 
 	if compiledText == "" && (sem.Objective != "" || obs.Head != "" || obs.Branch != "") {
@@ -547,30 +589,25 @@ func (m *Manager) ackLiveTarget(
 	}, nil
 }
 
-// destroyRuntimeProbed destroys a handle and returns whether the runtime is
-// confirmed dead. Destroy errors alone do not imply survival.
+// destroyRuntimeProbed destroys a handle and reports probe-based liveness.
+// Returns (true, nil) when confirmed dead, (false, nil) when confirmed alive,
+// and (false, ErrSwitchUncertain) when the probe cannot establish reality.
+// Destroy errors alone never imply survival or death.
 func (m *Manager) destroyRuntimeProbed(ctx context.Context, handleID string) (dead bool, err error) {
 	handleID = strings.TrimSpace(handleID)
 	if handleID == "" {
 		return true, nil
 	}
 	handle := ports.RuntimeHandle{ID: handleID}
-	destroyErr := m.runtime.Destroy(ctx, handle)
+	_ = m.runtime.Destroy(ctx, handle) // best-effort; probe is authoritative
 	alive, probeErr := m.runtime.IsAlive(ctx, handle)
 	if probeErr != nil {
-		if destroyErr != nil {
-			return false, fmt.Errorf("%w: destroy=%v probe=%v", ErrSwitchUncertain, destroyErr, probeErr)
-		}
 		return false, fmt.Errorf("%w: probe after destroy: %w", ErrSwitchUncertain, probeErr)
 	}
 	if alive {
-		if destroyErr != nil {
-			return false, fmt.Errorf("destroy: %w (still alive)", destroyErr)
-		}
-		return false, fmt.Errorf("runtime still alive after destroy")
+		return false, nil // confirmed alive — caller rolls back pending
 	}
-	// Confirmed dead — Destroy error is informational only.
-	return true, nil
+	return true, nil // confirmed dead
 }
 
 func resolveSwitchTarget(req SwitchRequest, fromHarness domain.AgentHarness) (to domain.AgentHarness, kind domain.LifecycleLedgerKind, same bool) {
