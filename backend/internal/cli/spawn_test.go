@@ -829,25 +829,26 @@ func TestResolveSpawnHarness_OrchestratorDefault(t *testing.T) {
 	}
 }
 
-func TestSpawnCallerHeaders_SessionAdjacentNeverReadsRunfile(t *testing.T) {
+func TestSpawnCallerHeaders_ManagedSessionNeverReadsRunfile(t *testing.T) {
 	cfg := setConfigEnv(t)
-	// Put operator token in runfile — must NOT be used when session markers exist.
+	// Put operator token in runfile — must NOT be used when managed-session markers exist.
 	if err := runfile.Write(cfg.runFile, runfile.Info{
 		PID: os.Getpid(), Port: 3001, OperatorSpawnToken: "runfile-op",
 	}); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("AO_SESSION_ID", "")
-	t.Setenv("AO_SPAWN_CAPABILITY", "")
 	t.Setenv("AO_OPERATOR_SPAWN_TOKEN", "")
-	// Worker unsets session id but still has data dir → refuse operator upgrade.
-	t.Setenv("AO_DATA_DIR", "/tmp/ao-data")
+	t.Setenv("AO_SPAWN_CAPABILITY", "")
+	// Worker unsets only AO_SESSION_ID but still has managed marker → no operator.
+	t.Setenv("AO_SESSION_ID", "")
+	t.Setenv("AO_MANAGED_SESSION", "1")
 	if h := spawnCallerHeaders(); h != nil {
-		t.Fatalf("session-adjacent without session id must not send headers: %v", h)
+		t.Fatalf("managed session without session id must not send headers: %v", h)
 	}
-	t.Setenv("AO_DATA_DIR", "")
+	// Full agent path.
 	t.Setenv("AO_SESSION_ID", "mer-1")
 	t.Setenv("AO_SPAWN_CAPABILITY", "cap")
+	t.Setenv("AO_MANAGED_SESSION", "1")
 	h := spawnCallerHeaders()
 	if h["X-AO-Caller-Session-Id"] != "mer-1" || h["X-AO-Spawn-Capability"] != "cap" {
 		t.Fatalf("agent headers = %v", h)
@@ -866,10 +867,30 @@ func TestSpawnCallerHeaders_ExternalCLILoadsRunfile(t *testing.T) {
 	}
 	t.Setenv("AO_SESSION_ID", "")
 	t.Setenv("AO_SPAWN_CAPABILITY", "")
-	t.Setenv("AO_DATA_DIR", "")
+	t.Setenv("AO_MANAGED_SESSION", "")
 	t.Setenv("AO_OPERATOR_SPAWN_TOKEN", "")
+	// AO_DATA_DIR alone is external config, not a session marker.
+	t.Setenv("AO_DATA_DIR", cfg.dataDir)
 	h := spawnCallerHeaders()
 	if h["X-AO-Operator-Spawn-Token"] != "runfile-op" {
-		t.Fatalf("external CLI headers = %v", h)
+		t.Fatalf("external CLI with custom AO_DATA_DIR headers = %v", h)
+	}
+}
+
+func TestSpawnCallerHeaders_ExternalCLIWithOnlyDataDirLoadsRunfile(t *testing.T) {
+	// Documented workflow: export AO_DATA_DIR=/custom; ao start; ao spawn
+	cfg := setConfigEnv(t)
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: 3001, OperatorSpawnToken: "runfile-op",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"AO_SESSION_ID", "AO_SPAWN_CAPABILITY", "AO_MANAGED_SESSION", "AO_OPERATOR_SPAWN_TOKEN"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("AO_DATA_DIR", "/custom/path")
+	h := spawnCallerHeaders()
+	if h["X-AO-Operator-Spawn-Token"] != "runfile-op" {
+		t.Fatalf("want runfile operator with only AO_DATA_DIR, got %v", h)
 	}
 }

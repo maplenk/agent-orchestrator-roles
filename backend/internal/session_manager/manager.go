@@ -93,6 +93,10 @@ const (
 	// Combined with AO_SESSION_ID (sent as X-AO-Caller-Session-Id), the daemon
 	// enforces RoleExecutionPolicy.CanSpawn. Not spoofable via AO_SESSION_ID alone.
 	EnvSpawnCapability = "AO_SPAWN_CAPABILITY"
+	// EnvManagedSession is injected into every AO-managed agent runtime only.
+	// CLI uses it (with session id/capability) to refuse operator runfile
+	// upgrade — unlike AO_DATA_DIR, which is a supported external-shell config.
+	EnvManagedSession = "AO_MANAGED_SESSION"
 	// EnvOperatorSpawnToken must never reach session processes (tmux/ConPTY
 	// inherit os.Environ). Cleared explicitly in runtimeEnv.
 	EnvOperatorSpawnToken = "AO_OPERATOR_SPAWN_TOKEN" //nolint:gosec // env name, not a secret
@@ -2746,6 +2750,8 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 	env[EnvProjectID] = string(project)
 	env[EnvIssueID] = string(issue)
 	env[EnvDataDir] = dataDir
+	// Distinct from AO_DATA_DIR: marks a process as an AO-managed agent session.
+	env[EnvManagedSession] = "1"
 	return env
 }
 

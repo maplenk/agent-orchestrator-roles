@@ -198,20 +198,23 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 
 // spawnCallerHeaders authenticates ao spawn.
 //
-// Session-adjacent processes (any of AO_SESSION_ID, AO_SPAWN_CAPABILITY,
-// AO_DATA_DIR) never use the operator path — even if AO_SESSION_ID was unset.
-// That blocks the official-client upgrade where a worker unsets only the
+// Managed-session processes (AO_MANAGED_SESSION, AO_SESSION_ID, or
+// AO_SPAWN_CAPABILITY) never use the operator path — even if AO_SESSION_ID was
+// unset. That blocks the official-client upgrade where a worker unsets only the
 // session id and would otherwise load running.json as "external" CLI.
 //
-// Pure external shells (no session markers): operator token from
+// AO_DATA_DIR is NOT a session marker: it is a supported external CLI config
+// (custom data dir for ao start / ao spawn).
+//
+// Pure external shells (no managed-session markers): operator token from
 // AO_OPERATOR_SPAWN_TOKEN, else running.json (documented ao start → ao spawn).
 func spawnCallerHeaders() map[string]string {
 	sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
 	capTok := strings.TrimSpace(os.Getenv("AO_SPAWN_CAPABILITY"))
-	dataDir := strings.TrimSpace(os.Getenv("AO_DATA_DIR"))
+	managed := strings.TrimSpace(os.Getenv("AO_MANAGED_SESSION"))
 
-	if sid != "" || capTok != "" || dataDir != "" {
-		// Session-adjacent: agent headers only (may be incomplete → daemon 403).
+	if sid != "" || capTok != "" || managed != "" {
+		// Managed-session adjacent: agent headers only (may be incomplete → 403).
 		if sid == "" {
 			return nil
 		}

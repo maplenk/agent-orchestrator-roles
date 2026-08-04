@@ -32,6 +32,9 @@ func TestSpawnEnvProjectVarsCannotOverrideInternal(t *testing.T) {
 	if env[EnvProjectID] != "mer" {
 		t.Fatalf("AO_PROJECT_ID = %q, want mer (internal wins)", env[EnvProjectID])
 	}
+	if env[EnvManagedSession] != "1" {
+		t.Fatalf("AO_MANAGED_SESSION = %q, want 1", env[EnvManagedSession])
+	}
 }
 
 func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
