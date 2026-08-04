@@ -103,10 +103,23 @@ type ManagedPreviewServer interface {
 }
 
 // SessionCapabilityValidator verifies the daemon-issued token injected only
-// into the owning worker session.
+// into the owning worker session (browser/preview).
 type SessionCapabilityValidator interface {
 	Valid(sessionID domain.SessionID, token string) bool
 }
+
+// SpawnCapabilityValidator verifies the daemon-issued spawn capability
+// injected as AO_SPAWN_CAPABILITY into session runtimes.
+type SpawnCapabilityValidator interface {
+	Valid(sessionID domain.SessionID, token string) bool
+}
+
+// HTTP headers for agent-originated spawn identity (not spoofable via
+// AO_SESSION_ID alone — capability is HMAC of the session id).
+const (
+	callerSessionHeader    = "X-AO-Caller-Session-Id"
+	spawnCapabilityHeader  = "X-AO-Spawn-Capability"
+)
 
 // SessionsController owns the session routes. Nil keeps routes registered but
 // returns OpenAPI-backed 501s.
@@ -115,6 +128,8 @@ type SessionsController struct {
 	Activity      ActivityRecorder
 	PreviewServer ManagedPreviewServer
 	Capabilities  SessionCapabilityValidator
+	// SpawnAuth enforces canSpawn for agent-originated spawn calls.
+	SpawnAuth SpawnCapabilityValidator
 }
 
 // Register mounts the session routes on the supplied router.
@@ -212,12 +227,45 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", attachErr.code, attachErr.message, nil)
 		return
 	}
+	if !c.authorizeCallerSpawn(w, r) {
+		return
+	}
 	sess, promptBytes, systemPromptBytes, err := c.Svc.Spawn(r.Context(), ports.SpawnConfig{ProjectID: in.ProjectID, IssueID: in.IssueID, Kind: in.Kind, Harness: in.Harness, RoleID: in.RoleID, Branch: in.Branch, Prompt: in.Prompt, DisplayName: displayName, Attachments: attachments})
 	if err != nil {
 		envelope.WriteError(w, r, err)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusCreated, SpawnSessionResponse{Session: sessionView(sess), PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes})
+}
+
+// authorizeCallerSpawn enforces session-scoped canSpawn when the caller
+// presents agent identity headers. Operator/desktop clients omit the headers
+// and are allowed (loopback). Presenting X-AO-Caller-Session-Id requires a
+// valid spawn capability; role pins with canSpawn=false are rejected.
+func (c *SessionsController) authorizeCallerSpawn(w http.ResponseWriter, r *http.Request) bool {
+	caller := strings.TrimSpace(r.Header.Get(callerSessionHeader))
+	if caller == "" {
+		return true // operator / desktop path
+	}
+	callerID := domain.SessionID(caller)
+	capTok := strings.TrimSpace(r.Header.Get(spawnCapabilityHeader))
+	if c.SpawnAuth == nil || !c.SpawnAuth.Valid(callerID, capTok) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_CAPABILITY_INVALID",
+			"Spawn capability is missing or invalid for the calling session", nil)
+		return false
+	}
+	sess, err := c.Svc.Get(r.Context(), callerID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	role := sess.Metadata.Role
+	if strings.TrimSpace(role.RoleID) != "" && !role.ResolvedPermissions.CanSpawn {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_FORBIDDEN",
+			"Calling session role does not allow spawn (canSpawn=false)", nil)
+		return false
+	}
+	return true
 }
 
 // spawnAttachmentError carries a client-facing API error code + message for a
@@ -1000,6 +1048,9 @@ func (c *SessionsController) spawnOrchestrator(w http.ResponseWriter, r *http.Re
 	}
 	if in.ProjectID == "" {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "PROJECT_ID_REQUIRED", "projectId is required", nil)
+		return
+	}
+	if !c.authorizeCallerSpawn(w, r) {
 		return
 	}
 	sess, err := c.Svc.SpawnOrchestrator(r.Context(), in.ProjectID, in.Clean)

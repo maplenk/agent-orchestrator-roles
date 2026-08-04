@@ -88,6 +88,10 @@ const (
 	// EnvBrowserRuntimeToken must never be inherited by a worker. It authenticates
 	// the privileged Electron runtime, not session-scoped browser callers.
 	EnvBrowserRuntimeToken = "AO_BROWSER_RUNTIME_TOKEN" //nolint:gosec // Environment variable name, not a credential.
+	// EnvSpawnCapability proves the calling agent session identity for spawn.
+	// Combined with AO_SESSION_ID (sent as X-AO-Caller-Session-Id), the daemon
+	// enforces RoleExecutionPolicy.CanSpawn. Not spoofable via AO_SESSION_ID alone.
+	EnvSpawnCapability = "AO_SPAWN_CAPABILITY"
 )
 
 // hookBinaryName is the executable name the workspace hook commands invoke:
@@ -210,6 +214,7 @@ type Manager struct {
 	preview             PreviewLifecycle
 	browser             BrowserLifecycle
 	browserCapabilities BrowserCapabilityIssuer
+	spawnCapabilities   SpawnCapabilityIssuer
 	dataDir             string
 	clock               func() time.Time
 	// lookPath is exec.LookPath in production; tests substitute a stub so
@@ -282,6 +287,12 @@ type BrowserCapabilityIssuer interface {
 	Token(id domain.SessionID) string
 }
 
+// SpawnCapabilityIssuer derives the session-scoped spawn capability injected
+// into every session runtime (ao spawn presents it with AO_SESSION_ID).
+type SpawnCapabilityIssuer interface {
+	Token(id domain.SessionID) string
+}
+
 // sendConfirmConfig bounds the best-effort activity-confirmation loop run after
 // Send. AO has no delivery ack: ao send returns 200 the moment tmux send-keys
 // exits 0, and for a large multiline paste the single Enter may not submit the
@@ -318,6 +329,8 @@ type Deps struct {
 	Preview             PreviewLifecycle
 	Browser             BrowserLifecycle
 	BrowserCapabilities BrowserCapabilityIssuer
+	// SpawnCapabilities issues AO_SPAWN_CAPABILITY for canSpawn enforcement.
+	SpawnCapabilities SpawnCapabilityIssuer
 	// DataDir is exported to spawned agents as AO_DATA_DIR so their hook
 	// commands can open the same store.
 	DataDir string
@@ -349,6 +362,7 @@ func New(d Deps) *Manager {
 		preview:             d.Preview,
 		browser:             d.Browser,
 		browserCapabilities: d.BrowserCapabilities,
+		spawnCapabilities:   d.SpawnCapabilities,
 		dataDir:             d.DataDir,
 		clock:               d.Clock,
 		lookPath:            d.LookPath,
@@ -2733,6 +2747,9 @@ func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issu
 	env := spawnEnv(id, project, issue, m.dataDir, projectEnv)
 	if m.browserCapabilities != nil {
 		env[EnvBrowserCapability] = m.browserCapabilities.Token(id)
+	}
+	if m.spawnCapabilities != nil {
+		env[EnvSpawnCapability] = m.spawnCapabilities.Token(id)
 	}
 	env[EnvBrowserRuntimeToken] = ""
 	path, err := HookPATH(m.executable, os.Getenv, projectEnv)

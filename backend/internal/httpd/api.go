@@ -38,6 +38,8 @@ type APIDeps struct {
 	Browser             controllers.BrowserService
 	PreviewServer       controllers.ManagedPreviewServer
 	SessionCapabilities controllers.SessionCapabilityValidator
+	// SpawnCapabilities validates X-AO-Spawn-Capability for agent-originated spawns.
+	SpawnCapabilities controllers.SpawnCapabilityValidator
 }
 
 // API owns one controller per resource and is the single Register call the
@@ -75,6 +77,7 @@ func NewAPI(cfg config.Config, deps APIDeps) *API {
 			Activity:      deps.Activity,
 			PreviewServer: deps.PreviewServer,
 			Capabilities:  deps.SessionCapabilities,
+			SpawnAuth:     deps.SpawnCapabilities,
 		},
 		prs:           &controllers.PRsController{Svc: deps.PRs},
 		reviews:       &controllers.ReviewsController{Svc: deps.Reviews},

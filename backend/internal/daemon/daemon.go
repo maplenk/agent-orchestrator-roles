@@ -35,6 +35,7 @@ import (
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -69,6 +70,10 @@ func Run() error {
 	browserAuthority, err := browsersvc.LoadAuthority(cfg.DataDir)
 	if err != nil {
 		return fmt.Errorf("load browser capability authority: %w", err)
+	}
+	spawnAuthority, err := spawncred.LoadAuthority(cfg.DataDir)
+	if err != nil {
+		return fmt.Errorf("load spawn capability authority: %w", err)
 	}
 	browserBroker := browserruntime.New(log, browserRuntimeToken)
 
@@ -174,7 +179,7 @@ func Run() error {
 	// selected runtime, routed git/scratch workspaces, the per-session agent
 	// resolver (AO_AGENT validated here for compatibility), and the agent
 	// messenger, then mount it on the API.
-	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, log)
+	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, spawnAuthority, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -276,6 +281,7 @@ func Run() error {
 		Browser:             browserService,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
+		SpawnCapabilities:   spawnAuthority,
 	})
 	if err != nil {
 		stop()

@@ -68,6 +68,12 @@ func (c *commandContext) postJSON(ctx context.Context, path string, body, out an
 	return c.doJSON(ctx, http.MethodPost, path, body, out)
 }
 
+// postJSONWithHeaders is postJSON with extra request headers (e.g. spawn caller
+// capability for canSpawn enforcement).
+func (c *commandContext) postJSONWithHeaders(ctx context.Context, path string, body, out any, headers map[string]string) error {
+	return c.doJSONPathWithHeaders(ctx, http.MethodPost, "/api/v1/"+path, body, out, headers)
+}
+
 // patchJSON sends body as JSON to PATCH /api/v1/<path> on the running daemon
 // and decodes a 2xx response into out.
 func (c *commandContext) patchJSON(ctx context.Context, path string, body, out any) error {

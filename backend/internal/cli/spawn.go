@@ -141,7 +141,7 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 				DisplayName: name,
 			}
 			var res spawnResult
-			if err := ctx.postJSON(cmd.Context(), "sessions", req, &res); err != nil {
+			if err := ctx.postJSONWithHeaders(cmd.Context(), "sessions", req, &res, spawnCallerHeaders()); err != nil {
 				return err
 			}
 			claimed := ""
@@ -191,6 +191,21 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	f.BoolVar(&opts.noTakeover, "no-takeover", false, "Refuse if another active session owns the claimed PR (requires --claim-pr)")
 	f.BoolVar(&opts.skipAgentCheck, "skip-agent-check", false, "Skip advisory agent catalog install/auth preflight before spawning")
 	return cmd
+}
+
+// spawnCallerHeaders attaches agent session identity when ao spawn runs inside
+// an AO session (AO_SESSION_ID set). Combined with AO_SPAWN_CAPABILITY the
+// daemon enforces canSpawn. Operator shells without AO_SESSION_ID omit headers.
+func spawnCallerHeaders() map[string]string {
+	sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
+	if sid == "" {
+		return nil
+	}
+	h := map[string]string{"X-AO-Caller-Session-Id": sid}
+	if capTok := strings.TrimSpace(os.Getenv("AO_SPAWN_CAPABILITY")); capTok != "" {
+		h["X-AO-Spawn-Capability"] = capTok
+	}
+	return h
 }
 
 func (c *commandContext) fetchAgentInventory(ctx context.Context, refresh bool) (agentInventory, error) {

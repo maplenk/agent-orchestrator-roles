@@ -285,6 +285,14 @@ type BrowserCapabilityHeader struct {
 	Capability string `header:"X-AO-Browser-Capability" description:"Opaque browser capability injected into the owning AO worker."`
 }
 
+// SpawnCallerHeaders identify an agent session that is calling spawn.
+// Omitted for operator/desktop clients. When present, X-AO-Spawn-Capability
+// must match the AO_SPAWN_CAPABILITY issued to that session.
+type SpawnCallerHeaders struct {
+	CallerSessionID  string `header:"X-AO-Caller-Session-Id" description:"AO session id of the agent initiating spawn (from AO_SESSION_ID)."`
+	SpawnCapability  string `header:"X-AO-Spawn-Capability" description:"Opaque spawn capability from AO_SPAWN_CAPABILITY."`
+}
+
 // BrowserStatusResponse reports whether the desktop-owned browser transport is
 // ready. A connected runtime can create the session target while its panel is
 // hidden; panel visibility is intentionally not part of this state.
