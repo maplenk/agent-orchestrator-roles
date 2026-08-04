@@ -47,6 +47,11 @@ type SessionMetadata struct {
 	// Persisted in session metadata columns once migration 0042 is applied;
 	// until then it is carried in-memory for the spawn path and tests.
 	Role SessionRoleBinding `json:"role,omitempty"`
+
+	// SpawnCapabilityHash is SHA-256 hex of the random per-session spawn
+	// capability. The plaintext token is never stored — only injected as
+	// AO_SPAWN_CAPABILITY for the owning process.
+	SpawnCapabilityHash string `json:"-"`
 }
 
 // SessionRecord is the persistence shape. It intentionally stores only durable

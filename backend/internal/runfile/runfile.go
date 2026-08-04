@@ -37,6 +37,11 @@ type Info struct {
 	// BrowserRuntimeAddress is the exact Unix socket or Windows named-pipe
 	// address selected by the backend for this daemon launch.
 	BrowserRuntimeAddress string `json:"browserRuntimeAddress,omitempty"`
+	// OperatorSpawnToken authenticates operator/desktop (and password-gated LAN)
+	// spawn callers. Regenerated every daemon launch. Never injected into
+	// session runtimes — only published here for the CLI/desktop to present as
+	// X-AO-Operator-Spawn-Token.
+	OperatorSpawnToken string `json:"operatorSpawnToken,omitempty"`
 }
 
 // Write atomically writes running.json at path, creating parent directories

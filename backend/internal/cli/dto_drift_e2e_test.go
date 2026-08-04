@@ -208,9 +208,10 @@ func startDriftTestDaemon(t *testing.T, sessions controllers.SessionService, pro
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router := httpd.NewRouterWithControl(config.Config{}, log, nil, httpd.APIDeps{
-		Agents:   &fakeAgentCatalog{},
-		Sessions: sessions,
-		Projects: projects,
+		Agents:        &fakeAgentCatalog{},
+		Sessions:      sessions,
+		Projects:      projects,
+		OperatorSpawn: fixedOperatorSpawn("e2e-operator-token"),
 	}, httpd.ControlDeps{})
 	srv := httptest.NewServer(router)
 	t.Cleanup(srv.Close)
@@ -219,10 +220,17 @@ func startDriftTestDaemon(t *testing.T, sessions controllers.SessionService, pro
 
 	rfPath := filepath.Join(t.TempDir(), "running.json")
 	t.Setenv("AO_RUN_FILE", rfPath)
-	if err := runfile.Write(rfPath, runfile.Info{PID: os.Getpid(), Port: port, StartedAt: time.Now()}); err != nil {
+	if err := runfile.Write(rfPath, runfile.Info{
+		PID: os.Getpid(), Port: port, StartedAt: time.Now(),
+		OperatorSpawnToken: "e2e-operator-token",
+	}); err != nil {
 		t.Fatalf("write run-file: %v", err)
 	}
 }
+
+type fixedOperatorSpawn string
+
+func (f fixedOperatorSpawn) Valid(token string) bool { return token == string(f) }
 
 func TestE2E_SpawnAndProjectAddDTORoundTrip(t *testing.T) {
 	t.Run("spawn", func(t *testing.T) {

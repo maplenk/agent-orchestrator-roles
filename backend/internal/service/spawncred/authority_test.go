@@ -1,58 +1,46 @@
 package spawncred_test
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 )
 
-func TestAuthority_TokenStableAndValid(t *testing.T) {
-	dir := t.TempDir()
-	a, err := spawncred.LoadAuthority(dir)
+func TestIssue_ValidAndNonMintable(t *testing.T) {
+	a, ha, err := spawncred.Issue()
 	if err != nil {
 		t.Fatal(err)
 	}
-	tok := a.Token("mer-1")
-	if tok == "" {
-		t.Fatal("empty token")
-	}
-	if !a.Valid("mer-1", tok) {
-		t.Fatal("expected valid")
-	}
-	if a.Valid("mer-2", tok) {
-		t.Fatal("token must not validate for other session")
-	}
-	if a.Valid("mer-1", tok+"x") {
-		t.Fatal("tampered token must fail")
-	}
-	if a.Valid("mer-1", "") {
-		t.Fatal("empty token must fail")
-	}
-
-	// Survives reload from same data dir.
-	a2, err := spawncred.LoadAuthority(dir)
+	b, hb, err := spawncred.Issue()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a2.Token(domain.SessionID("mer-1")) != tok {
-		t.Fatal("token must be stable across reload")
+	if a == b || ha == hb {
+		t.Fatal("tokens/hashes must be unique")
 	}
-	if _, err := os.Stat(filepath.Join(dir, "spawn-capability.key")); err != nil {
-		t.Fatalf("key file: %v", err)
+	if !spawncred.ValidToken(a, ha) {
+		t.Fatal("a should validate against ha")
+	}
+	if spawncred.ValidToken(a, hb) {
+		t.Fatal("a must not validate against other session hash")
+	}
+	if spawncred.ValidToken("", ha) || spawncred.ValidToken(a, "") {
+		t.Fatal("empty must fail")
 	}
 }
 
-func TestAuthority_DistinctFromBrowserShape(t *testing.T) {
-	// Different sessions get different tokens; same session is deterministic.
-	dir := t.TempDir()
-	a, err := spawncred.LoadAuthority(dir)
+func TestOperator_Valid(t *testing.T) {
+	op, tok, err := spawncred.NewOperator()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a.Token("a") == a.Token("b") {
-		t.Fatal("tokens must differ by session")
+	if !op.Valid(tok) {
+		t.Fatal("operator token should validate")
+	}
+	if op.Valid(tok + "x") {
+		t.Fatal("tampered operator token must fail")
+	}
+	if op.Valid("") {
+		t.Fatal("empty must fail")
 	}
 }

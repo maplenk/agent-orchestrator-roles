@@ -15,29 +15,33 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
-	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 )
 
-type spawnAuthFixed struct{ ok bool }
+type opAuth struct{ tok string }
 
-func (f spawnAuthFixed) Valid(domain.SessionID, string) bool { return f.ok }
+func (o opAuth) Valid(t string) bool { return o.tok != "" && t == o.tok }
 
-// Minimal SessionService for canSpawn gate tests.
 type spawnGateSvc struct {
 	sessions map[domain.SessionID]domain.Session
 	spawned  int
 }
 
-func newSpawnGateSvc() *spawnGateSvc {
+func newSpawnGateSvcWithToken() (*spawnGateSvc, string) {
 	now := time.Now().UTC()
+	plain, hash, err := spawncred.Issue()
+	if err != nil {
+		panic(err)
+	}
 	s := domain.Session{SessionRecord: domain.SessionRecord{
 		ID: "ao-1", ProjectID: "ao", Kind: domain.KindWorker,
 		Activity:  domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
 		CreatedAt: now, UpdatedAt: now,
+		Metadata: domain.SessionMetadata{SpawnCapabilityHash: hash},
 	}, Status: domain.StatusIdle}
-	return &spawnGateSvc{sessions: map[domain.SessionID]domain.Session{s.ID: s}}
+	return &spawnGateSvc{sessions: map[domain.SessionID]domain.Session{s.ID: s}}, plain
 }
 
 func (f *spawnGateSvc) List(context.Context, sessionsvc.ListFilter) ([]domain.Session, error) {
@@ -102,19 +106,19 @@ func (f *spawnGateSvc) GetWorkspaceFile(context.Context, domain.SessionID, strin
 	return sessionsvc.WorkspaceFileDetail{}, nil
 }
 
-func spawnGateServer(t *testing.T, svc *spawnGateSvc, auth controllers.SpawnCapabilityValidator) *httptest.Server {
+func spawnGateServer(t *testing.T, svc *spawnGateSvc, op opAuth) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	deps := httpd.APIDeps{
-		Sessions:          svc,
-		SpawnCapabilities: auth,
+		Sessions:      svc,
+		OperatorSpawn: op,
 	}
 	srv := httptest.NewServer(httpd.NewRouterWithControl(config.Config{}, log, nil, deps, httpd.ControlDeps{}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-func doSpawnPOST(t *testing.T, srv *httptest.Server, headers map[string]string) *http.Response {
+func doSpawnPOST(t *testing.T, srv *httptest.Server, headers map[string]string) (int, map[string]any) {
 	t.Helper()
 	body := `{"projectId":"ao","displayName":"task","prompt":"hi"}`
 	req, err := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/sessions", strings.NewReader(body))
@@ -129,11 +133,6 @@ func doSpawnPOST(t *testing.T, srv *httptest.Server, headers map[string]string) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	return resp
-}
-
-func readBody(t *testing.T, resp *http.Response) (int, map[string]any) {
-	t.Helper()
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -144,38 +143,42 @@ func readBody(t *testing.T, resp *http.Response) (int, map[string]any) {
 	return resp.StatusCode, env
 }
 
-func TestSpawn_OperatorPathAllowsWithoutHeaders(t *testing.T) {
-	svc := newSpawnGateSvc()
-	srv := spawnGateServer(t, svc, spawnAuthFixed{ok: true})
-	code, _ := readBody(t, doSpawnPOST(t, srv, nil))
-	if code != http.StatusCreated {
-		t.Fatalf("status = %d", code)
-	}
-	if svc.spawned != 1 {
-		t.Fatalf("spawned = %d", svc.spawned)
-	}
-}
-
-func TestSpawn_CallerSessionWithoutValidCapabilityForbidden(t *testing.T) {
-	svc := newSpawnGateSvc()
-	srv := spawnGateServer(t, svc, spawnAuthFixed{ok: false})
-	code, env := readBody(t, doSpawnPOST(t, srv, map[string]string{
-		"X-AO-Caller-Session-Id": "ao-1",
-		"X-AO-Spawn-Capability":  "bad",
-	}))
-	if code != http.StatusForbidden {
-		t.Fatalf("status = %d env=%v", code, env)
-	}
-	if env["code"] != "SPAWN_CAPABILITY_INVALID" {
-		t.Fatalf("code = %#v", env["code"])
+func TestSpawn_HeaderlessRejected(t *testing.T) {
+	svc, _ := newSpawnGateSvcWithToken()
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, env := doSpawnPOST(t, srv, nil)
+	if code != http.StatusForbidden || env["code"] != "SPAWN_AUTH_REQUIRED" {
+		t.Fatalf("status=%d env=%v", code, env)
 	}
 	if svc.spawned != 0 {
 		t.Fatal("must not spawn")
 	}
 }
 
-func TestSpawn_CallerCanSpawnFalseForbidden(t *testing.T) {
-	svc := newSpawnGateSvc()
+func TestSpawn_OperatorTokenAllows(t *testing.T) {
+	svc, _ := newSpawnGateSvcWithToken()
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, _ := doSpawnPOST(t, srv, map[string]string{
+		"X-AO-Operator-Spawn-Token": "op-secret",
+	})
+	if code != http.StatusCreated {
+		t.Fatalf("status=%d", code)
+	}
+}
+
+func TestSpawn_OperatorTokenInvalid(t *testing.T) {
+	svc, _ := newSpawnGateSvcWithToken()
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, env := doSpawnPOST(t, srv, map[string]string{
+		"X-AO-Operator-Spawn-Token": "wrong",
+	})
+	if code != http.StatusForbidden || env["code"] != "OPERATOR_SPAWN_INVALID" {
+		t.Fatalf("status=%d env=%v", code, env)
+	}
+}
+
+func TestSpawn_AgentCanSpawnFalseForbidden(t *testing.T) {
+	svc, plain := newSpawnGateSvcWithToken()
 	s := svc.sessions["ao-1"]
 	s.Metadata.Role = domain.SessionRoleBinding{
 		RoleID: "implementor",
@@ -185,24 +188,18 @@ func TestSpawn_CallerCanSpawnFalseForbidden(t *testing.T) {
 		},
 	}
 	svc.sessions["ao-1"] = s
-	srv := spawnGateServer(t, svc, spawnAuthFixed{ok: true})
-	code, env := readBody(t, doSpawnPOST(t, srv, map[string]string{
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, env := doSpawnPOST(t, srv, map[string]string{
 		"X-AO-Caller-Session-Id": "ao-1",
-		"X-AO-Spawn-Capability":  "ok",
-	}))
-	if code != http.StatusForbidden {
-		t.Fatalf("status = %d env=%v", code, env)
-	}
-	if env["code"] != "SPAWN_FORBIDDEN" {
-		t.Fatalf("code = %#v", env["code"])
-	}
-	if svc.spawned != 0 {
-		t.Fatal("must not spawn")
+		"X-AO-Spawn-Capability":  plain,
+	})
+	if code != http.StatusForbidden || env["code"] != "SPAWN_FORBIDDEN" {
+		t.Fatalf("status=%d env=%v", code, env)
 	}
 }
 
-func TestSpawn_CallerCanSpawnTrueAllowed(t *testing.T) {
-	svc := newSpawnGateSvc()
+func TestSpawn_AgentCanSpawnTrueAllowed(t *testing.T) {
+	svc, plain := newSpawnGateSvcWithToken()
 	s := svc.sessions["ao-1"]
 	s.Metadata.Role = domain.SessionRoleBinding{
 		RoleID: "orchestrator",
@@ -212,24 +209,46 @@ func TestSpawn_CallerCanSpawnTrueAllowed(t *testing.T) {
 		},
 	}
 	svc.sessions["ao-1"] = s
-	srv := spawnGateServer(t, svc, spawnAuthFixed{ok: true})
-	code, _ := readBody(t, doSpawnPOST(t, srv, map[string]string{
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, _ := doSpawnPOST(t, srv, map[string]string{
 		"X-AO-Caller-Session-Id": "ao-1",
-		"X-AO-Spawn-Capability":  "ok",
-	}))
+		"X-AO-Spawn-Capability":  plain,
+	})
 	if code != http.StatusCreated {
-		t.Fatalf("status = %d", code)
+		t.Fatalf("status=%d", code)
 	}
 }
 
-func TestSpawn_LegacySessionWithoutRoleAllowedWithCapability(t *testing.T) {
-	svc := newSpawnGateSvc()
-	srv := spawnGateServer(t, svc, spawnAuthFixed{ok: true})
-	code, _ := readBody(t, doSpawnPOST(t, srv, map[string]string{
+func TestSpawn_TerminatedCallerRejected(t *testing.T) {
+	svc, plain := newSpawnGateSvcWithToken()
+	s := svc.sessions["ao-1"]
+	s.IsTerminated = true
+	s.Metadata.Role = domain.SessionRoleBinding{
+		RoleID:              "orchestrator",
+		ResolvedPermissions: domain.RoleExecutionPolicy{CanSpawn: true},
+	}
+	svc.sessions["ao-1"] = s
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, env := doSpawnPOST(t, srv, map[string]string{
 		"X-AO-Caller-Session-Id": "ao-1",
-		"X-AO-Spawn-Capability":  "ok",
-	}))
-	if code != http.StatusCreated {
-		t.Fatalf("status = %d", code)
+		"X-AO-Spawn-Capability":  plain,
+	})
+	if code != http.StatusForbidden || env["code"] != "SPAWN_SESSION_TERMINATED" {
+		t.Fatalf("status=%d env=%v", code, env)
+	}
+	if svc.spawned != 0 {
+		t.Fatal("must not spawn")
+	}
+}
+
+func TestSpawn_AgentBadCapabilityRejected(t *testing.T) {
+	svc, _ := newSpawnGateSvcWithToken()
+	srv := spawnGateServer(t, svc, opAuth{tok: "op-secret"})
+	code, env := doSpawnPOST(t, srv, map[string]string{
+		"X-AO-Caller-Session-Id": "ao-1",
+		"X-AO-Spawn-Capability":  "not-the-token",
+	})
+	if code != http.StatusForbidden || env["code"] != "SPAWN_CAPABILITY_INVALID" {
+		t.Fatalf("status=%d env=%v", code, env)
 	}
 }

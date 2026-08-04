@@ -38,15 +38,14 @@ func TestRuntimeEnvInjectsBrowserCapability(t *testing.T) {
 	manager := &Manager{
 		dataDir:             "/data",
 		browserCapabilities: fixedBrowserCapability("capability-1"),
-		spawnCapabilities:   fixedBrowserCapability("spawn-cap-1"),
 		executable:          func() (string, error) { return filepath.Join("/opt", "aod", "ao"), nil },
 		logger:              slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
-	env := manager.runtimeEnv("mer-1", "mer", "", nil)
+	env := manager.runtimeEnv("mer-1", "mer", "", nil, "spawn-cap-plain")
 	if env[EnvBrowserCapability] != "capability-1" {
 		t.Fatalf("%s = %q", EnvBrowserCapability, env[EnvBrowserCapability])
 	}
-	if env[EnvSpawnCapability] != "spawn-cap-1" {
+	if env[EnvSpawnCapability] != "spawn-cap-plain" {
 		t.Fatalf("%s = %q", EnvSpawnCapability, env[EnvSpawnCapability])
 	}
 }

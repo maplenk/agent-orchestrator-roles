@@ -199,6 +199,7 @@ type Session struct {
 	ResolvedModel           string
 	ResolvedWorkspaceWrites int64
 	ResolvedCanSpawn        int64
+	SpawnCapabilityHash     string
 }
 
 type SessionCleanupFact struct {

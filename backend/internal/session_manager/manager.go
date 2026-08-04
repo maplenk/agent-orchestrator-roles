@@ -22,6 +22,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	aoprocess "github.com/aoagents/agent-orchestrator/backend/internal/process"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 )
@@ -214,7 +215,6 @@ type Manager struct {
 	preview             PreviewLifecycle
 	browser             BrowserLifecycle
 	browserCapabilities BrowserCapabilityIssuer
-	spawnCapabilities   SpawnCapabilityIssuer
 	dataDir             string
 	clock               func() time.Time
 	// lookPath is exec.LookPath in production; tests substitute a stub so
@@ -287,12 +287,6 @@ type BrowserCapabilityIssuer interface {
 	Token(id domain.SessionID) string
 }
 
-// SpawnCapabilityIssuer derives the session-scoped spawn capability injected
-// into every session runtime (ao spawn presents it with AO_SESSION_ID).
-type SpawnCapabilityIssuer interface {
-	Token(id domain.SessionID) string
-}
-
 // sendConfirmConfig bounds the best-effort activity-confirmation loop run after
 // Send. AO has no delivery ack: ao send returns 200 the moment tmux send-keys
 // exits 0, and for a large multiline paste the single Enter may not submit the
@@ -329,8 +323,6 @@ type Deps struct {
 	Preview             PreviewLifecycle
 	Browser             BrowserLifecycle
 	BrowserCapabilities BrowserCapabilityIssuer
-	// SpawnCapabilities issues AO_SPAWN_CAPABILITY for canSpawn enforcement.
-	SpawnCapabilities SpawnCapabilityIssuer
 	// DataDir is exported to spawned agents as AO_DATA_DIR so their hook
 	// commands can open the same store.
 	DataDir string
@@ -362,7 +354,6 @@ func New(d Deps) *Manager {
 		preview:             d.Preview,
 		browser:             d.Browser,
 		browserCapabilities: d.BrowserCapabilities,
-		spawnCapabilities:   d.SpawnCapabilities,
 		dataDir:             d.DataDir,
 		clock:               d.Clock,
 		lookPath:            d.LookPath,
@@ -450,7 +441,15 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	promptBytes := len(prompt)
 	systemPromptBytes := len(systemPrompt)
 
-	rec, err := m.store.CreateSession(ctx, seedRecord(cfg, m.clock()))
+	// Random per-session spawn capability: only the hash is durable; plaintext
+	// goes solely into the process env (never a global mint key under dataDir).
+	spawnToken, spawnHash, err := spawncred.Issue()
+	if err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: spawn capability: %w", err)
+	}
+	seed := seedRecord(cfg, m.clock())
+	seed.Metadata.SpawnCapabilityHash = spawnHash
+	rec, err := m.store.CreateSession(ctx, seed)
 	if err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: create: %w", err)
 	}
@@ -507,7 +506,7 @@ func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 	}
 	// Merge host-resolved role model/permissions over legacy project AgentConfig.
 	agentConfig := mergeAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
-	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env)
+	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env, spawnToken)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
@@ -1282,7 +1281,18 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	// Restore re-applies the host-resolved role model over the current project
 	// config, matching fresh spawn while preserving the pinned role target.
 	agentConfig := restoreAgentConfig(rec, project)
-	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+	// Rotate spawn capability on every relaunch so a terminated/killed session's
+	// prior token cannot be reused after hash is rewritten.
+	spawnToken, spawnHash, err := spawncred.Issue()
+	if err != nil {
+		return RestoreResult{}, fmt.Errorf("%s %s: spawn capability: %w", operation, rec.ID, err)
+	}
+	rec.Metadata.SpawnCapabilityHash = spawnHash
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(ctx, rec); err != nil {
+		return RestoreResult{}, fmt.Errorf("%s %s: persist spawn capability: %w", operation, rec.ID, err)
+	}
+	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, spawnToken)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
@@ -2743,14 +2753,18 @@ func spawnEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueI
 // command, which fails every callback and silently kills activity tracking).
 // When the pin cannot be applied the inherited PATH is kept and a warning is
 // logged so the degradation isn't silent.
-func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string) map[string]string {
+//
+// spawnToken is the plaintext random capability for this generation (hash is
+// already durable on the session). Empty skips AO_SPAWN_CAPABILITY (cleanup paths).
+func (m *Manager) runtimeEnv(id domain.SessionID, project domain.ProjectID, issue domain.IssueID, projectEnv map[string]string, spawnToken string) map[string]string {
 	env := spawnEnv(id, project, issue, m.dataDir, projectEnv)
 	if m.browserCapabilities != nil {
 		env[EnvBrowserCapability] = m.browserCapabilities.Token(id)
 	}
-	if m.spawnCapabilities != nil {
-		env[EnvSpawnCapability] = m.spawnCapabilities.Token(id)
+	if spawnToken != "" {
+		env[EnvSpawnCapability] = spawnToken
 	}
+	// Never inherit operator or browser runtime secrets into session processes.
 	env[EnvBrowserRuntimeToken] = ""
 	path, err := HookPATH(m.executable, os.Getenv, projectEnv)
 	if err != nil {
@@ -2958,7 +2972,7 @@ func (m *Manager) cleanupAgentWorkspace(ctx context.Context, rec domain.SessionR
 	}
 	env := spawnEnv(rec.ID, rec.ProjectID, rec.IssueID, m.dataDir, nil)
 	if project, err := m.loadProject(ctx, rec.ProjectID); err == nil {
-		env = m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env)
+		env = m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, "")
 	} else {
 		m.logger.Warn("workspace cleanup: project env unavailable; agent cleanup using AO env only",
 			"sessionID", rec.ID, "projectID", rec.ProjectID, "error", err)

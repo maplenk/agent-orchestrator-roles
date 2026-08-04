@@ -25,6 +25,7 @@ import (
 	previewutil "github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
 
@@ -108,17 +109,19 @@ type SessionCapabilityValidator interface {
 	Valid(sessionID domain.SessionID, token string) bool
 }
 
-// SpawnCapabilityValidator verifies the daemon-issued spawn capability
-// injected as AO_SPAWN_CAPABILITY into session runtimes.
-type SpawnCapabilityValidator interface {
-	Valid(sessionID domain.SessionID, token string) bool
+// OperatorSpawnValidator authenticates operator/desktop spawn (runfile secret).
+type OperatorSpawnValidator interface {
+	Valid(token string) bool
 }
 
-// HTTP headers for agent-originated spawn identity (not spoofable via
-// AO_SESSION_ID alone — capability is HMAC of the session id).
+// HTTP headers for spawn identity. Exactly one of:
+//   - X-AO-Operator-Spawn-Token (operator/desktop; never in session env)
+//   - X-AO-Caller-Session-Id + X-AO-Spawn-Capability (agent session)
+// Headerless spawn is rejected (workers must not fall through to "operator").
 const (
-	callerSessionHeader    = "X-AO-Caller-Session-Id"
-	spawnCapabilityHeader  = "X-AO-Spawn-Capability"
+	operatorSpawnHeader   = "X-AO-Operator-Spawn-Token"
+	callerSessionHeader   = "X-AO-Caller-Session-Id"
+	spawnCapabilityHeader = "X-AO-Spawn-Capability"
 )
 
 // SessionsController owns the session routes. Nil keeps routes registered but
@@ -128,8 +131,8 @@ type SessionsController struct {
 	Activity      ActivityRecorder
 	PreviewServer ManagedPreviewServer
 	Capabilities  SessionCapabilityValidator
-	// SpawnAuth enforces canSpawn for agent-originated spawn calls.
-	SpawnAuth SpawnCapabilityValidator
+	// OperatorAuth validates X-AO-Operator-Spawn-Token (daemon-launch secret).
+	OperatorAuth OperatorSpawnValidator
 }
 
 // Register mounts the session routes on the supplied router.
@@ -238,25 +241,47 @@ func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusCreated, SpawnSessionResponse{Session: sessionView(sess), PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes})
 }
 
-// authorizeCallerSpawn enforces session-scoped canSpawn when the caller
-// presents agent identity headers. Operator/desktop clients omit the headers
-// and are allowed (loopback). Presenting X-AO-Caller-Session-Id requires a
-// valid spawn capability; role pins with canSpawn=false are rejected.
+// authorizeCallerSpawn requires a trusted caller path:
+//
+//  1. Operator token (runfile secret — never in session env), or
+//  2. Live session with valid random capability (hash on row) and canSpawn.
+//
+// Omitting headers is not an operator path (closes worker unset-env escalate).
 func (c *SessionsController) authorizeCallerSpawn(w http.ResponseWriter, r *http.Request) bool {
+	opTok := strings.TrimSpace(r.Header.Get(operatorSpawnHeader))
 	caller := strings.TrimSpace(r.Header.Get(callerSessionHeader))
-	if caller == "" {
-		return true // operator / desktop path
-	}
-	callerID := domain.SessionID(caller)
 	capTok := strings.TrimSpace(r.Header.Get(spawnCapabilityHeader))
-	if c.SpawnAuth == nil || !c.SpawnAuth.Valid(callerID, capTok) {
-		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_CAPABILITY_INVALID",
-			"Spawn capability is missing or invalid for the calling session", nil)
+
+	if opTok != "" {
+		// Prefer operator over agent headers if both present (desktop tools).
+		if c.OperatorAuth != nil && c.OperatorAuth.Valid(opTok) {
+			return true
+		}
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "OPERATOR_SPAWN_INVALID",
+			"Operator spawn token is missing or invalid", nil)
 		return false
 	}
+
+	if caller == "" {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_AUTH_REQUIRED",
+			"Spawn requires X-AO-Operator-Spawn-Token or session spawn capability headers", nil)
+		return false
+	}
+
+	callerID := domain.SessionID(caller)
 	sess, err := c.Svc.Get(r.Context(), callerID)
 	if err != nil {
 		envelope.WriteError(w, r, err)
+		return false
+	}
+	if sess.IsTerminated {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_SESSION_TERMINATED",
+			"Calling session is terminated and cannot spawn", nil)
+		return false
+	}
+	if !spawncred.ValidToken(capTok, sess.Metadata.SpawnCapabilityHash) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SPAWN_CAPABILITY_INVALID",
+			"Spawn capability is missing or invalid for the calling session", nil)
 		return false
 	}
 	role := sess.Metadata.Role

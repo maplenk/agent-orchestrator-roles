@@ -14,6 +14,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
+	"github.com/aoagents/agent-orchestrator/backend/internal/runfile"
 )
 
 // maxDisplayNameLen caps the sidebar label set by `--name`. Mirrored by the
@@ -193,19 +196,29 @@ func newSpawnCommand(ctx *commandContext) *cobra.Command {
 	return cmd
 }
 
-// spawnCallerHeaders attaches agent session identity when ao spawn runs inside
-// an AO session (AO_SESSION_ID set). Combined with AO_SPAWN_CAPABILITY the
-// daemon enforces canSpawn. Operator shells without AO_SESSION_ID omit headers.
+// spawnCallerHeaders authenticates ao spawn:
+//   - Inside a session: X-AO-Caller-Session-Id + X-AO-Spawn-Capability (agent)
+//   - Outside: X-AO-Operator-Spawn-Token from running.json (never session env)
 func spawnCallerHeaders() map[string]string {
-	sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID"))
-	if sid == "" {
+	if sid := strings.TrimSpace(os.Getenv("AO_SESSION_ID")); sid != "" {
+		h := map[string]string{"X-AO-Caller-Session-Id": sid}
+		if capTok := strings.TrimSpace(os.Getenv("AO_SPAWN_CAPABILITY")); capTok != "" {
+			h["X-AO-Spawn-Capability"] = capTok
+		}
+		return h
+	}
+	cfg, err := config.Load()
+	if err != nil {
 		return nil
 	}
-	h := map[string]string{"X-AO-Caller-Session-Id": sid}
-	if capTok := strings.TrimSpace(os.Getenv("AO_SPAWN_CAPABILITY")); capTok != "" {
-		h["X-AO-Spawn-Capability"] = capTok
+	info, err := runfile.Read(cfg.RunFilePath)
+	if err != nil || info == nil {
+		return nil
 	}
-	return h
+	if tok := strings.TrimSpace(info.OperatorSpawnToken); tok != "" {
+		return map[string]string{"X-AO-Operator-Spawn-Token": tok}
+	}
+	return nil
 }
 
 func (c *commandContext) fetchAgentInventory(ctx context.Context, refresh bool) (agentInventory, error) {

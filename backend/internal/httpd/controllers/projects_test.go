@@ -548,6 +548,10 @@ func doRequest(t *testing.T, srv *httptest.Server, method, path, body string) ([
 		req.Header.Set("Content-Type", "application/json")
 
 	}
+	// Spawn routes require operator or agent capability (canSpawn security boundary).
+	if method == http.MethodPost && (path == "/api/v1/sessions" || path == "/api/v1/orchestrators") {
+		req.Header.Set("X-AO-Operator-Spawn-Token", "test-operator-spawn-token")
+	}
 
 	resp, err := srv.Client().Do(req)
 

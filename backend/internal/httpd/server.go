@@ -96,6 +96,7 @@ func (s *Server) Run(ctx context.Context) error {
 		Owner:                 os.Getenv("AO_OWNER"),
 		BrowserRuntimeToken:   os.Getenv("AO_BROWSER_RUNTIME_TOKEN"),
 		BrowserRuntimeAddress: os.Getenv("AO_BROWSER_RUNTIME_ADDRESS"),
+		OperatorSpawnToken:    os.Getenv("AO_OPERATOR_SPAWN_TOKEN"),
 	}
 	if err := runfile.Write(s.cfg.RunFilePath, info); err != nil {
 		_ = s.listen.Close()

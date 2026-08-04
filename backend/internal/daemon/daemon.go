@@ -71,9 +71,13 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("load browser capability authority: %w", err)
 	}
-	spawnAuthority, err := spawncred.LoadAuthority(cfg.DataDir)
+	operatorSpawn, operatorSpawnToken, err := spawncred.NewOperator()
 	if err != nil {
-		return fmt.Errorf("load spawn capability authority: %w", err)
+		return fmt.Errorf("generate operator spawn token: %w", err)
+	}
+	// Publish for runfile write in httpd.Server.Run; never inject into sessions.
+	if err := os.Setenv("AO_OPERATOR_SPAWN_TOKEN", operatorSpawnToken); err != nil {
+		return fmt.Errorf("set operator spawn token env: %w", err)
 	}
 	browserBroker := browserruntime.New(log, browserRuntimeToken)
 
@@ -179,7 +183,7 @@ func Run() error {
 	// selected runtime, routed git/scratch workspaces, the per-session agent
 	// resolver (AO_AGENT validated here for compatibility), and the agent
 	// messenger, then mount it on the API.
-	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, spawnAuthority, log)
+	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -281,7 +285,7 @@ func Run() error {
 		Browser:             browserService,
 		PreviewServer:       managedPreview,
 		SessionCapabilities: browserAuthority,
-		SpawnCapabilities:   spawnAuthority,
+		OperatorSpawn:       operatorSpawn,
 	})
 	if err != nil {
 		stop()

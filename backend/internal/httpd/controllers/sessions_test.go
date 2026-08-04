@@ -59,6 +59,13 @@ type denySessionCapability struct{}
 
 func (denySessionCapability) Valid(domain.SessionID, string) bool { return false }
 
+// allowOperatorSpawn accepts the test operator token injected by doRequest.
+type allowOperatorSpawn struct{}
+
+func (allowOperatorSpawn) Valid(token string) bool {
+	return token == "test-operator-spawn-token"
+}
+
 func (f *fakeManagedPreviewServer) Start(
 	_ context.Context,
 	sessionID domain.SessionID,
@@ -354,7 +361,7 @@ func newSessionTestServerWithPreview(
 ) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	deps := httpd.APIDeps{Sessions: svc}
+	deps := httpd.APIDeps{Sessions: svc, OperatorSpawn: allowOperatorSpawn{}}
 	if managed != nil {
 		deps.PreviewServer = managed
 		deps.SessionCapabilities = allowSessionCapability{}
