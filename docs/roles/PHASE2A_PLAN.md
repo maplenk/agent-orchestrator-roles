@@ -56,20 +56,27 @@ SwitchWorker / FreshConversation / RecoverSwitchFromPostStop
 
 ### Manual dogfood checklist (before promoting switch_supported)
 
-Run against a real desktop build with `switchCapsOverride` / temporary test caps **or** a private dogfood binary that sets switch_supported — do **not** merge production true until all pass:
+**Checkpoint SHA:** `2d19ad59` (pushed). Full results: [`PHASE2A_DOGFOOD.md`](./PHASE2A_DOGFOOD.md).
 
-1. **Claude → Codex worker switch** on an implementor session with live workspace
-   - Source stops; target launches with host-compiled handoff
-   - Terminal input blocked during pending; resumes after ack
-   - Ledger: requested → pre_stop → post_stop → target_ack (stable ids)
-2. **Codex → Claude** reverse path (same role pin)
-3. **Same-harness FreshConversation** (no stacking of `## Host-compiled handoff`)
-4. **Crash mid-switch**: kill daemon after source stop / before ack; on boot `RecoverSwitchFromPostStop` completes or reports uncertain without double-launch
-5. **Confirmed-alive pre-stop**: if destroy fails to kill, source remains usable (pending rolled back) or returns `ErrSwitchUncertain` if rollback cannot persist
-6. **Terminal fence**: during pending, client PTY writes get `input blocked: switch in progress` (mux + session id / sanitized handle)
+| # | Item | Manager dogfood @ 2d19ad59 |
+|---|------|----------------------------|
+| 0 | Production caps false / refuse without override | **PASS** |
+| 1 | Claude → Codex | **PASS** (gen=runtime; ledger order+ids) |
+| 2 | Codex → Claude | **PASS** |
+| 3 | FreshConversation no stack | **PASS** |
+| 4 | Crash recovery post_stop | **PASS** (reuse gen; no double-launch) |
+| 4b | Stale wrong-gen → uncertain | **PASS** |
+| 5 | Confirmed-alive rollback | **PASS** |
+| 5b | Rollback persist fail → uncertain | **PASS** |
+| 6 | Terminal fence + mux write suppress | **PASS** |
+| 7 | post_stop fail blocks launch | **PASS** |
+
+Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Override only; **production `switch_supported` remains false**.
+
+**Still deferred:** live Claude/Codex desktop processes (needs Service/API/CLI).
 
 ## Still open before accept / API / CLI
 
-1. ~~Broader adversarial unit coverage~~ (see table above) — **manual dogfood still required**
-2. Promote `switch_supported` only after dogfood checklist
+1. ~~Manager-level dogfood checklist~~ — **recorded in PHASE2A_DOGFOOD.md** (live agent path still open)
+2. Promote `switch_supported` only after live-agent dogfood + this log accepted
 3. Service/API/CLI with host role-map authorized targets (no free-form harness exposure)

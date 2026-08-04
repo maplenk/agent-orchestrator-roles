@@ -1,0 +1,94 @@
+# Phase 2A dogfood evidence
+
+**Reviewed code SHA (checkpoint):** `2d19ad59d97d00b904e97e6cde85d9293831295e`  
+**Branch:** `roles/multi-sub-v1`  
+**Remote:** `origin/roles/multi-sub-v1` @ `2d19ad59` (pushed before dogfood)  
+**Date (UTC+5:30):** 2026-08-04  
+
+## Production capability stance (unchanged)
+
+| Harness | `SwitchSupported` | Evidence |
+|---------|-------------------|----------|
+| `claude-code` | **false** | `capabilities.For` + `TestDogfood…/0` + `capabilities_test` |
+| `codex` | **false** | same |
+| Dogfood exercise path | `switchCapsOverride` **only** | never flips production registry |
+
+**Promotion rule:** do **not** set `SwitchSupported=true` until this log’s checklist is accepted **and** live-agent desktop dogfood (when API/CLI exists) is also recorded.
+
+## Scope of this dogfood run
+
+| Layer | Status |
+|-------|--------|
+| Manager saga (SwitchWorker / Fresh / Recover) | **Executed** via `TestDogfood_Phase2AChecklist` |
+| Terminal `AllowTerminalInput` + mux Write suppress | **Executed** (manager fence + `TestServeWriteSuppressedWhenInputGateBlocks`) |
+| Lifecycle generation = runtime launch id | **Executed** (ledger + `RuntimeLaunchID` equality) |
+| Production refuse without override | **Executed** |
+| Live Claude/Codex binaries in desktop | **Deferred** — no production API/CLI; `switch_supported=false` blocks product path by design |
+
+Manager-level dogfood is the recoverable evidence bound to `2d19ad59`. Live agent process dogfood remains a separate gate after API/CLI.
+
+## How to re-run
+
+```bash
+cd backend
+git rev-parse HEAD   # expect dogfood harness commit after 2d19ad59, or 2d19ad59 + local harness
+AO_DOGFOOD_EVIDENCE_DIR=/tmp/ao-dogfood-evidence \
+  go test ./internal/session_manager/ -run 'TestDogfood_Phase2AChecklist' -count=1 -v
+go test ./internal/terminal/ -run 'TestServeWriteSuppressedWhenInputGateBlocks' -count=1
+go test ./internal/roles/capabilities/ -count=1
+```
+
+## Checklist results
+
+| # | Item | Result | Generation / ledger evidence |
+|---|------|--------|------------------------------|
+| 0 | Production `switch_supported=false`; SwitchWorker refuses without override | **PASS** | `ErrSwitchNotSupported` with no override |
+| 1 | Claude → Codex worker switch | **PASS** | `gen=gen-c2x-1` = `RuntimeLaunchID`; phases `[requested, pre_stop, post_stop, target_ack]`; stable ids `dog-c2x:gen-c2x-1:{phase}`; cross-harness model cleared (`model=""`) |
+| 2 | Codex → Claude reverse | **PASS** | `gen=gen-x2c-1`; same phase order; pending cleared; source model not leaked |
+| 3 | Same-harness FreshConversation (no handoff stack) | **PASS** | `gen=gen-fresh-2`; `handoff_count=1`; `kind=fresh_conversation`; original task retained |
+| 4 | Crash mid-switch (post_stop before launch/ack) → recover | **PASS** | Reused `gen-crash-1` for ledger **and** runtime; `create=1`; phases include `target_ack`; second recover does not double-launch |
+| 4b | Crash recovery: live wrong-gen → uncertain | **PASS** | `ErrSwitchUncertain`; `create=0` |
+| 5 | Confirmed-alive pre-stop → rollback usable source | **PASS** | Pending cleared; prompt/handle/agent/launch restored; terminal allow on handle |
+| 5b | Rollback persist fail → uncertain | **PASS** | `ErrSwitchUncertain`; pending retained |
+| 6 | Terminal fence (session id, runtime handle, pending source handle) | **PASS** | `ErrSwitchInProgress` on all three keys; shell terminal allowed |
+| 6b | Terminal mux Write suppressed under InputGate | **PASS** | `TestServeWriteSuppressedWhenInputGateBlocks` — PTY write empty; error frame `input blocked` |
+| 7 | post_stop append fail blocks launch/ack | **PASS** | `ErrSwitchPostStop`; `create=0`; no `target_ack` |
+
+### Raw evidence dump (manager checklist)
+
+```
+=== Phase 2A dogfood checklist (manager-level) ===
+note: production SwitchSupported remains false for claude-code and codex
+override: switchCapsOverride=testSwitchCaps (dogfood only)
+PASS 0: production SwitchSupported=false; SwitchWorker refuses without override
+PASS 1: claude→codex gen=gen-c2x-1 runtime=gen-c2x-1 phases=[requested pre_stop post_stop target_ack] ids=[dog-c2x:gen-c2x-1:requested dog-c2x:gen-c2x-1:pre_stop dog-c2x:gen-c2x-1:post_stop dog-c2x:gen-c2x-1:target_ack] model=""
+PASS 2: codex→claude gen=gen-x2c-1 phases=[requested pre_stop post_stop target_ack] pending=false
+PASS 3: fresh×2 gen=gen-fresh-2 handoff_count=1 kind=fresh_conversation
+PASS 4: crash recovery gen=gen-crash-1 runtime=gen-crash-1 create=1 phases=[requested pre_stop post_stop target_ack] no_double_launch
+PASS 4b: stale-alive wrong-gen → ErrSwitchUncertain create=0
+PASS 5: confirmed-alive → rollback pending; source usable handle=rt-1
+PASS 5b: rollback persist fail → ErrSwitchUncertain pending_retained=true
+PASS 6: terminal fence session_id + runtime_handle + pending_source_handle; shell allowed
+PASS 7: post_stop append fail → ErrSwitchPostStop create=0 no_ack
+```
+
+## Generation / ownership invariants verified
+
+1. **Single generation:** ledger `GenerationID` == target `RuntimeLaunchID` (ForceLaunchID).
+2. **Stable ledger ids:** `{session}:{gen}:{phase}` (requested / pre_stop / post_stop / target_ack).
+3. **Promote after ack only:** harness remains source until durable `target_ack` (covered by existing unit tests + dogfood paths clearing pending only post-ack).
+4. **Recovery:** post_stop-present incomplete saga launches once with pending gen; wrong-gen live → `ErrSwitchUncertain` (no second target).
+5. **Input ownership:** pending fences terminal by session id, live handle, and pending source handle.
+
+## Explicit non-claims
+
+- Did **not** run interactive Claude Code or Codex CLI agent processes end-to-end in the desktop app.
+- Did **not** promote `switch_supported`.
+- Did **not** expose Service/HTTP/CLI switch APIs.
+
+## Next before promotion
+
+1. Accept manager-level dogfood results above (this document).
+2. Land Service/API/CLI with host role-map authorized targets.
+3. Live desktop dogfood: real Claude↔Codex implementor session + crash kill/restart with DB ledger inspection.
+4. Only then flip `SwitchSupported` for Claude/Codex in `capabilities.For`.
