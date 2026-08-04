@@ -400,6 +400,35 @@ type SendSessionMessageResponse struct {
 	Message   string           `json:"message"`
 }
 
+// SwitchWorkerRequest is the body of POST /api/v1/sessions/{sessionId}/switch.
+// Target harness must be host-authorized via project roleMap (binding + failover).
+// Production switch_supported remains false until dogfood promotion.
+type SwitchWorkerRequest struct {
+	// TargetHarness is required for cross-harness switch. Same harness is treated as fresh.
+	TargetHarness string `json:"targetHarness,omitempty"`
+	// TargetModel is optional; must match an authorized (harness, model) pair when set.
+	TargetModel string `json:"targetModel,omitempty"`
+	// Objective is optional semantic handoff intent (untrusted for git/tests).
+	Objective string `json:"objective,omitempty" maxLength:"4096"`
+	// Fresh forces same-harness fresh conversation (ignores targetHarness).
+	Fresh bool `json:"fresh,omitempty"`
+}
+
+// SwitchWorkerResponse is the body of POST /api/v1/sessions/{sessionId}/switch
+// and /fresh-conversation.
+type SwitchWorkerResponse struct {
+	OK           bool             `json:"ok"`
+	SessionID    domain.SessionID `json:"sessionId"`
+	GenerationID string           `json:"generationId"`
+	Kind         string           `json:"kind" enum:"switch,fresh_conversation"`
+	Session      SessionView      `json:"session"`
+}
+
+// FreshConversationRequest is the body of POST /api/v1/sessions/{sessionId}/fresh-conversation.
+type FreshConversationRequest struct {
+	Objective string `json:"objective,omitempty" maxLength:"4096"`
+}
+
 // SessionPRFacts is the pull-request read shape returned under session PR routes.
 type SessionPRFacts struct {
 	URL            string                `json:"url"`

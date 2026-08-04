@@ -666,6 +666,19 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrAwaitingDecision):
 		return apierr.Conflict("SESSION_AWAITING_DECISION",
 			"Session is paused on a permission decision; answer it in the session terminal first", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchNotSupported):
+		return apierr.Conflict("SWITCH_NOT_SUPPORTED",
+			"Harness does not support worker switch yet (switch_supported=false until dogfood promotion)", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
+		return apierr.Conflict("SWITCH_IN_PROGRESS", "A worker switch is already in progress for this session", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchPostStop):
+		return apierr.Conflict("SWITCH_POST_STOP",
+			"Source stopped but target switch did not complete; handoff retained for recovery", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchUncertain):
+		return apierr.Conflict("SWITCH_UNCERTAIN",
+			"Switch runtime state is uncertain; inspect session and recover carefully", nil)
+	case errors.Is(err, sessionmanager.ErrNotWorker):
+		return apierr.Invalid("NOT_A_WORKER", "Only worker sessions support switch/fresh conversation", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):

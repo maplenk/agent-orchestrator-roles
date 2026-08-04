@@ -91,6 +91,12 @@ func (f *spawnGateSvc) SetTerminateOnPRMerge(context.Context, domain.SessionID, 
 	return domain.Session{}, nil
 }
 func (f *spawnGateSvc) Send(context.Context, domain.SessionID, string) error { return nil }
+func (f *spawnGateSvc) SwitchWorker(context.Context, sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error) {
+	return sessionsvc.SwitchWorkerOutcome{}, nil
+}
+func (f *spawnGateSvc) FreshConversation(context.Context, domain.SessionID, string) (sessionsvc.SwitchWorkerOutcome, error) {
+	return sessionsvc.SwitchWorkerOutcome{}, nil
+}
 func (f *spawnGateSvc) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {
 	return nil, nil
 }

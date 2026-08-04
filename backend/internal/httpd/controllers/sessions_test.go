@@ -243,6 +243,25 @@ func (f *fakeSessionService) Send(_ context.Context, _ domain.SessionID, message
 	return nil
 }
 
+func (f *fakeSessionService) SwitchWorker(_ context.Context, req sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error) {
+	s, ok := f.sessions[req.SessionID]
+	if !ok {
+		return sessionsvc.SwitchWorkerOutcome{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	kind := domain.LifecycleKindSwitch
+	if req.Fresh || req.TargetHarness == "" || req.TargetHarness == s.Harness {
+		kind = domain.LifecycleKindFreshConversation
+	} else {
+		s.Harness = req.TargetHarness
+	}
+	f.sessions[req.SessionID] = s
+	return sessionsvc.SwitchWorkerOutcome{Session: s, GenerationID: "gen-test", Kind: kind}, nil
+}
+
+func (f *fakeSessionService) FreshConversation(ctx context.Context, id domain.SessionID, objective string) (sessionsvc.SwitchWorkerOutcome, error) {
+	return f.SwitchWorker(ctx, sessionsvc.SwitchWorkerRequest{SessionID: id, Objective: objective, Fresh: true})
+}
+
 func (f *fakeSessionService) ListPRs(_ context.Context, id domain.SessionID) ([]domain.PRFacts, error) {
 	if f.listPRErr != nil {
 		return nil, f.listPRErr

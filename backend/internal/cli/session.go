@@ -149,7 +149,127 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionRenameCommand(ctx))
 	cmd.AddCommand(newSessionCleanupCommand(ctx))
 	cmd.AddCommand(newSessionClaimPRCommand(ctx))
+	cmd.AddCommand(newSessionSwitchCommand(ctx))
+	cmd.AddCommand(newSessionFreshCommand(ctx))
 	return cmd
+}
+
+type sessionSwitchOptions struct {
+	session       string
+	targetHarness string
+	targetModel   string
+	objective     string
+	json          bool
+}
+
+type sessionFreshOptions struct {
+	session   string
+	objective string
+	json      bool
+}
+
+type switchWorkerAPIRequest struct {
+	TargetHarness string `json:"targetHarness,omitempty"`
+	TargetModel   string `json:"targetModel,omitempty"`
+	Objective     string `json:"objective,omitempty"`
+	Fresh         bool   `json:"fresh,omitempty"`
+}
+
+type freshConversationAPIRequest struct {
+	Objective string `json:"objective,omitempty"`
+}
+
+type switchWorkerAPIResponse struct {
+	OK           bool   `json:"ok"`
+	SessionID    string `json:"sessionId"`
+	GenerationID string `json:"generationId"`
+	Kind         string `json:"kind"`
+	Session      sessionDTO `json:"session"`
+}
+
+func newSessionSwitchCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionSwitchOptions
+	cmd := &cobra.Command{
+		Use:   "switch",
+		Short: "Switch a worker session to a role-map-authorized harness",
+		Long: `Switch a worker to a host-authorized target harness from the project role map
+(primary binding + failover.roles ladder). Free-form harnesses are rejected.
+
+Production switch_supported remains false until dogfood promotion; the daemon
+returns SWITCH_NOT_SUPPORTED until capabilities are promoted.`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return ctx.switchSession(cmd.Context(), cmd, opts)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&opts.session, "session", "", "Session id (required)")
+	f.StringVar(&opts.targetHarness, "harness", "", "Target harness (required; must be role-map authorized)")
+	f.StringVar(&opts.targetModel, "model", "", "Optional target model (must match authorized pair when set)")
+	f.StringVar(&opts.objective, "objective", "", "Optional handoff objective")
+	f.BoolVar(&opts.json, "json", false, "Output as JSON")
+	return cmd
+}
+
+func newSessionFreshCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionFreshOptions
+	cmd := &cobra.Command{
+		Use:   "fresh",
+		Short: "Start a same-harness fresh conversation with host-compiled handoff",
+		Args:  noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return ctx.freshSession(cmd.Context(), cmd, opts)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&opts.session, "session", "", "Session id (required)")
+	f.StringVar(&opts.objective, "objective", "", "Optional handoff objective")
+	f.BoolVar(&opts.json, "json", false, "Output as JSON")
+	return cmd
+}
+
+func (c *commandContext) switchSession(ctx context.Context, cmd *cobra.Command, opts sessionSwitchOptions) error {
+	session := strings.TrimSpace(opts.session)
+	if session == "" {
+		return usageError{errors.New("usage: --session is required")}
+	}
+	harness := strings.TrimSpace(opts.targetHarness)
+	if harness == "" {
+		return usageError{errors.New("usage: --harness is required")}
+	}
+	path := "sessions/" + url.PathEscape(session) + "/switch"
+	var out switchWorkerAPIResponse
+	if err := c.postJSON(ctx, path, switchWorkerAPIRequest{
+		TargetHarness: harness,
+		TargetModel:   strings.TrimSpace(opts.targetModel),
+		Objective:     opts.objective,
+	}, &out); err != nil {
+		return err
+	}
+	if opts.json {
+		return writeJSON(cmd.OutOrStdout(), out)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "switched %s kind=%s generation=%s harness=%s\n",
+		out.SessionID, out.Kind, out.GenerationID, out.Session.Harness)
+	return nil
+}
+
+func (c *commandContext) freshSession(ctx context.Context, cmd *cobra.Command, opts sessionFreshOptions) error {
+	session := strings.TrimSpace(opts.session)
+	if session == "" {
+		return usageError{errors.New("usage: --session is required")}
+	}
+	path := "sessions/" + url.PathEscape(session) + "/fresh-conversation"
+	var out switchWorkerAPIResponse
+	if err := c.postJSON(ctx, path, freshConversationAPIRequest{Objective: opts.objective}, &out); err != nil {
+		return err
+	}
+	if opts.json {
+		return writeJSON(cmd.OutOrStdout(), out)
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "fresh %s generation=%s harness=%s\n",
+		out.SessionID, out.GenerationID, out.Session.Harness)
+	return nil
 }
 
 func newSessionListCommand(ctx *commandContext) *cobra.Command {

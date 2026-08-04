@@ -75,8 +75,19 @@ Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Override only; **pr
 
 **Still deferred:** live Claude/Codex desktop processes (needs Service/API/CLI).
 
-## Still open before accept / API / CLI
+## Service / API / CLI (landed; caps still false)
 
-1. ~~Manager-level dogfood checklist~~ — **recorded in PHASE2A_DOGFOOD.md** (live agent path still open)
-2. Promote `switch_supported` only after live-agent dogfood + this log accepted
-3. Service/API/CLI with host role-map authorized targets (no free-form harness exposure)
+| Surface | Detail |
+|---------|--------|
+| Service | `SwitchWorker` / `FreshConversation` authorize via `roleMap` binding + `failover.roles` (`domain.SwitchTargetAuthorized`) |
+| HTTP | `POST /api/v1/sessions/{id}/switch`, `POST /api/v1/sessions/{id}/fresh-conversation` |
+| CLI | `ao session switch --session … --harness …`, `ao session fresh --session …` |
+| Errors | `SWITCH_TARGET_UNAUTHORIZED` (403), `SWITCH_NOT_SUPPORTED` (409 while caps false), post_stop/uncertain/in-progress |
+| Free-form harness | **Rejected** unless on host role-map authorized set |
+
+## Still open before promotion
+
+1. ~~Manager-level dogfood checklist~~ — **recorded in PHASE2A_DOGFOOD.md**
+2. ~~Service/API/CLI role-map targets~~ — **landed** (caps still false)
+3. Live desktop Claude↔Codex + crash/restart dogfood (controlled local-only cap enablement)
+4. Promote `switch_supported` in a **separate** final change

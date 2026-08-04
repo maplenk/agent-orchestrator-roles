@@ -179,6 +179,9 @@ var schemaNames = map[string]string{
 	"ControllersRollbackSessionResponse":          "RollbackSessionResponse",
 	"ControllersSendSessionMessageRequest":        "SendSessionMessageRequest",
 	"ControllersSendSessionMessageResponse":       "SendSessionMessageResponse",
+	"ControllersSwitchWorkerRequest":              "SwitchWorkerRequest",
+	"ControllersSwitchWorkerResponse":             "SwitchWorkerResponse",
+	"ControllersFreshConversationRequest":         "FreshConversationRequest",
 	"ControllersClaimPRResponse":                  "ClaimPRResponse",
 	"ControllersClaimPRRequest":                   "ClaimPRRequest",
 	"ControllersSessionPRFacts":                   "SessionPRFacts",
@@ -1073,6 +1076,34 @@ func sessionOperations() []operation {
 				// Conflict: the session is terminated, or paused on a permission
 				// decision (SESSION_AWAITING_DECISION) — the guarded send refuses
 				// to paste into a pending dialog.
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/switch", id: "switchWorker", tag: "sessions",
+			summary:    "Switch a worker session harness or start a fresh conversation (role-map authorized targets)",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.SwitchWorkerRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SwitchWorkerResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				// Conflict: switch_supported=false, in progress, post_stop, uncertain, terminated.
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/fresh-conversation", id: "freshConversation", tag: "sessions",
+			summary:    "Start a same-harness fresh conversation with host-compiled handoff",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.FreshConversationRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SwitchWorkerResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 			},

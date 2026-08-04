@@ -107,6 +107,12 @@ func (f *fakeSessionService) SetTerminateOnPRMerge(context.Context, domain.Sessi
 func (f *fakeSessionService) Send(context.Context, domain.SessionID, string) error {
 	return nil
 }
+func (f *fakeSessionService) SwitchWorker(context.Context, sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error) {
+	return sessionsvc.SwitchWorkerOutcome{}, nil
+}
+func (f *fakeSessionService) FreshConversation(context.Context, domain.SessionID, string) (sessionsvc.SwitchWorkerOutcome, error) {
+	return sessionsvc.SwitchWorkerOutcome{}, nil
+}
 
 func (f *fakeSessionService) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {
 	return nil, nil

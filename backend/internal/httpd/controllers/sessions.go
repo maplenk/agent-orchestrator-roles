@@ -80,6 +80,8 @@ type SessionService interface {
 	SetPreview(ctx context.Context, id domain.SessionID, previewURL string) (domain.Session, error)
 	SetTerminateOnPRMerge(ctx context.Context, id domain.SessionID, terminate bool) (domain.Session, error)
 	Send(ctx context.Context, id domain.SessionID, message string) error
+	SwitchWorker(ctx context.Context, req sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error)
+	FreshConversation(ctx context.Context, sessionID domain.SessionID, objective string) (sessionsvc.SwitchWorkerOutcome, error)
 	ListPRSummaries(ctx context.Context, id domain.SessionID) ([]sessionsvc.PRSummary, error)
 	ClaimPR(ctx context.Context, id domain.SessionID, ref string, opts sessionsvc.ClaimPROptions) (sessionsvc.ClaimPRResult, error)
 	WorkspaceWatchPaths(ctx context.Context, id domain.SessionID) ([]string, error)
@@ -160,6 +162,8 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/kill", c.kill)
 	r.Post("/sessions/{sessionId}/rollback", c.rollback)
 	r.Post("/sessions/{sessionId}/send", c.send)
+	r.Post("/sessions/{sessionId}/switch", c.switchWorker)
+	r.Post("/sessions/{sessionId}/fresh-conversation", c.freshConversation)
 	r.Post("/sessions/{sessionId}/activity", c.activity)
 	r.Get("/orchestrators", c.listOrchestrators)
 	r.Post("/orchestrators", c.spawnOrchestrator)
@@ -1003,6 +1007,63 @@ func (c *SessionsController) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, SendSessionMessageResponse{OK: true, SessionID: sessionID(r), Message: message})
+}
+
+func (c *SessionsController) switchWorker(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/switch")
+		return
+	}
+	var in SwitchWorkerRequest
+	if err := decodeJSON(r, &in); err != nil {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if len(in.Objective) > maxMessageLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "OBJECTIVE_TOO_LONG", "Objective is too long", nil)
+		return
+	}
+	out, err := c.Svc.SwitchWorker(r.Context(), sessionsvc.SwitchWorkerRequest{
+		SessionID:     sessionID(r),
+		TargetHarness: domain.AgentHarness(strings.TrimSpace(in.TargetHarness)),
+		TargetModel:   strings.TrimSpace(in.TargetModel),
+		Objective:     domain.SanitizeControlChars(in.Objective),
+		Fresh:         in.Fresh,
+	})
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SwitchWorkerResponse{
+		OK: true, SessionID: sessionID(r), GenerationID: out.GenerationID,
+		Kind: string(out.Kind), Session: sessionView(out.Session),
+	})
+}
+
+func (c *SessionsController) freshConversation(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/fresh-conversation")
+		return
+	}
+	var in FreshConversationRequest
+	// Empty body is allowed (EOF); other decode errors are client errors.
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	if len(in.Objective) > maxMessageLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "OBJECTIVE_TOO_LONG", "Objective is too long", nil)
+		return
+	}
+	out, err := c.Svc.FreshConversation(r.Context(), sessionID(r), domain.SanitizeControlChars(in.Objective))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SwitchWorkerResponse{
+		OK: true, SessionID: sessionID(r), GenerationID: out.GenerationID,
+		Kind: string(out.Kind), Session: sessionView(out.Session),
+	})
 }
 
 // activity records an agent activity-state signal reported by an agent hook

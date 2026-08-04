@@ -213,6 +213,23 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 			t.Fatal("cross-harness must not leak codex model to claude")
 		}
 		phases := ledgerPhases(st, res.GenerationID)
+		wantPhases := []domain.LifecycleLedgerPhase{
+			domain.LifecyclePhaseRequested,
+			domain.LifecyclePhasePreStop,
+			domain.LifecyclePhasePostStop,
+			domain.LifecyclePhaseTargetAck,
+		}
+		if len(phases) < len(wantPhases) {
+			t.Fatalf("phases=%v want at least %v", phases, wantPhases)
+		}
+		for i, p := range wantPhases {
+			if phases[i] != p {
+				t.Fatalf("phase[%d]=%s want %s full=%v", i, phases[i], p, phases)
+			}
+		}
+		if res.Session.Metadata.SwitchPending != nil {
+			t.Fatal("pending must clear after ack")
+		}
 		ev.add("PASS 2: codex→claude gen=%s phases=%v pending=%v",
 			res.GenerationID, phases, res.Session.Metadata.SwitchPending != nil)
 	})
@@ -303,16 +320,12 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		if res.Session.Harness != domain.HarnessCodex || res.Session.Metadata.SwitchPending != nil {
 			t.Fatalf("harness=%s pending=%v", res.Session.Harness, res.Session.Metadata.SwitchPending)
 		}
-		// Second recover must not double-launch.
+		// Second recover must not double-launch: pending is cleared after ack.
 		rt2 := &fakeRuntime{}
 		m2 := dogfoodManager(st, rt2)
 		_, err = m2.RecoverSwitchFromPostStop(ctx, id)
-		if !errors.Is(err, ErrSwitchNothingToRecover) && err != nil {
-			// After success, pending is cleared — nothing to recover is OK.
-			if !errors.Is(err, ErrSwitchNothingToRecover) {
-				// Accept "nothing" or not found style; if re-entry errors differently, surface it.
-				t.Logf("second recover err=%v (pending cleared expected)", err)
-			}
+		if !errors.Is(err, ErrSwitchNothingToRecover) {
+			t.Fatalf("second recover err=%v, want ErrSwitchNothingToRecover", err)
 		}
 		if rt2.created != 0 {
 			t.Fatalf("double-launch create=%d", rt2.created)

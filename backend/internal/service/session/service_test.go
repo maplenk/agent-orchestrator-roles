@@ -996,6 +996,11 @@ type fakeCommander struct {
 	killsAtSpawn    int
 	restoreErr      error
 	restoreResult   sessionmanager.RestoreResult
+	switchErr       error
+	switchRecord    domain.SessionRecord
+	switchCalls     int
+	freshCalls      int
+	lastSwitch      sessionmanager.SwitchRequest
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -1060,6 +1065,40 @@ func (f *fakeCommander) Cleanup(_ context.Context, project domain.ProjectID) (se
 }
 func (f *fakeCommander) RollbackSpawn(context.Context, domain.SessionID) (bool, bool, error) {
 	return false, false, nil
+}
+func (f *fakeCommander) SwitchWorker(_ context.Context, req sessionmanager.SwitchRequest) (sessionmanager.SwitchResult, error) {
+	if f.switchErr != nil {
+		return sessionmanager.SwitchResult{}, f.switchErr
+	}
+	f.switchCalls++
+	f.lastSwitch = req
+	rec := f.switchRecord
+	if rec.ID == "" {
+		rec = domain.SessionRecord{
+			ID: req.SessionID, ProjectID: "mer", Kind: domain.KindWorker,
+			Harness: req.TargetHarness,
+			Metadata: domain.SessionMetadata{RuntimeLaunchID: "gen-sw-1", Role: domain.SessionRoleBinding{RoleID: "implementor"}},
+		}
+	}
+	return sessionmanager.SwitchResult{
+		Session: rec, GenerationID: "gen-sw-1", Kind: domain.LifecycleKindSwitch,
+	}, nil
+}
+func (f *fakeCommander) FreshConversation(_ context.Context, id domain.SessionID, _ domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
+	if f.switchErr != nil {
+		return sessionmanager.SwitchResult{}, f.switchErr
+	}
+	f.freshCalls++
+	rec := f.switchRecord
+	if rec.ID == "" {
+		rec = domain.SessionRecord{
+			ID: id, ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+			Metadata: domain.SessionMetadata{RuntimeLaunchID: "gen-fr-1", Role: domain.SessionRoleBinding{RoleID: "implementor"}},
+		}
+	}
+	return sessionmanager.SwitchResult{
+		Session: rec, GenerationID: "gen-fr-1", Kind: domain.LifecycleKindFreshConversation,
+	}, nil
 }
 
 // TestCleanupMapsManagerResult: the service forwards both reclaimed and
