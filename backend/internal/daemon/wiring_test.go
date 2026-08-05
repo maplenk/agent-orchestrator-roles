@@ -613,6 +613,7 @@ func TestProjectRepoResolver_ResolvesRegisteredProject(t *testing.T) {
 // assert the daemon wiring invokes the correct methods without needing a real
 // runtime or worktree.
 type fakeSessionLifecycle struct {
+	drainReapErr     error
 	reconcileCalled  bool
 	restoreAllCalled bool
 	reconcileErr     error
@@ -621,6 +622,10 @@ type fakeSessionLifecycle struct {
 
 func (f *fakeSessionLifecycle) Kill(_ context.Context, _ domain.SessionID) (bool, error) {
 	return false, nil
+}
+
+func (f *fakeSessionLifecycle) DrainOrchestratorReapQueue(context.Context) error {
+	return f.drainReapErr
 }
 
 func (f *fakeSessionLifecycle) Reconcile(_ context.Context) error {

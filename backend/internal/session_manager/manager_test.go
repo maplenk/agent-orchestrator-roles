@@ -30,6 +30,12 @@ type fakeTemplateArtifact struct {
 }
 
 type fakeStore struct {
+	// orchestrator reap queue (migration 0046)
+	reapQueue      []domain.OrchestratorReapEntry
+	reapQueueErr   error
+	reapDeleteErr  error
+	reapDeleted    []domain.SessionID
+	reapAttempts   []domain.SessionID
 	sessions       map[domain.SessionID]domain.SessionRecord
 	pr             map[domain.SessionID]domain.PRFacts
 	projects       map[string]domain.ProjectRecord
@@ -133,6 +139,36 @@ func (f *fakeStore) UpdateSession(_ context.Context, rec domain.SessionRecord) e
 	f.sessions[rec.ID] = rec
 	return nil
 }
+
+// --- orchestrator reap queue (migration 0046) ---
+
+func (f *fakeStore) ListOrchestratorReapQueue(context.Context) ([]domain.OrchestratorReapEntry, error) {
+	if f.reapQueueErr != nil {
+		return nil, f.reapQueueErr
+	}
+	return f.reapQueue, nil
+}
+
+func (f *fakeStore) DeleteOrchestratorReapEntry(_ context.Context, id domain.SessionID) error {
+	if f.reapDeleteErr != nil {
+		return f.reapDeleteErr
+	}
+	out := f.reapQueue[:0]
+	for _, e := range f.reapQueue {
+		if e.SessionID != id {
+			out = append(out, e)
+		}
+	}
+	f.reapQueue = out
+	f.reapDeleted = append(f.reapDeleted, id)
+	return nil
+}
+
+func (f *fakeStore) RecordOrchestratorReapAttempt(_ context.Context, id domain.SessionID, _ time.Time) error {
+	f.reapAttempts = append(f.reapAttempts, id)
+	return nil
+}
+
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
 	r, ok := f.sessions[id]
 	return r, ok, nil

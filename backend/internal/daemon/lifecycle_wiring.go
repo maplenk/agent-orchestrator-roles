@@ -120,6 +120,10 @@ func (l *lifecycleStack) Stop() {
 type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
+	// DrainOrchestratorReapQueue discharges migration 0046's obligations to
+	// confirm superseded orchestrators are dead. Fail-closed and FATAL at boot,
+	// unlike Reconcile — so it is listed separately rather than folded into it.
+	DrainOrchestratorReapQueue(ctx context.Context) error
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
 	// AllowTerminalInput is the terminal mux input gate (switch-pending fence).
 	// Required so daemon wiring cannot silently drop the security boundary.

@@ -225,6 +225,15 @@ type Store interface {
 	GetTemplateArtifact(ctx context.Context, id string) (content []byte, sha string, ok bool, err error)
 	// AppendLifecycleLedger records an append-only switch/pause/fresh event.
 	AppendLifecycleLedger(ctx context.Context, rec domain.LifecycleLedgerRecord) error
+	// ListOrchestratorReapQueue returns outstanding obligations to confirm the
+	// death of superseded orchestrators (migration 0046). A missing table must
+	// surface as an error, never as an empty queue.
+	ListOrchestratorReapQueue(ctx context.Context) ([]domain.OrchestratorReapEntry, error)
+	// DeleteOrchestratorReapEntry discharges one obligation. Only ever called
+	// after death is authoritatively confirmed.
+	DeleteOrchestratorReapEntry(ctx context.Context, id domain.SessionID) error
+	// RecordOrchestratorReapAttempt stamps a failed drain for visibility.
+	RecordOrchestratorReapAttempt(ctx context.Context, id domain.SessionID, at time.Time) error
 	// ListLifecycleLedger returns events for a session oldest-first.
 	ListLifecycleLedger(ctx context.Context, sessionID domain.SessionID) ([]domain.LifecycleLedgerRecord, error)
 }

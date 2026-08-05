@@ -237,7 +237,7 @@ func TestRecover_SystemPromptTargetHarnessFooter(t *testing.T) {
 	m := New(Deps{
 		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
-		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
 		NewLaunchID: func() string { return "must-not-mint" },
 	})
 	m.switchCapsOverride = testSwitchCaps
@@ -300,7 +300,7 @@ func TestSwitchWorker_DestroyErrorStillAliveIsPreStop(t *testing.T) {
 	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
 
 	rt := &fakeRuntime{
-		destroyErr:   errors.New("cleanup failed"),
+		destroyErr:    errors.New("cleanup failed"),
 		aliveByHandle: map[string]bool{"rt-1": true}, // still alive after destroy
 	}
 	m := New(Deps{
@@ -556,7 +556,7 @@ func TestLedgerPhaseIdsAreStable(t *testing.T) {
 	m := New(Deps{
 		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
-		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
 		NewLaunchID: func() string { return "stable-gen" },
 	})
 	m.switchCapsOverride = testSwitchCaps
@@ -655,7 +655,7 @@ func TestRecover_UsesPendingPayloadWithoutPostStop(t *testing.T) {
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
-		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
 		NewLaunchID: func() string { return "should-not-use" },
 	})
 	m.switchCapsOverride = testSwitchCaps
@@ -855,7 +855,7 @@ func TestRecover_PostStopAppendFailBlocksLaunch(t *testing.T) {
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
-		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
 		NewLaunchID: func() string { return "gen-ps-fail" },
 	})
 	m.switchCapsOverride = testSwitchCaps
@@ -894,7 +894,7 @@ func TestRecover_EnsuresPostStopBeforeLaunch(t *testing.T) {
 	m := New(Deps{
 		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
-		LookPath: func(string) (string, error) { return "/bin/true", nil },
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
 		NewLaunchID: func() string { return "gen-ps" },
 	})
 	m.switchCapsOverride = testSwitchCaps

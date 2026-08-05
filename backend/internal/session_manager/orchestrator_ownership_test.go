@@ -709,9 +709,14 @@ type recordingShellCloser struct {
 	mu       sync.Mutex
 	drained  []domain.SessionID
 	released int
+	// err, when set, simulates shells that cannot be confirmed closed.
+	err error
 }
 
 func (c *recordingShellCloser) BeginSessionTeardown(_ context.Context, id domain.SessionID) (func(), error) {
+	if c.err != nil {
+		return nil, c.err
+	}
 	c.mu.Lock()
 	c.drained = append(c.drained, id)
 	c.mu.Unlock()

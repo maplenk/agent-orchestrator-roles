@@ -341,6 +341,21 @@ func Run() error {
 		log.Warn("restore mobile bridge on boot failed", "err", err)
 	}
 
+	// Discharge superseded-orchestrator reap obligations BEFORE the reconcile
+	// passes below, which reap leaked runtimes generically and then restore
+	// shutdown-saved sessions.
+	//
+	// Unlike everything else in this block this is FATAL, and deliberately not
+	// routed through Reconcile: Reconcile's errors are logged and boot
+	// continues, which is the wrong contract here. A queue entry means a
+	// superseded orchestrator's process may still be live inside the canonical
+	// workspace its successor now owns, and serving in that state is exactly
+	// what migration 0046's constraint exists to prevent. A missing queue table
+	// is likewise fatal rather than read as "nothing is owed".
+	if reapErr := sessMgr.DrainOrchestratorReapQueue(ctx); reapErr != nil {
+		return fmt.Errorf("drain orchestrator reap queue: %w", reapErr)
+	}
+
 	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and
 	// terminate dead ones, reap leaked tmux, then restore shutdown-saved
 	// sessions. Best-effort: a failure is logged but never blocks boot. Placed
