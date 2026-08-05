@@ -20,4 +20,17 @@ This file is documentation only.
 | `limit_detection_supported` | Phase 3 |
 | `read_only_enforced` | OS/sandbox workspace write denial |
 
-Validated at config-save (spawn/RO; failover rungs also require `switch_supported` once any production cell is on), launch, restore, and switch.
+Validated at config-save, launch, restore, and switch.
+
+At config-save, once any production `switch_supported` cell is on, `switch_supported`
+is required on **both** sides of a failover ladder:
+
+| Position | Requirement |
+|----------|-------------|
+| Failover rung | `switch_supported` — it is a switch *target* |
+| Primary binding of a role with a **non-empty** ladder | `switch_supported` — it is the switch *source* |
+| Primary binding of a role with **no** ladder | spawn/RO only; a switch-incapable harness (Pi) stays valid as spawn-only |
+
+A ladder whose owning primary cannot originate a switch is rejected at config-save
+rather than deferring to `ErrSwitchNotSupported` at runtime (DoD invariant 9: no
+silent degrade).

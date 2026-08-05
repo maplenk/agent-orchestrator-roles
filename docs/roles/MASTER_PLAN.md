@@ -103,7 +103,9 @@ Phase 1 includes **capability validation** when saving role map:
 for each role:
   require harness.spawn_supported
   if !workspaceWrites: require harness.read_only_enforced
-  if role used in switch paths: require harness.switch_supported when binding claims switch
+  if role has a non-empty failover ladder:
+    require harness.switch_supported          # primary is the switch source
+    require rung.harness.switch_supported     # every rung is a switch target
 ```
 
 ---
@@ -193,11 +195,7 @@ On switch: write **immutable switch-history record** with prior harness/model + 
     "mode": "manual",
     "roles": {
       "implementor": [
-        { "harness": "pi", "model": "kimi/…" },
-        { "harness": "grok", "model": null }
-      ],
-      "ui": [
-        { "harness": "pi", "model": "zai/…" }
+        { "harness": "codex", "model": null }
       ]
     }
   },
@@ -208,6 +206,18 @@ On switch: write **immutable switch-history record** with prior harness/model + 
 }
 ```
 
+**Validity note (post Phase 2A promotion).** The ladder above is constrained by the
+capability matrix: every rung **and** the primary binding of any role that has a
+non-empty ladder must advertise `switch_supported` — the primary is the switch
+*source*. Today that is `claude-code` and `codex` only, so `pi`/`grok` rungs, and a
+ladder on the Pi-backed `ui` role, are rejected at config-save until those cells are
+promoted. Pi remains valid as a **spawn-only** primary with no ladder, which is why
+`ui` has none here.
+
+`limits` is **Phase 3A design intent and is not on `domain.RoleMap` yet**; sending it
+today fails strict decode. For a currently valid, literally pasteable map see
+[`examples/role-map.strict.example.json`](examples/role-map.strict.example.json).
+
 ### 4.6 Failover rules (fully deterministic)
 
 | Rule | Spec |
@@ -217,7 +227,7 @@ On switch: write **immutable switch-history record** with prior harness/model + 
 | Role preserved | Failover never changes `role_id` / template semantic role |
 | Cursor | Persist `failover_cursor` per incident; advance only on successful target ack |
 | Cap | `maxFailoversPerIncident`; then stay paused |
-| Validation | Every rung must pass capability matrix (`spawn_supported`; `switch_supported` if switch path; `limit_detection_supported` for auto) |
+| Validation | Every rung **and the primary binding of any role with a non-empty ladder** must pass the capability matrix (`spawn_supported`; `switch_supported` — the primary is the switch source, the rungs are targets; `limit_detection_supported` for auto) |
 | Reject | Invalid / unsupported rungs at config save time |
 
 ---
@@ -263,7 +273,7 @@ Append-only records for: switch, pause, resume, failover, fresh-conversation.
 | Capability | Required for |
 |------------|----------------|
 | `spawn_supported` | Role binding |
-| `switch_supported` | Switch / failover target |
+| `switch_supported` | Switch / failover **source and target** (primary of a laddered role, and every rung) |
 | `limit_detection_supported` | Auto pause/failover reliance |
 | `read_only_enforced` | `workspaceWrites: false` roles |
 

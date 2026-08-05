@@ -84,7 +84,7 @@ Harness: `TestDogfood_Phase2AChecklist` + terminal mux test. Live evidence: [`PH
 | CLI | `ao session switch|fresh` attach `spawnCallerHeaders()` (managed-session no-upgrade) |
 | Desktop | `applyOperatorSpawnHeaders` covers switch/fresh paths |
 | Errors | `SWITCH_AUTH_REQUIRED`, `SWITCH_TARGET_UNAUTHORIZED`, `TARGET_MODEL_REQUIRED`, `SWITCH_NOT_SUPPORTED` |
-| Failover config-save | `ValidateRoleMap` checks failover rungs for spawn + inherited RO + **switch_supported** (active after promotion) |
+| Failover config-save | `ValidateRoleMap` checks failover rungs for spawn + inherited RO + **switch_supported**, and requires **switch_supported on the primary binding of any role with a non-empty ladder** (the switch source). Both active after promotion. |
 
 ## Phase 2A promotion checklist — all closed
 

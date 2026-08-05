@@ -1,6 +1,9 @@
 package capabilities
 
 import (
+	"bytes"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -187,6 +190,101 @@ func TestValidateRoleMap_FailoverRungsRequireSwitch(t *testing.T) {
 	err := ValidateRoleMap(m)
 	if err == nil || !strings.Contains(err.Error(), "switch_supported") {
 		t.Fatalf("err=%v want switch_supported reject on failover", err)
+	}
+}
+
+func TestValidateRoleMap_FailoverSourceRequiresSwitch(t *testing.T) {
+	// Inverse of TestValidateRoleMap_FailoverRungsRequireSwitch: the rung is
+	// switch-capable but the primary is not. Pi cannot originate a switch, so a
+	// ladder on a Pi-primary role must be rejected at config-save rather than
+	// deferring to ErrSwitchNotSupported at runtime.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"ui": {
+				Template: "ui-implementor", Harness: domain.HarnessPi,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{
+				"ui": {{Harness: domain.HarnessCodex}},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "switch_supported") {
+		t.Fatalf("err=%v want switch_supported reject on failover source", err)
+	}
+	if !strings.Contains(err.Error(), "roles[ui]") {
+		t.Fatalf("err=%v must attribute the reject to the primary binding, not a rung", err)
+	}
+}
+
+func TestValidateRoleMap_PiPrimaryWithoutLadderAllowed(t *testing.T) {
+	// Guard against over-rejection: a switch-incapable harness is still a valid
+	// spawn-only primary. Only a configured ladder makes it a switch source.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"ui": {
+				Template: "ui-implementor", Harness: domain.HarnessPi,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+	}
+	if err := ValidateRoleMap(m); err != nil {
+		t.Fatalf("pi primary without a ladder must remain valid: %v", err)
+	}
+}
+
+func TestValidateRoleMap_EmptyLadderDoesNotRequireSwitch(t *testing.T) {
+	// An explicitly empty ladder is not a switch source.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"ui": {
+				Template: "ui-implementor", Harness: domain.HarnessPi,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{"ui": {}},
+		},
+	}
+	if err := ValidateRoleMap(m); err != nil {
+		t.Fatalf("empty ladder must not require switch_supported: %v", err)
+	}
+}
+
+// TestValidateRoleMap_ShippedStrictExampleValidates keeps the documented
+// copy-pasteable role map usable end to end. It reproduces the real set-config
+// path in order: strict decode (PUT /projects/{id}/config uses
+// DisallowUnknownFields, so an annotation key 400s before validation is even
+// reached), then domain validation, then the capability registry. Capability
+// promotion changes what a valid ladder may contain, so without this guard the
+// example silently becomes a config the daemon rejects.
+func TestValidateRoleMap_ShippedStrictExampleValidates(t *testing.T) {
+	const rel = "../../../../docs/roles/examples/role-map.strict.example.json"
+	raw, err := os.ReadFile(rel)
+	if err != nil {
+		// Deliberately fatal rather than a skip: docs/ is part of this monorepo
+		// checkout, so renaming or deleting the canonical example must break this
+		// guard instead of silently disabling it.
+		t.Fatalf("canonical example unreadable (%s): %v", rel, err)
+	}
+	var m domain.RoleMap
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&m); err != nil {
+		t.Fatalf("shipped example fails strict decode (set-config would 400 before "+
+			"validation; keep annotations in examples/README.md, not the JSON): %v", err)
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("shipped example fails domain validation: %v", err)
+	}
+	if err := ValidateRoleMap(m); err != nil {
+		t.Fatalf("shipped example fails capability validation: %v", err)
 	}
 }
 

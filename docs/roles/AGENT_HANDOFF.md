@@ -130,8 +130,8 @@ Source: `backend/internal/roles/capabilities/capabilities.go`
 
 1. Never flip `switch_supported` or `limit_detection_supported` in the same CL as large feature work when avoidable — **separate final promote CL**.
 2. Before promote: dogfood + review accept of gates.
-3. After Claude/Codex switch promote, `switchSupportedPromoted()` is **true** → `ValidateRoleMap` enforces `switch_supported` on **failover rungs**.
-4. Failover to Pi (or any non-switch harness) now **rejects at config-save**.
+3. After Claude/Codex switch promote, `switchSupportedPromoted()` is **true** → `ValidateRoleMap` enforces `switch_supported` on **failover rungs** *and* on the **primary binding of any role with a non-empty ladder** (the primary is the switch source).
+4. Failover **to** Pi (or any non-switch harness) now **rejects at config-save** — and so does a ladder configured **on** a Pi-primary role. Pi stays valid as a spawn-only primary with no ladder.
 5. Do **not** promote `limit_detection_supported` until Phase 3 structured-limit evidence.
 
 ---

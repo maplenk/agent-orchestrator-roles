@@ -88,6 +88,8 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | CLI `ao session switch` / `fresh` | **Done** | `spawnCallerHeaders()` no-upgrade |
 | Switch auth (operator / LAN / canSpawn + project scope) | **Accepted** | @ `83f7abfb` |
 | Failover config-save spawn + RO + switch | **Done** | `ValidateRoleMap`; switch_supported enforced after promotion |
+| Failover **source** requires switch (P2 close-out) | **Done** | Primary binding of a role with a non-empty ladder must advertise `switch_supported`; Pi-primary + Codex ladder now rejects at config-save instead of at runtime |
+| Shipped example role map valid + strict-decodable | **Done** | `role-map.strict.example.json` was rejected at config-save (pi/grok rungs) **and** failed `DisallowUnknownFields` on its `_comment` keys; annotations moved to `examples/README.md`, guarded by `TestValidateRoleMap_ShippedStrictExampleValidates` |
 | Ephemeral target role footer on switch launch | **Done** | @ `a3bc32be` |
 | Manager dogfood checklist | **Done** | `PHASE2A_DOGFOOD.md` @ `2d19ad59` |
 | Live dogfood evidence | **Accepted** | `PHASE2A_LIVE_DOGFOOD.md` (footer + clean crash) |
@@ -222,7 +224,7 @@ Already satisfied (re-verify on regressions):
 4. Pre-stop switch failure → source usable
 5. Post-stop → handoff retained, target retry
 6. One generation owns input at switch boundary
-9. Unsupported capabilities reject config **and** launch/restore (spawn/RO/switch for promoted cells)
+9. Unsupported capabilities reject config **and** launch/restore (spawn/RO/switch for promoted cells), on **both** sides of a failover ladder — source primary and every rung
 10. Lifecycle ledger for switch/fresh (pause/failover later)
 11. ObservedWorkspace verified only with AO provenance
 12. Failover default manual

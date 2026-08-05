@@ -6,8 +6,7 @@
     "orchestrator": {
       "template": "orchestrator",
       "harness": "codex",
-      "permissions": { "workspaceWrites": false, "canSpawn": true },
-      "_comment": "Codex only for WW=false in Phase 1 (OS sandbox). Claude read_only_enforced=false until dontAsk/OS sandbox."
+      "permissions": { "workspaceWrites": false, "canSpawn": true }
     },
     "implementor": {
       "template": "implementor",
@@ -33,8 +32,7 @@
     "mode": "manual",
     "roles": {
       "implementor": [
-        { "harness": "pi", "model": "" },
-        { "harness": "grok", "model": "" }
+        { "harness": "codex", "model": "" }
       ]
     }
   }

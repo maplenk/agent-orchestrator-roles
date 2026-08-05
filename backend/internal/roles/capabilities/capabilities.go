@@ -77,8 +77,10 @@ func For(h domain.AgentHarness) Caps {
 //
 // Failover rungs are executable switch/failover targets and inherit the owning
 // role's permissions for read-only enforcement. spawn_supported is always
-// required. switch_supported is enforced on failover rungs only after production
-// harnesses advertise SwitchSupported (same flip as capability promotion).
+// required. Once production harnesses advertise SwitchSupported, switch_supported
+// is required on every failover rung *and* on the primary binding of any role
+// with a non-empty ladder — the primary is the switch source, not just a spawn
+// target.
 func ValidateRoleMap(m domain.RoleMap) error {
 	if m.IsZero() {
 		return nil
@@ -86,6 +88,14 @@ func ValidateRoleMap(m domain.RoleMap) error {
 	for id, b := range m.Roles {
 		if err := validateExecutableTarget(id, b.Harness, b.Permissions, false); err != nil {
 			return err
+		}
+		// A configured ladder makes this role's primary the switch *source*. A
+		// harness that cannot originate a switch (Pi) would otherwise pass
+		// config-save and only fail later at runtime with ErrSwitchNotSupported —
+		// exactly the silent degrade DoD invariant 9 forbids.
+		if len(m.Failover.Roles[id]) > 0 && switchSupportedPromoted() && !For(b.Harness).SwitchSupported {
+			return fmt.Errorf("roles[%s]: harness %q has a failover ladder but does not support switch "+
+				"(switch_supported=false); remove the ladder or bind a switch-capable harness", id, b.Harness)
 		}
 	}
 	for roleID, targets := range m.Failover.Roles {
