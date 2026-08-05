@@ -512,3 +512,194 @@ func TestPublicOrchestratorMutationsBlockOnTheGate(t *testing.T) {
 		})
 	}
 }
+
+// pathRecordingWorkspace records every path any teardown touches, so a test can
+// assert a successor's worktrees were never destroyed. Wraps the shared fake
+// rather than modifying it.
+type pathRecordingWorkspace struct {
+	fakeWorkspace
+	mu        sync.Mutex
+	destroyed []string
+}
+
+func (w *pathRecordingWorkspace) record(path string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if path != "" {
+		w.destroyed = append(w.destroyed, path)
+	}
+}
+
+func (w *pathRecordingWorkspace) touched(path string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, p := range w.destroyed {
+		if p == path {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *pathRecordingWorkspace) Destroy(ctx context.Context, info ports.WorkspaceInfo) error {
+	w.record(info.Path)
+	return w.fakeWorkspace.Destroy(ctx, info)
+}
+
+func (w *pathRecordingWorkspace) ForceDestroy(ctx context.Context, info ports.WorkspaceInfo) error {
+	w.record(info.Path)
+	return w.fakeWorkspace.ForceDestroy(ctx, info)
+}
+
+// TestRetireForReplacement_ReleasesClaimOnBranchlessPath covers the
+// scratch/incomplete-handle branch, which terminates early and previously
+// returned without releasing the row's claim.
+func TestRetireForReplacement_ReleasesClaimOnBranchlessPath(t *testing.T) {
+	m, st, _ := ownershipHarness(t, nil, "mer")
+	// WorkspacePath set but no Branch => the degenerate retirement branch.
+	st.sessions["mer-a"] = domain.SessionRecord{
+		ID: "mer-a", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		CreatedAt: time.Now().Add(-time.Hour),
+		Metadata:  domain.SessionMetadata{WorkspacePath: "/ws/mer/orchestrator/canonical"},
+	}
+
+	if err := m.RetireForReplacement(context.Background(), "mer-a"); err != nil {
+		t.Fatalf("RetireForReplacement: %v", err)
+	}
+	got := st.sessions["mer-a"]
+	if got.Metadata.WorkspacePath != "" {
+		t.Fatalf("branchless retirement left a workspace claim: %q", got.Metadata.WorkspacePath)
+	}
+	if !got.IsTerminated {
+		t.Fatal("row must be terminated")
+	}
+}
+
+// workspaceProjectHarness registers a workspace-kind project and gives a
+// session more than one saved worktree row, which is what makes
+// workspaceProjectRows report a workspace project.
+func workspaceProjectHarness(t *testing.T) (*Manager, *fakeStore, *pathRecordingWorkspace) {
+	t.Helper()
+	st := newFakeStore()
+	st.num = 100
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer", Kind: domain.ProjectKindWorkspace, Path: "/repo/mer", Config: testRoleAgents(),
+	}
+	// Child repos must be registered, or sessionWorktreeRowsToRepoInfos rejects
+	// the saved rows and workspaceProjectRows never reports a workspace project
+	// — which would let the alias tests pass for the wrong reason.
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{
+		{ProjectID: "mer", Name: "child", RelativePath: "child"},
+		{ProjectID: "mer", Name: "api", RelativePath: "api"},
+		{ProjectID: "mer", Name: "web", RelativePath: "web"},
+	}
+	ws := &pathRecordingWorkspace{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}},
+		Workspace: ws, Store: st, Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st},
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+	return m, st, ws
+}
+
+func TestRetireForReplacement_ReleasesClaimOnWorkspaceProjectPath(t *testing.T) {
+	m, st, _ := workspaceProjectHarness(t)
+	const root = "/ws/mer/orchestrator/mer-orchestrator"
+	st.sessions["mer-a"] = domain.SessionRecord{
+		ID: "mer-a", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		CreatedAt: time.Now().Add(-time.Hour),
+		Metadata:  domain.SessionMetadata{WorkspacePath: root, Branch: "ao/mer-orchestrator"},
+	}
+	st.worktrees["mer-a"] = []domain.SessionWorktreeRecord{
+		{SessionID: "mer-a", RepoName: domain.RootWorkspaceRepoName, Branch: "ao/mer-orchestrator", WorktreePath: root, State: "active"},
+		{SessionID: "mer-a", RepoName: "child", Branch: "ao/mer-orchestrator", WorktreePath: root + "/child", State: "active"},
+	}
+
+	if err := m.RetireForReplacement(context.Background(), "mer-a"); err != nil {
+		t.Fatalf("RetireForReplacement: %v", err)
+	}
+	got := st.sessions["mer-a"]
+	if got.Metadata.WorkspacePath != "" || got.Metadata.Branch != "" {
+		t.Fatalf("workspace-project retirement left a claim: %+v", got.Metadata)
+	}
+	if !got.IsTerminated {
+		t.Fatal("row must be terminated")
+	}
+}
+
+// TestKill_WorkspaceProjectAliasCannotDestroySuccessorChildren is the legacy
+// shape: a superseded workspace-project row whose saved rows name the root AND
+// child worktrees the active successor now owns. Clearing the root WorkspaceInfo
+// alone is not enough — the saved rows must be suppressed too.
+func TestKill_WorkspaceProjectAliasCannotDestroySuccessorChildren(t *testing.T) {
+	m, st, ws := workspaceProjectHarness(t)
+	const root = "/ws/mer/orchestrator/mer-orchestrator"
+	child1, child2 := root+"/api", root+"/web"
+
+	rows := []domain.SessionWorktreeRecord{
+		{SessionID: "mer-old", RepoName: domain.RootWorkspaceRepoName, Branch: "ao/mer-orchestrator", WorktreePath: root, State: "active"},
+		{SessionID: "mer-old", RepoName: "api", Branch: "ao/mer-orchestrator", WorktreePath: child1, State: "active"},
+		{SessionID: "mer-old", RepoName: "web", Branch: "ao/mer-orchestrator", WorktreePath: child2, State: "active"},
+	}
+	st.sessions["mer-old"] = domain.SessionRecord{
+		ID: "mer-old", ProjectID: "mer", Kind: domain.KindOrchestrator, IsTerminated: true,
+		Metadata: domain.SessionMetadata{WorkspacePath: root, Branch: "ao/mer-orchestrator"},
+	}
+	st.worktrees["mer-old"] = rows
+	// The active successor owns the same canonical paths.
+	st.sessions["mer-new"] = domain.SessionRecord{
+		ID: "mer-new", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		Metadata: domain.SessionMetadata{WorkspacePath: root, Branch: "ao/mer-orchestrator"},
+	}
+
+	if _, err := m.Kill(context.Background(), "mer-old"); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	for _, p := range []string{root, child1, child2} {
+		if ws.touched(p) {
+			t.Errorf("killed %q, which the active orchestrator owns", p)
+		}
+	}
+	if st.sessions["mer-new"].IsTerminated {
+		t.Fatal("active orchestrator was terminated")
+	}
+}
+
+// TestCleanupAllProjects_BlocksOnEachProjectGate pins the unfiltered path:
+// Cleanup("") must serialize against real per-project mutations, not against a
+// synthetic empty-project gate.
+func TestCleanupAllProjects_BlocksOnEachProjectGate(t *testing.T) {
+	m, st, _ := ownershipHarness(t, nil, "alpha", "beta")
+	seedOrchestrator(st, "alpha-1", "alpha", time.Now().Add(-time.Hour), true)
+	seedOrchestrator(st, "beta-1", "beta", time.Now().Add(-time.Hour), true)
+
+	// Hold beta; unfiltered cleanup must not run to completion.
+	releaseBeta, err := m.acquireProjectOwnership(context.Background(), "beta")
+	if err != nil {
+		t.Fatalf("acquire beta: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, cleanErr := m.Cleanup(context.Background(), "")
+		done <- cleanErr
+	}()
+
+	select {
+	case <-done:
+		releaseBeta()
+		t.Fatal("Cleanup(\"\") completed while a real project's ownership gate was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	releaseBeta()
+	select {
+	case cleanErr := <-done:
+		if cleanErr != nil {
+			t.Fatalf("cleanup: %v", cleanErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Cleanup(\"\") never proceeded after the gate was released")
+	}
+}

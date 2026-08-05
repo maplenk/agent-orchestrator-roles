@@ -1035,24 +1035,35 @@ func (m *Manager) killUnderOwnership(ctx context.Context, id domain.SessionID) (
 	m.destroyBrowserBestEffort(ctx, id)
 	handle := runtimeHandle(rec.Metadata)
 	ws := workspaceInfo(rec)
+
 	// A superseded orchestrator row must never tear down the canonical
-	// workspace its successor now owns. Terminate the row, skip the workspace.
-	if aliased, aliasErr := m.canonicalWorkspaceHeldByActiveOrchestrator(ctx, rec); aliasErr != nil {
+	// workspace its successor now owns. This suppresses *shared workspace*
+	// teardown only — it is deliberately NOT applied to the runtime handle,
+	// which belongs to this row's own process and would otherwise be left
+	// running untracked after the row is terminated.
+	sharedWorkspace, aliasErr := m.canonicalWorkspaceHeldByActiveOrchestrator(ctx, rec)
+	if aliasErr != nil {
 		return false, fmt.Errorf("kill %s: %w", id, aliasErr)
-	} else if aliased {
-		m.logger.Warn("kill: workspace is owned by the active orchestrator; skipping teardown",
+	}
+	if sharedWorkspace {
+		m.logger.Warn("kill: workspace is owned by the active orchestrator; skipping workspace teardown",
 			"sessionID", id, "project", rec.ProjectID, "path", ws.Path)
 		ws = ports.WorkspaceInfo{}
-		handle = ports.RuntimeHandle{}
 	}
 
 	var workspaceProjectRows []ports.WorkspaceRepoInfo
 	workspaceProject := false
-	if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
-		return false, fmt.Errorf("kill %s: workspace rows: %w", id, rowErr)
-	} else if ok {
-		workspaceProjectRows = rows
-		workspaceProject = true
+	// Workspace-project rows name the root AND child worktrees. Under a shared
+	// canonical workspace those child paths are the successor's too, so the
+	// rows must be suppressed alongside ws — clearing ws alone would still let
+	// destroyWorkspaceProjectRows delete the live successor's children.
+	if !sharedWorkspace {
+		if rows, ok, rowErr := m.workspaceProjectRows(ctx, rec); rowErr != nil {
+			return false, fmt.Errorf("kill %s: workspace rows: %w", id, rowErr)
+		} else if ok {
+			workspaceProjectRows = rows
+			workspaceProject = true
+		}
 	}
 
 	if handle.ID != "" {
@@ -1185,10 +1196,7 @@ func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id dom
 				return fmt.Errorf("retire replacement %s: runtime: %w", id, err)
 			}
 		}
-		if err := m.lcm.MarkTerminated(ctx, id); err != nil {
-			return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
-		}
-		return nil
+		return m.finalizeRetirement(ctx, id)
 	}
 	// Gate shut this session's scoped shell terminals before either branch
 	// below force-removes its worktree (or worktrees, for a workspace
@@ -1235,16 +1243,23 @@ func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id dom
 	if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
 		return fmt.Errorf("retire replacement %s: clear restore markers: %w", id, err)
 	}
-	// Release this row's claim on the workspace before anything can spawn a
-	// successor onto it. The orchestrator worktree and branch are canonical per
-	// project, so a retired row that keeps recording them stays a live alias for
-	// whatever the successor owns — and any later path-keyed teardown (Kill,
-	// Cleanup) would destroy the *current* orchestrator's worktree. The worktree
-	// is already force-destroyed above, so these fields describe nothing.
-	if err := m.releaseRetiredWorkspaceClaim(ctx, rec.ID); err != nil {
+	return m.finalizeRetirement(ctx, id)
+}
+
+// finalizeRetirement is the single success tail shared by every retirement
+// branch — branchless/scratch, workspace-project, and single-repo alike.
+//
+// Release-then-terminate must happen on ALL of them: the orchestrator worktree
+// and branch are canonical per project, so a row that is terminated *without*
+// releasing its claim keeps naming whatever the successor spawns onto that
+// path, and any later path-keyed teardown (Kill, Cleanup) would destroy the
+// current orchestrator's worktree. Keeping this in one helper is what stops a
+// future branch from terminating without releasing.
+func (m *Manager) finalizeRetirement(ctx context.Context, id domain.SessionID) error {
+	if err := m.releaseRetiredWorkspaceClaim(ctx, id); err != nil {
 		return fmt.Errorf("retire replacement %s: %w", id, err)
 	}
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
+	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
 		return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
 	}
 	return nil
@@ -1348,10 +1363,7 @@ func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec 
 	if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
 		return fmt.Errorf("retire replacement %s: clear restore markers: %w", rec.ID, err)
 	}
-	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
-		return fmt.Errorf("retire replacement %s: mark terminated: %w", rec.ID, err)
-	}
-	return nil
+	return m.finalizeRetirement(ctx, rec.ID)
 }
 
 // RestoreWithMode relaunches a torn-down session and reports whether AO used
@@ -2557,12 +2569,63 @@ type CleanupResult struct {
 // orchestrator row must not be reclaimed while (or after) a replacement hands
 // that canonical path to a successor.
 func (m *Manager) Cleanup(ctx context.Context, project domain.ProjectID) (CleanupResult, error) {
+	if project == "" {
+		// Unfiltered cleanup is a supported request (HTTP/CLI clean every
+		// project). Acquiring the synthetic "" gate would serialize against
+		// nothing: real mutations are gated by actual ProjectID. Partition and
+		// take each project's own gate instead.
+		return m.cleanupAllProjects(ctx)
+	}
 	release, err := m.acquireProjectOwnership(ctx, project)
 	if err != nil {
 		return CleanupResult{}, fmt.Errorf("cleanup %s: %w", project, err)
 	}
 	defer release()
+	return m.cleanupProjectUnderOwnership(ctx, project)
+}
 
+// cleanupAllProjects runs cleanup one project at a time, each under that
+// project's own ownership gate. Project ids come from a first pass whose only
+// job is partitioning; every record acted on is re-read under the gate, so a
+// project that gains or retires an orchestrator in between is still handled
+// against current state.
+func (m *Manager) cleanupAllProjects(ctx context.Context) (CleanupResult, error) {
+	recs, err := m.store.ListAllSessions(ctx)
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("cleanup: %w", err)
+	}
+	seen := make(map[domain.ProjectID]struct{}, len(recs))
+	projects := make([]domain.ProjectID, 0, len(recs))
+	for _, rec := range recs {
+		if _, ok := seen[rec.ProjectID]; ok {
+			continue
+		}
+		seen[rec.ProjectID] = struct{}{}
+		projects = append(projects, rec.ProjectID)
+	}
+	sort.Slice(projects, func(i, j int) bool { return projects[i] < projects[j] })
+
+	combined := CleanupResult{Cleaned: []domain.SessionID{}, Skipped: []CleanupSkip{}}
+	for _, p := range projects {
+		release, acqErr := m.acquireProjectOwnership(ctx, p)
+		if acqErr != nil {
+			return CleanupResult{}, fmt.Errorf("cleanup %s: %w", p, acqErr)
+		}
+		res, cleanErr := m.cleanupProjectUnderOwnership(ctx, p)
+		release()
+		if cleanErr != nil {
+			return CleanupResult{}, cleanErr
+		}
+		combined.Cleaned = append(combined.Cleaned, res.Cleaned...)
+		combined.Skipped = append(combined.Skipped, res.Skipped...)
+	}
+	return combined, nil
+}
+
+// cleanupProjectUnderOwnership reclaims one project's terminated workspaces.
+// Callers must already hold that project's ownership gate.
+func (m *Manager) cleanupProjectUnderOwnership(ctx context.Context, project domain.ProjectID) (CleanupResult, error) {
+	// Re-read under the gate: any listing taken before it is stale.
 	recs, err := m.cleanupRecords(ctx, project)
 	if err != nil {
 		return CleanupResult{}, fmt.Errorf("cleanup %s: %w", project, err)
