@@ -148,7 +148,8 @@ Found while mapping; all predate this phase.
 | # | Defect | Evidence |
 |---|--------|----------|
 | D1 | **Two active orchestrators are reachable in-process.** `Service.Restore` takes no orchestrator lock and does no uniqueness check; boot `RestoreAll` relaunches every marker-carrying session with no per-project dedup. The service mutex is process-local and is not taken on either path. (It is *not* a cross-daemon gap — `datadirlock` has excluded a second daemon since `9480bdc7`.) | `service/session/service.go:438-449`, `:121-122`, `:422-436`; `manager.go:1720-1745` |
-| D2 | **Retire-succeeded-but-spawn-failed leaves the project with zero orchestrators and no recovery path.** `verifyOrchestratorReplacement` errors *after* the successor is live, with no rollback, and the predecessor is already destroyed. | `service/session/service.go:334-350`, `:374-389` |
+| D2a | **Spawn failure after retirement leaves zero orchestrators, with no recovery path.** The predecessor is already destroyed and no replacement intent is persisted, so nothing retries. | `service/session/service.go:334-350` |
+| D2b | **Verification failure misreports a live successor.** `verifyOrchestratorReplacement` errors *after* the successor is spawned and serving; the operation reports failure even though the project has a healthy orchestrator. Distinct from D2a — the owner count is correct, only the reported outcome is wrong. | `service/session/service.go:354`, `:374-389` |
 | ~~D3~~ | ~~Retire notice promises a "new workspace"~~ — **fixed** in `85065146` | — |
 | ~~D4~~ | ~~Workspace-kind projects break the orchestrator branch invariant~~ — **fixed** in `85065146` | — |
 | D5 | **Stale dead code/comment.** `lifecycle/manager.go:23-25` still documents a worker-idle "dispatcher [that] reads it to resolve the current orchestrator at delivery time"; that dispatcher was deleted in `2f6d98f2`. `sessionguard.NudgeCoordination` (`guard.go:158-168`) has zero production callers for the same reason. | as cited |
@@ -215,11 +216,19 @@ than merely being papered over.
 
 **The index is necessary but not sufficient, and must not be mistaken for the
 ownership boundary.** It arbitrates final row cardinality; it cannot serialize
-the operations that race to produce those rows. In particular it cannot prevent
-`Restore`, boot `RestoreAll`, a switch/recovery saga, and the retire→spawn
-replacement sequence from concurrently destroying or *adopting* the same
-canonical workspace — and `gitworktree.Create` adopts rather than fails
-(§2.1b), so the damage happens before any row is written.
+the operations that race to produce those rows, and how early it bites depends
+on the path:
+
+| Path | Row vs. workspace ordering | Does the index bite in time? |
+|------|----------------------------|------------------------------|
+| `Manager.Spawn` | Writes the **active seed row** (`manager.go:489`) *before* `createSessionWorkspace` (`:503`) | **Yes** — a competing new orchestrator spawn is rejected at `CreateSession`, before any worktree work, and `rollbackSpawnSeedRow` already handles the unwind |
+| `Restore` / boot `RestoreAll` | `workspace.Restore` creates or **adopts** the worktree (`manager.go:1769`, `:1875`, `:2084`) *before* `relaunchSession` → `MarkSpawned` (`:1421`) flips the existing terminated row to active | **No** — the constraint is only reached after the canonical workspace has already been adopted |
+
+So the late-constraint hazard is specific to **restore and any other transition
+that activates an existing row after creating or adopting the workspace**, not
+to new spawns. That is precisely where `gitworktree.Create`'s adopt-rather-than-
+fail behaviour (§2.1b) does damage the index cannot prevent, and it is why the
+gate — not the constraint — has to be the ownership boundary.
 
 **Required: a manager-owned, project-keyed gate** (or an equivalent durable
 CAS) that spans the *entire* operation, explicitly including the interval
@@ -233,6 +242,19 @@ between retirement and successor spawn. Requirements:
   boot `RestoreAll`, and retire-through-successor-spawn as one critical section.
 - Composes with the existing session-keyed `beginSwitch` single-flight
   (`switch.go:667-678`), which remains necessary and is not a substitute.
+
+**Prescribed shape (agreed at review):**
+
+| Rule | Detail |
+|------|--------|
+| One manager command | A single high-level manager entry point covers the whole ensure/retire→spawn operation — active-owner lookup, retire notice delivery, retirement, successor spawn |
+| Service keeps its layer | Authorization, API error mapping, telemetry, and `toSession` presentation stay in the service. The manager returns the raw record plus prompt metrics so the service can convert **after** the gate is released |
+| No lock handles cross the boundary | Do **not** expose `Lock()/Unlock()` or a callback-based lock to the service. The service never holds a second lock |
+| Public entry points self-acquire | Every public manager entry acquires the gate itself; private `…UnderOwnership` helpers do the work, preventing reentrant deadlock |
+| Lock order | **project ownership gate → session `beginSwitch` fence → lifecycle/store locks.** Fixed, documented, never inverted |
+| Reload after acquire | Re-read the session *after* taking the gate, before acting — pre-gate reads are stale by construction |
+| No bypass | Direct `Manager.Spawn(…KindOrchestrator)` and `RetireForReplacement` must not be able to skip the gate |
+| Per-project concurrency | Serialize identical project ids only; different projects stay fully concurrent |
 
 **Correction on prior reasoning.** An earlier draft justified the index partly
 as protection against a second daemon. That is wrong: `datadirlock` has taken an
@@ -263,14 +285,17 @@ add the index. Specify and test:
 
 ### 3.3 Handoff payload for an orchestrator
 
-`ObservedWorkspaceV1` is git-anchored and near-meaningless for an orchestrator
-(promptless, no task worktree, `manager.go:3287` explicitly permits an empty
-prompt for `KindOrchestrator`). Replace it, do not fake it:
+`ObservedWorkspaceV1` is a host-computed observation of a **worker session's
+git workspace**. An orchestrator has no task worktree (promptless;
+`manager.go:3287` explicitly permits an empty prompt for `KindOrchestrator`), so
+there is nothing for it to observe. Fabricating one would be a lie in an
+artifact whose entire value is that it is trustworthy.
 
 - Keep `SemanticHandoffV1` (agent-authored, untrusted) unchanged.
-- Define a **new versioned artifact `ObservedOrchestratorV1`** — do *not*
-  overload or reshape worker `ObservedWorkspaceV1`, which stays git-anchored and
-  worker-owned. Two observed types, one compiler rule.
+- Add a **sibling versioned artifact, `ObservedOrchestratorV1`**, used on the
+  orchestrator path. `ObservedWorkspaceV1` is unchanged and remains the
+  host-observed artifact for worker workspaces — nothing is replaced or
+  reshaped. Two observed types, one compiler rule.
 - Compiler rule stays: observed facts override semantic claims.
 
 `ObservedOrchestratorV1` contract, to be fixed before implementation:
@@ -340,7 +365,11 @@ generation-ownership failures Phase 2A spent its review budget eliminating.
    skips non-workers).
 5. Exactly one session answers "who is the orchestrator" for a project, across
    both resolvers — enforced by the database, and verified to hold through
-   `Restore`, boot `RestoreAll`, and a concurrent second daemon.
+   competing in-process `Restore` / `RestoreAll` / manager operations, or
+   through independent store connections. **Not** via a concurrent second
+   daemon: `datadirlock` excludes one before `sqlite.Open`, so that scenario is
+   unreachable. The existing daemon-lock regression stays where it is and keeps
+   covering that separately.
 5b. **Replacement is durably recoverable** (D2). "Never zero orchestrators" is
    not achievable under retire-first semantics — the canonical-workspace
    collision (§2.1b) forces retirement to release the worktree before the
