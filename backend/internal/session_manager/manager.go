@@ -1045,8 +1045,13 @@ func (m *Manager) killUnderOwnership(ctx context.Context, id domain.SessionID) (
 	if aliasErr != nil {
 		return false, fmt.Errorf("kill %s: %w", id, aliasErr)
 	}
+	// Execution surfaces — the agent runtime and this session's scoped shells —
+	// belong to THIS row no matter who owns the files, and must still be drained.
+	// Only filesystem teardown is suppressed, so keep the original
+	// workspace-presence signal for the shell gate below.
+	hadWorkspace := ws.Path != ""
 	if sharedWorkspace {
-		m.logger.Warn("kill: workspace is owned by the active orchestrator; skipping workspace teardown",
+		m.logger.Warn("kill: workspace is owned by the active orchestrator; skipping filesystem teardown",
 			"sessionID", id, "project", rec.ProjectID, "path", ws.Path)
 		ws = ports.WorkspaceInfo{}
 	}
@@ -1078,7 +1083,11 @@ func (m *Manager) killUnderOwnership(ctx context.Context, id domain.SessionID) (
 	// one in the same race window. A runtime that cannot be confirmed dead
 	// stops Kill here — same shape as a dirty-workspace refusal — rather than
 	// letting the worktree disappear out from under it.
-	if ws.Path != "" {
+	//
+	// Gated on hadWorkspace, not ws.Path: a superseded orchestrator's shells are
+	// scoped to the canonical workspace the successor now owns, so skipping this
+	// would leave them alive and writing inside it.
+	if hadWorkspace {
 		release, err := m.beginShellTerminalTeardown(ctx, id)
 		if err != nil {
 			// Same shape as the dirty-workspace refusal below: the worktree is
@@ -2642,17 +2651,23 @@ func (m *Manager) cleanupProjectUnderOwnership(ctx context.Context, project doma
 		}
 		// Never reclaim a canonical orchestrator workspace that the current
 		// owner is using: a superseded row can still name it.
-		if aliased, aliasErr := m.canonicalWorkspaceHeldByActiveOrchestrator(ctx, rec); aliasErr != nil {
+		aliased, aliasErr := m.canonicalWorkspaceHeldByActiveOrchestrator(ctx, rec)
+		if aliasErr != nil {
 			return CleanupResult{}, fmt.Errorf("cleanup %s: %w", project, aliasErr)
-		} else if aliased {
+		}
+		if h := runtimeHandle(rec.Metadata); h.ID != "" {
+			_ = m.runtime.Destroy(ctx, h) // best effort; usually already gone
+		}
+		if aliased {
+			// Only filesystem teardown is suppressed. This row's scoped shells
+			// still live inside the successor's canonical workspace, so drain
+			// them before reporting the workspace as preserved.
+			m.drainScopedShells(ctx, rec.ID)
 			result.Skipped = append(result.Skipped, CleanupSkip{
 				SessionID: rec.ID,
 				Reason:    "workspace is owned by the project's active orchestrator",
 			})
 			continue
-		}
-		if h := runtimeHandle(rec.Metadata); h.ID != "" {
-			_ = m.runtime.Destroy(ctx, h) // best effort; usually already gone
 		}
 		if reason := m.cleanupOne(ctx, rec, ws); reason != "" {
 			result.Skipped = append(result.Skipped, CleanupSkip{SessionID: rec.ID, Reason: reason})
@@ -2672,6 +2687,23 @@ func (m *Manager) cleanupProjectUnderOwnership(ctx context.Context, project doma
 // left alone this run (Cleanup records it in Skipped and can retry on a later
 // call) — most commonly because a scoped shell terminal could not be
 // confirmed closed, so reclaiming would pull the ground out from under it.
+// drainScopedShells closes any shell terminal scoped to a session without
+// removing its workspace. Used when filesystem teardown is deliberately
+// suppressed (the path belongs to another, still-active owner) but the
+// session's own execution surfaces must not be left running inside it.
+func (m *Manager) drainScopedShells(ctx context.Context, id domain.SessionID) {
+	release, err := m.beginShellTerminalTeardown(ctx, id)
+	if err != nil {
+		m.logger.Warn("shell terminal still open on a preserved workspace", "sessionID", id, "error", err)
+		return
+	}
+	if release != nil {
+		// Nothing is being removed, so the teardown gate is released
+		// immediately; the shells themselves are already closed.
+		release()
+	}
+}
+
 func (m *Manager) cleanupOne(ctx context.Context, rec domain.SessionRecord, ws ports.WorkspaceInfo) (skipReason string) {
 	release, closeErr := m.beginShellTerminalTeardown(ctx, rec.ID)
 	if closeErr != nil {

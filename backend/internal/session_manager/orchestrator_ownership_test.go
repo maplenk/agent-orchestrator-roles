@@ -703,3 +703,137 @@ func TestCleanupAllProjects_BlocksOnEachProjectGate(t *testing.T) {
 		t.Fatal("Cleanup(\"\") never proceeded after the gate was released")
 	}
 }
+
+// recordingShellCloser records which sessions had their scoped shells drained.
+type recordingShellCloser struct {
+	mu       sync.Mutex
+	drained  []domain.SessionID
+	released int
+}
+
+func (c *recordingShellCloser) BeginSessionTeardown(_ context.Context, id domain.SessionID) (func(), error) {
+	c.mu.Lock()
+	c.drained = append(c.drained, id)
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		c.released++
+		c.mu.Unlock()
+	}, nil
+}
+
+func (c *recordingShellCloser) didDrain(id domain.SessionID) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, got := range c.drained {
+		if got == id {
+			return true
+		}
+	}
+	return false
+}
+
+// aliasExecutionFixture builds a superseded workspace-project orchestrator that
+// shares the successor's canonical root and child worktrees, and still owns a
+// live runtime handle and scoped shells.
+func aliasExecutionFixture(t *testing.T) (*Manager, *fakeStore, *pathRecordingWorkspace, *fakeRuntime, *recordingShellCloser, []string) {
+	t.Helper()
+	st := newFakeStore()
+	st.num = 100
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer", Kind: domain.ProjectKindWorkspace, Path: "/repo/mer", Config: testRoleAgents(),
+	}
+	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{
+		{ProjectID: "mer", Name: "api", RelativePath: "api"},
+		{ProjectID: "mer", Name: "web", RelativePath: "web"},
+	}
+	ws := &pathRecordingWorkspace{}
+	rt := &fakeRuntime{}
+	shells := &recordingShellCloser{}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}},
+		Workspace: ws, Store: st, Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st},
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.SetShellTerminalCloser(shells)
+
+	const root = "/ws/mer/orchestrator/mer-orchestrator"
+	child1, child2 := root+"/api", root+"/web"
+	st.sessions["mer-old"] = domain.SessionRecord{
+		ID: "mer-old", ProjectID: "mer", Kind: domain.KindOrchestrator, IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: root, Branch: "ao/mer-orchestrator", RuntimeHandleID: "tmux-old",
+		},
+	}
+	st.worktrees["mer-old"] = []domain.SessionWorktreeRecord{
+		{SessionID: "mer-old", RepoName: domain.RootWorkspaceRepoName, Branch: "ao/mer-orchestrator", WorktreePath: root, State: "active"},
+		{SessionID: "mer-old", RepoName: "api", Branch: "ao/mer-orchestrator", WorktreePath: child1, State: "active"},
+		{SessionID: "mer-old", RepoName: "web", Branch: "ao/mer-orchestrator", WorktreePath: child2, State: "active"},
+	}
+	st.sessions["mer-new"] = domain.SessionRecord{
+		ID: "mer-new", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		Metadata: domain.SessionMetadata{WorkspacePath: root, Branch: "ao/mer-orchestrator", RuntimeHandleID: "tmux-new"},
+	}
+	return m, st, ws, rt, shells, []string{root, child1, child2}
+}
+
+// TestKill_AliasDrainsExecutionButPreservesSharedWorkspace pins the boundary:
+// suppression covers filesystem teardown only. The predecessor's own runtime and
+// scoped shells must still be drained, or a killed row keeps executing inside
+// the successor's canonical workspace.
+func TestKill_AliasDrainsExecutionButPreservesSharedWorkspace(t *testing.T) {
+	m, st, ws, rt, shells, sharedPaths := aliasExecutionFixture(t)
+
+	if _, err := m.Kill(context.Background(), "mer-old"); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if rt.destroyed == 0 {
+		t.Error("predecessor runtime must be destroyed even when its workspace is preserved")
+	}
+	if !shells.didDrain("mer-old") {
+		t.Error("predecessor scoped shells must be drained; they live in the successor's workspace")
+	}
+	for _, p := range sharedPaths {
+		if ws.touched(p) {
+			t.Errorf("removed %q, which the active orchestrator owns", p)
+		}
+	}
+	if st.sessions["mer-new"].IsTerminated {
+		t.Error("active orchestrator was terminated")
+	}
+}
+
+// TestCleanup_AliasDrainsExecutionButPreservesSharedWorkspace is the same
+// boundary on the cleanup path, which previously skipped the row wholesale.
+func TestCleanup_AliasDrainsExecutionButPreservesSharedWorkspace(t *testing.T) {
+	m, st, ws, rt, shells, sharedPaths := aliasExecutionFixture(t)
+
+	res, err := m.Cleanup(context.Background(), "mer")
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if rt.destroyed == 0 {
+		t.Error("predecessor runtime must be destroyed even when its workspace is preserved")
+	}
+	if !shells.didDrain("mer-old") {
+		t.Error("predecessor scoped shells must be drained; they live in the successor's workspace")
+	}
+	for _, p := range sharedPaths {
+		if ws.touched(p) {
+			t.Errorf("removed %q, which the active orchestrator owns", p)
+		}
+	}
+	var skipped bool
+	for _, s := range res.Skipped {
+		if s.SessionID == "mer-old" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("mer-old's workspace must be reported preserved: %+v", res)
+	}
+	if st.sessions["mer-new"].IsTerminated {
+		t.Error("active orchestrator was terminated")
+	}
+}
