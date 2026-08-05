@@ -1001,6 +1001,10 @@ type fakeCommander struct {
 	switchCalls     int
 	freshCalls      int
 	lastSwitch      sessionmanager.SwitchRequest
+	ensureCalls     int
+	ensureClean     bool
+	ensureCfg       ports.SpawnConfig
+	ensureReuse     domain.SessionRecord
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -1066,6 +1070,28 @@ func (f *fakeCommander) Cleanup(_ context.Context, project domain.ProjectID) (se
 func (f *fakeCommander) RollbackSpawn(context.Context, domain.SessionID) (bool, bool, error) {
 	return false, false, nil
 }
+
+// EnsureOrchestrator stands in for the manager's gated ownership command. The
+// retire→spawn sequence itself is exercised against the real Manager in
+// session_manager; here we only record that the service delegated, and reuse
+// Spawn so spawnErr/spawnRecord keep working.
+func (f *fakeCommander) EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (sessionmanager.EnsureOrchestratorResult, error) {
+	f.ensureCalls++
+	f.ensureClean = clean
+	f.ensureCfg = cfg
+	if f.ensureReuse.ID != "" {
+		return sessionmanager.EnsureOrchestratorResult{Record: f.ensureReuse, Reused: true}, nil
+	}
+	rec, promptBytes, systemPromptBytes, err := f.Spawn(ctx, cfg)
+	if err != nil {
+		return sessionmanager.EnsureOrchestratorResult{}, err
+	}
+	return sessionmanager.EnsureOrchestratorResult{
+		Record:            rec,
+		PromptBytes:       promptBytes,
+		SystemPromptBytes: systemPromptBytes,
+	}, nil
+}
 func (f *fakeCommander) SwitchWorker(_ context.Context, req sessionmanager.SwitchRequest) (sessionmanager.SwitchResult, error) {
 	if f.switchErr != nil {
 		return sessionmanager.SwitchResult{}, f.switchErr
@@ -1076,7 +1102,7 @@ func (f *fakeCommander) SwitchWorker(_ context.Context, req sessionmanager.Switc
 	if rec.ID == "" {
 		rec = domain.SessionRecord{
 			ID: req.SessionID, ProjectID: "mer", Kind: domain.KindWorker,
-			Harness: req.TargetHarness,
+			Harness:  req.TargetHarness,
 			Metadata: domain.SessionMetadata{RuntimeLaunchID: "gen-sw-1", Role: domain.SessionRoleBinding{RoleID: "implementor"}},
 		}
 	}
@@ -1152,70 +1178,32 @@ func TestTeardownProjectStopsOnKillError(t *testing.T) {
 	}
 }
 
-func TestSpawnOrchestratorCleanRetiresActiveOrchestratorsBeforeSpawn(t *testing.T) {
+func TestSpawnOrchestratorDelegatesOwnershipToManager(t *testing.T) {
+	// The retire->spawn sequence moved into the manager, which holds the
+	// project ownership gate across it. The service must delegate rather than
+	// reimplement any part of it: doing the lookup or the retirement here would
+	// reintroduce a window outside the gate. The sequence itself is asserted in
+	// session_manager (TestEnsureOrchestrator_CleanRetiresActiveBeforeSpawn).
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	// Two active orchestrators plus an unrelated worker and a terminated
-	// orchestrator that must be left alone.
 	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
-	st.sessions["mer-2"] = domain.SessionRecord{ID: "mer-2", ProjectID: "mer", Kind: domain.KindOrchestrator}
-	st.sessions["mer-3"] = domain.SessionRecord{ID: "mer-3", ProjectID: "mer", Kind: domain.KindWorker}
-	st.sessions["mer-4"] = domain.SessionRecord{ID: "mer-4", ProjectID: "mer", Kind: domain.KindOrchestrator, IsTerminated: true}
-
 	fc := &fakeCommander{}
 	svc := &Service{manager: fc, store: st}
 
 	if _, err := svc.SpawnOrchestrator(context.Background(), "mer", true); err != nil {
 		t.Fatalf("SpawnOrchestrator: %v", err)
 	}
-
-	if len(fc.retired) != 2 {
-		t.Fatalf("retired = %v, want the two active orchestrators", fc.retired)
+	if fc.ensureCalls != 1 || !fc.ensureClean {
+		t.Fatalf("ensureCalls=%d clean=%v, want one delegated clean replacement", fc.ensureCalls, fc.ensureClean)
 	}
-	if len(fc.sent) != 2 {
-		t.Fatalf("retire notices = %v, want the two active orchestrators", fc.sent)
+	if fc.ensureCfg.Kind != domain.KindOrchestrator {
+		t.Fatalf("delegated kind = %q, want orchestrator", fc.ensureCfg.Kind)
 	}
-	if !fc.spawned || fc.killsAtSpawn != 2 {
-		t.Fatalf("spawn must run after both retirements: spawned=%v retirementsAtSpawn=%d", fc.spawned, fc.killsAtSpawn)
+	if len(fc.retired) != 0 || len(fc.sent) != 0 {
+		t.Fatalf("service must not retire or notify directly: retired=%v sent=%v", fc.retired, fc.sent)
 	}
 	if len(fc.killed) != 0 {
 		t.Fatalf("interactive Kill must not be used for replacement: killed=%v", fc.killed)
-	}
-}
-
-func TestSpawnOrchestratorCleanContinuesWhenRetireNoticeFails(t *testing.T) {
-	st := newFakeStore()
-	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
-	fc := &fakeCommander{sendErr: errors.New("pane closed")}
-	svc := &Service{manager: fc, store: st}
-
-	if _, err := svc.SpawnOrchestrator(context.Background(), "mer", true); err != nil {
-		t.Fatalf("SpawnOrchestrator: %v", err)
-	}
-	if len(fc.retired) != 1 || fc.retired[0] != "mer-1" {
-		t.Fatalf("retired = %v, want mer-1 despite retire notice failure", fc.retired)
-	}
-	if !fc.spawned {
-		t.Fatal("replacement should still spawn when retire notice delivery fails")
-	}
-}
-
-func TestSpawnOrchestratorCleanRetireNoticeIsBranchNeutral(t *testing.T) {
-	st := newFakeStore()
-	st.projects["scratch"] = domain.ProjectRecord{ID: "scratch", Kind: domain.ProjectKindScratch}
-	st.sessions["scratch-1"] = domain.SessionRecord{ID: "scratch-1", ProjectID: "scratch", Kind: domain.KindOrchestrator}
-	fc := &fakeCommander{}
-	svc := &Service{manager: fc, store: st}
-
-	if _, err := svc.SpawnOrchestrator(context.Background(), "scratch", true); err != nil {
-		t.Fatalf("SpawnOrchestrator: %v", err)
-	}
-	if len(fc.sentMessages) != 1 {
-		t.Fatalf("retire messages = %d, want 1", len(fc.sentMessages))
-	}
-	if strings.Contains(strings.ToLower(fc.sentMessages[0]), "branch") {
-		t.Fatalf("retire notice must be branch-neutral, got %q", fc.sentMessages[0])
 	}
 }
 
@@ -1640,13 +1628,14 @@ func TestResumeAgentMapsManagerModeToServiceView(t *testing.T) {
 func TestSpawnGenericOrchestratorReturnsExistingActiveSession(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	st.sessions["mer-orch"] = domain.SessionRecord{
+	existing := domain.SessionRecord{
 		ID:        "mer-orch",
 		ProjectID: "mer",
 		Kind:      domain.KindOrchestrator,
 		Harness:   domain.HarnessCodex,
 	}
-	fc := &fakeCommander{}
+	st.sessions["mer-orch"] = existing
+	fc := &fakeCommander{ensureReuse: existing}
 	svc := &Service{manager: fc, store: st}
 
 	got, promptBytes, systemPromptBytes, err := svc.Spawn(context.Background(), ports.SpawnConfig{
@@ -1665,8 +1654,11 @@ func TestSpawnGenericOrchestratorReturnsExistingActiveSession(t *testing.T) {
 	if promptBytes != 0 || systemPromptBytes != 0 {
 		t.Fatalf("prompt sizes = (%d, %d), want zero for reused session", promptBytes, systemPromptBytes)
 	}
+	if fc.ensureClean {
+		t.Fatal("a generic orchestrator spawn must delegate with clean=false")
+	}
 	if fc.spawned {
-		t.Fatal("manager.Spawn must not be called when an active orchestrator already exists")
+		t.Fatal("no new session may be minted when an active orchestrator exists")
 	}
 }
 
@@ -1739,28 +1731,27 @@ func TestSpawnGenericWorkerUnaffectedByActiveOrchestrator(t *testing.T) {
 	}
 }
 
-func TestSpawnGenericOrchestratorSerializesConcurrentRequests(t *testing.T) {
+func TestSpawnGenericOrchestratorAlwaysDelegatesUnderConcurrency(t *testing.T) {
+	// Serialization is the manager's project ownership gate, asserted end to end
+	// by TestEnsureOrchestrator_SerializesSameProject in session_manager. What
+	// matters here is that the service never short-circuits an orchestrator
+	// spawn locally: every concurrent caller must reach the gated command, or
+	// the "is there already an orchestrator" check would happen outside the gate
+	// and could observe stale ownership.
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	fc := &fakeCommander{}
-	fc.spawnFunc = func(cfg ports.SpawnConfig) domain.SessionRecord {
-		rec := domain.SessionRecord{
-			ID:        "mer-orch",
-			ProjectID: cfg.ProjectID,
-			Kind:      domain.KindOrchestrator,
-			Harness:   cfg.Harness,
-		}
-		st.sessions[rec.ID] = rec
-		return rec
-	}
+	existing := domain.SessionRecord{ID: "mer-orch", ProjectID: "mer", Kind: domain.KindOrchestrator, Harness: domain.HarnessCodex}
+	st.sessions["mer-orch"] = existing
+	fc := &fakeCommander{ensureReuse: existing}
 	svc := &Service{manager: fc, store: st}
 	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindOrchestrator, Harness: domain.HarnessCodex}
 
+	const callers = 2
 	start := make(chan struct{})
-	results := make(chan domain.Session, 2)
-	errs := make(chan error, 2)
+	results := make(chan domain.Session, callers)
+	errs := make(chan error, callers)
 	var wg sync.WaitGroup
-	for i := 0; i < 2; i++ {
+	for i := 0; i < callers; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -1785,8 +1776,11 @@ func TestSpawnGenericOrchestratorSerializesConcurrentRequests(t *testing.T) {
 			t.Fatalf("returned id = %q, want mer-orch", session.ID)
 		}
 	}
-	if fc.spawnCalls != 1 {
-		t.Fatalf("manager.Spawn calls = %d, want 1", fc.spawnCalls)
+	if fc.ensureCalls != callers {
+		t.Fatalf("EnsureOrchestrator calls = %d, want %d: the service must not resolve ownership itself", fc.ensureCalls, callers)
+	}
+	if fc.spawned {
+		t.Fatal("no new session may be minted when an active orchestrator exists")
 	}
 	if len(st.sessions) != 1 {
 		t.Fatalf("session count = %d, want 1", len(st.sessions))
@@ -1800,31 +1794,24 @@ func TestSpawnGenericOrchestratorSerializesConcurrentRequests(t *testing.T) {
 func TestSpawnOrchestratorNoCleanReturnsExistingWhenActiveExists(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	// Pre-load an active orchestrator.
-	st.sessions["mer-1"] = domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
+	existing := domain.SessionRecord{ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator}
+	st.sessions["mer-1"] = existing
 
-	fc := &fakeCommander{}
+	fc := &fakeCommander{ensureReuse: existing}
 	svc := &Service{manager: fc, store: st}
 
 	got, err := svc.SpawnOrchestrator(context.Background(), "mer", false)
 	if err != nil {
 		t.Fatalf("SpawnOrchestrator: %v", err)
 	}
-	// Must return the existing orchestrator, not a newly minted one.
 	if got.ID != "mer-1" {
 		t.Fatalf("returned id = %q, want existing orchestrator mer-1", got.ID)
 	}
-	// Must NOT have called manager.Spawn (no duplicate created).
+	if fc.ensureClean {
+		t.Fatal("clean must be false on the idempotent path")
+	}
 	if fc.spawned {
-		t.Fatal("manager.Spawn must NOT be called when an active orchestrator already exists")
-	}
-	// Must NOT have killed anything.
-	if len(fc.killed) != 0 {
-		t.Fatalf("no kills expected with clean=false, got %v", fc.killed)
-	}
-	// Exactly one session in the store (no duplicate).
-	if len(st.sessions) != 1 {
-		t.Fatalf("session count = %d, want 1 (no duplicate)", len(st.sessions))
+		t.Fatal("no duplicate orchestrator may be minted")
 	}
 }
 

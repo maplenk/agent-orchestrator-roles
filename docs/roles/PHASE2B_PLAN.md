@@ -326,7 +326,7 @@ either path preserves now, which is the concrete P1 win for this phase.
 
 | Slice | Scope | Est. | Depends on |
 |-------|-------|------|------------|
-| **2B-0a** | **Project ownership gate**: manager-owned, project-keyed exclusion spanning switch/fresh, recovery, orchestrator `Restore`, boot `RestoreAll`, and retire-through-successor-spawn (§3.2) | 1–2 d | — |
+| ~~**2B-0a**~~ | **Landed.** Manager-owned, project-keyed gate; `EnsureOrchestrator` is the single gated ownership command covering lookup → retire notice → retirement → successor spawn. `Spawn(orchestrator)`, `RetireForReplacement` and orchestrator `RestoreWithMode` self-acquire via private `…UnderOwnership` helpers; the service delegates and keeps authorization, telemetry and presentation outside the gate. **Boot `RestoreAll` is not yet gated** — carried into 2B-0b, where it is needed anyway for duplicate reconciliation | done | — |
 | **2B-0b** | **Coordinator uniqueness**: migration 0046 partial unique index, plus the reconciliation spec in §3.2b (deterministic survivor, marker neutralization, probe-authoritative reap, restore preflight). Closes **D1** | 1–2 d | 2B-0a |
 | **2B-1** | Orchestrator in-place **fresh conversation**: parameterize the `KindWorker` guards (`switch.go:64`, `:254`, `manager.go:1673`, `service/session/switch.go:59`), `Reconcile` recovery for orchestrators, `ObservedOrchestratorV1` handoff, new ledger kind | 2–3 d | 2B-0b |
 | **2B-2** | Replacement **durable recoverability**: persist replacement intent before retirement so a zero-owner interval is always auto-recovered (**D2**, per DoD 5b) | 1–2 d | 2B-0b |

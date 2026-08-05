@@ -257,10 +257,15 @@ type Manager struct {
 	// workspace hook commands resolve back to this daemon. Tests inject a stub.
 	executable  func() (string, error)
 	newLaunchID func() string
-	// ownershipMu protects both resuming and switching maps (single lock order).
+	// ownershipMu protects resuming, switching, and the projectOwnership map
+	// (single lock order). It is never held while blocking on a project gate.
 	ownershipMu sync.Mutex
 	resuming    map[domain.SessionID]struct{}
 	switching   map[domain.SessionID]struct{}
+	// projectOwnership serializes orchestrator ownership mutations per project.
+	// Lock order is projectOwnership -> beginSwitch -> lifecycle/store; see
+	// acquireProjectOwnership.
+	projectOwnership map[domain.ProjectID]chan struct{}
 	// switchCapsOverride is tests-only: when set, SwitchWorker uses it instead
 	// of capabilities.For (e.g. force-enable cells or pin a matrix for isolation).
 	switchCapsOverride func(domain.AgentHarness) capabilities.Caps
@@ -432,7 +437,24 @@ func New(d Deps) *Manager {
 // workspace and runtime, then reports completion to the LCM. If workspace
 // materialization fails the still-seed row is deleted outright; a later failure
 // parks the row as terminated and rolls back what was built.
+// Spawn creates a session. Orchestrator spawns take the project ownership gate
+// so they cannot interleave with a concurrent retirement, restore, or another
+// orchestrator spawn; worker spawns are unaffected and stay fully concurrent.
 func (m *Manager) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	if cfg.Kind != domain.KindOrchestrator {
+		return m.spawnUnderOwnership(ctx, cfg)
+	}
+	release, err := m.acquireProjectOwnership(ctx, cfg.ProjectID)
+	if err != nil {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+	}
+	defer release()
+	return m.spawnUnderOwnership(ctx, cfg)
+}
+
+// spawnUnderOwnership is Spawn's body. Callers must already hold the project
+// ownership gate when cfg.Kind is KindOrchestrator.
+func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
 	project, err := m.loadProject(ctx, cfg.ProjectID)
 	if err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
@@ -1070,7 +1092,30 @@ func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
 //
 // This deliberately does not write a session_worktrees row: those rows are
 // boot-restore markers, and a replaced orchestrator must stay terminated.
+// It takes the project ownership gate, so a retirement cannot interleave with a
+// concurrent orchestrator spawn or restore for the same project.
 func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID) error {
+	// Pre-gate read resolves the project only; the authoritative read happens
+	// under the gate in retireForReplacementUnderOwnership.
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("retire replacement %s: %w", id, err)
+	}
+	if !ok {
+		return nil
+	}
+	release, err := m.acquireProjectOwnership(ctx, rec.ProjectID)
+	if err != nil {
+		return fmt.Errorf("retire replacement %s: %w", id, err)
+	}
+	defer release()
+	return m.retireForReplacementUnderOwnership(ctx, id)
+}
+
+// retireForReplacementUnderOwnership is RetireForReplacement's body. Callers
+// must already hold the project ownership gate. It re-reads the session because
+// any view taken before the gate was acquired is stale by construction.
+func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id domain.SessionID) error {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return fmt.Errorf("retire replacement %s: %w", id, err)
@@ -1205,6 +1250,11 @@ func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec 
 // native resume, a saved-prompt fallback, or a fresh launch. The fallible I/O
 // runs before any durable session write, so a failure never resurrects the row
 // or destroys the worktree (it may hold the agent's prior work).
+// RestoreWithMode relaunches a terminated session. Restoring an orchestrator
+// takes the project ownership gate: restore creates or adopts the canonical
+// orchestrator worktree *before* MarkSpawned flips the row to active, so
+// without the gate two restores — or a restore racing a replacement — can adopt
+// the same worktree before any uniqueness check is reached.
 func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
@@ -1212,6 +1262,22 @@ func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (Res
 	}
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrNotFound)
+	}
+	if rec.Kind == domain.KindOrchestrator {
+		release, acqErr := m.acquireProjectOwnership(ctx, rec.ProjectID)
+		if acqErr != nil {
+			return RestoreResult{}, fmt.Errorf("restore %s: %w", id, acqErr)
+		}
+		defer release()
+		// Re-read under the gate: the pre-gate view above only resolved kind
+		// and project, and a concurrent replacement may have moved on since.
+		rec, ok, err = m.store.GetSession(ctx, id)
+		if err != nil {
+			return RestoreResult{}, fmt.Errorf("restore %s: %w", id, err)
+		}
+		if !ok {
+			return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrNotFound)
+		}
 	}
 	if !rec.IsTerminated {
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrNotRestorable)
@@ -1717,6 +1783,13 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 //  3. Relaunch via the existing Restore method.
 //
 // Failures on individual sessions are logged and do not abort the loop.
+// Phase 2B gap (tracked as 2B-0b in docs/roles/PHASE2B_PLAN.md): unlike
+// RestoreWithMode, this loop restores workspaces directly and does NOT take the
+// project ownership gate, so it can resurrect more than one orchestrator per
+// project. Gating alone would not fix that — the loop also needs deterministic
+// survivor selection and restore-marker neutralization, which land together
+// with migration 0046. It runs at boot before the daemon serves, so it does not
+// currently race API-driven restores.
 func (m *Manager) RestoreAll(ctx context.Context) error {
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {

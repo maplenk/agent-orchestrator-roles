@@ -17,13 +17,13 @@ import (
 // orchestrator a fresh one would "take over in a new workspace", which is
 // false and would mislead an agent reasoning about its own worktree.
 func TestOrchestratorRetireNotice_DoesNotPromiseANewWorkspace(t *testing.T) {
-	if strings.Contains(strings.ToLower(orchestratorRetireNotice), "new workspace") {
+	if strings.Contains(strings.ToLower(sessionmanager.OrchestratorRetireNotice), "new workspace") {
 		t.Fatalf("retire notice claims a new workspace, but the successor reuses the "+
-			"canonical orchestrator worktree and branch: %q", orchestratorRetireNotice)
+			"canonical orchestrator worktree and branch: %q", sessionmanager.OrchestratorRetireNotice)
 	}
-	if !strings.Contains(strings.ToLower(orchestratorRetireNotice), "stop coordinating") {
+	if !strings.Contains(strings.ToLower(sessionmanager.OrchestratorRetireNotice), "stop coordinating") {
 		t.Fatalf("retire notice must tell the outgoing orchestrator to stop coordinating: %q",
-			orchestratorRetireNotice)
+			sessionmanager.OrchestratorRetireNotice)
 	}
 }
 

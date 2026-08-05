@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -50,6 +49,10 @@ type commander interface {
 	ResumeAgentWithMode(ctx context.Context, id domain.SessionID) (sessionmanager.RestoreResult, error)
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
 	RetireForReplacement(ctx context.Context, id domain.SessionID) error
+	// EnsureOrchestrator resolves/retires/spawns the project orchestrator under
+	// the manager's project ownership gate. The service must not reimplement
+	// this sequence: holding ownership across retire→spawn is the whole point.
+	EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (sessionmanager.EnsureOrchestratorResult, error)
 	Send(ctx context.Context, id domain.SessionID, message string) error
 	Cleanup(ctx context.Context, project domain.ProjectID) (sessionmanager.CleanupResult, error)
 	RollbackSpawn(ctx context.Context, id domain.SessionID) (deleted, killed bool, err error)
@@ -110,16 +113,14 @@ type scmProvider interface {
 // session operations to the internal sessionmanager.Manager and owns read-model
 // assembly, including user-facing display status derivation.
 type Service struct {
-	manager             commander
-	store               Store
-	prClaimer           ports.PRClaimer
-	scm                 scmProvider
-	tracker             ports.Tracker
-	clock               func() time.Time
-	dataDir             string
-	telemetry           ports.EventSink
-	orchestratorLocksMu sync.Mutex
-	orchestratorLocks   map[domain.ProjectID]*sync.Mutex
+	manager   commander
+	store     Store
+	prClaimer ports.PRClaimer
+	scm       scmProvider
+	tracker   ports.Tracker
+	clock     func() time.Time
+	dataDir   string
+	telemetry ports.EventSink
 	// signalCapable reports whether a harness has a hook pipeline that can
 	// deliver activity signals at all. Only capable harnesses are eligible for
 	// the no_signal downgrade: a hook-less harness staying silent forever is
@@ -168,16 +169,11 @@ func NewWithDeps(d Deps) *Service {
 // ephemeral prompt size measurements.
 func (s *Service) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Session, int, int, error) {
 	if cfg.Kind == domain.KindOrchestrator {
-		unlock := s.lockOrchestratorProject(cfg.ProjectID)
-		defer unlock()
-
-		existing, err := s.activeOrchestrators(ctx, cfg.ProjectID)
-		if err != nil {
-			return domain.Session{}, 0, 0, err
-		}
-		if len(existing) > 0 {
-			return newestSession(existing), 0, 0, nil
-		}
+		// Ownership is the manager's boundary: the idempotent "is there already
+		// an orchestrator" check and any spawn must be one atomic operation, and
+		// only the manager can hold that gate across them.
+		sess, _, err := s.ensureOrchestrator(ctx, cfg, false)
+		return sess, 0, 0, err
 	}
 	return s.spawn(ctx, cfg)
 }
@@ -320,59 +316,53 @@ func (s *Service) emitSpawnFailed(cfg ports.SpawnConfig, err error, durationMs i
 // active orchestrator already exists it is returned as-is. A business rule that
 // belongs here, not in the HTTP controller.
 func (s *Service) SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool) (domain.Session, error) {
-	unlock := s.lockOrchestratorProject(projectID)
-	defer unlock()
-
-	project, err := s.requireProject(ctx, projectID)
-	if err != nil {
-		return domain.Session{}, err
-	}
-	if clean {
-		existing, err := s.activeOrchestrators(ctx, projectID)
-		if err != nil {
-			return domain.Session{}, err
-		}
-		for _, orch := range existing {
-			_ = s.sendRetireNotice(ctx, orch.ID)
-			if err := s.manager.RetireForReplacement(ctx, orch.ID); err != nil {
-				return domain.Session{}, toAPIError(err)
-			}
-		}
-	} else {
-		existing, err := s.activeOrchestrators(ctx, projectID)
-		if err != nil {
-			return domain.Session{}, err
-		}
-		if len(existing) > 0 {
-			return newestSession(existing), nil
-		}
-	}
-	sess, _, _, err := s.spawn(ctx, ports.SpawnConfig{ProjectID: projectID, Kind: domain.KindOrchestrator})
-	if err != nil {
-		return domain.Session{}, err
-	}
-	if err := s.verifyOrchestratorReplacement(project, sess); err != nil {
-		return domain.Session{}, err
-	}
-	return sess, nil
+	sess, _, err := s.ensureOrchestrator(ctx, ports.SpawnConfig{
+		ProjectID: projectID,
+		Kind:      domain.KindOrchestrator,
+	}, clean)
+	return sess, err
 }
 
-func (s *Service) activeOrchestrators(ctx context.Context, projectID domain.ProjectID) ([]domain.Session, error) {
-	active := true
-	return s.List(ctx, ListFilter{ProjectID: projectID, Active: &active, OrchestratorOnly: true})
-}
-
-// orchestratorRetireNotice warns the outgoing orchestrator to stop coordinating.
-// It must not promise a new workspace: the orchestrator worktree and branch are
-// canonical per project, so the successor reuses this exact workspace after
-// RetireForReplacement releases it.
-const orchestratorRetireNotice = "AO is replacing this project orchestrator. Stop coordinating new work now; a fresh orchestrator will take over this workspace."
-
-func (s *Service) sendRetireNotice(ctx context.Context, id domain.SessionID) error {
-	if err := s.manager.Send(ctx, id, orchestratorRetireNotice); err != nil {
-		return fmt.Errorf("send retire notice to %s: %w", id, err)
+// ensureOrchestrator delegates the ownership-sensitive part — resolve current
+// owner, retire, spawn successor — to the manager, which holds the project gate
+// across the whole sequence. Everything the service owns (project
+// authorization, telemetry, presentation conversion, replacement verification)
+// happens outside that gate: before it, or after it has been released.
+func (s *Service) ensureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (domain.Session, bool, error) {
+	cfg.Kind = domain.KindOrchestrator
+	project, err := s.requireProject(ctx, cfg.ProjectID)
+	if err != nil {
+		return domain.Session{}, false, err
 	}
-	return nil
+	start := s.now()
+	firstSession, err := s.isFirstSession(ctx)
+	if err != nil {
+		return domain.Session{}, false, fmt.Errorf("count sessions: %w", err)
+	}
+	cfg = s.withIssueContext(ctx, cfg, project)
+
+	res, err := s.manager.EnsureOrchestrator(ctx, cfg, clean)
+	if err != nil {
+		s.emitSpawnFailed(cfg, err, s.now().Sub(start).Milliseconds())
+		return domain.Session{}, false, toAPIError(err)
+	}
+	// Gate released. Telemetry and presentation from here on.
+	if !res.Reused {
+		s.emitSpawned(res.Record, s.now().Sub(start).Milliseconds())
+		if firstSession {
+			s.emitFirstSessionSpawned(res.Record, project)
+		}
+	}
+	sess, err := s.toSession(ctx, res.Record)
+	if err != nil {
+		return domain.Session{}, false, err
+	}
+	if !res.Reused {
+		if err := s.verifyOrchestratorReplacement(project, sess); err != nil {
+			return domain.Session{}, false, err
+		}
+	}
+	return sess, res.Reused, nil
 }
 
 func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, sess domain.Session) error {
@@ -401,42 +391,6 @@ func serviceSessionPrefix(project domain.ProjectRecord) string {
 		return id
 	}
 	return id[:12]
-}
-
-func newestSession(sessions []domain.Session) domain.Session {
-	newest := sessions[0]
-	for _, sess := range sessions[1:] {
-		if sessionNewer(sess.SessionRecord, newest.SessionRecord) {
-			newest = sess
-		}
-	}
-	return newest
-}
-
-func sessionNewer(a, b domain.SessionRecord) bool {
-	if !a.CreatedAt.Equal(b.CreatedAt) {
-		return a.CreatedAt.After(b.CreatedAt)
-	}
-	if !a.UpdatedAt.Equal(b.UpdatedAt) {
-		return a.UpdatedAt.After(b.UpdatedAt)
-	}
-	return string(a.ID) > string(b.ID)
-}
-
-func (s *Service) lockOrchestratorProject(projectID domain.ProjectID) func() {
-	s.orchestratorLocksMu.Lock()
-	if s.orchestratorLocks == nil {
-		s.orchestratorLocks = make(map[domain.ProjectID]*sync.Mutex)
-	}
-	mu := s.orchestratorLocks[projectID]
-	if mu == nil {
-		mu = &sync.Mutex{}
-		s.orchestratorLocks[projectID] = mu
-	}
-	s.orchestratorLocksMu.Unlock()
-
-	mu.Lock()
-	return mu.Unlock
 }
 
 // Restore relaunches a terminated session and returns the API-facing read model.
