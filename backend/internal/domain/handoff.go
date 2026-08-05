@@ -38,16 +38,58 @@ type VerifiedResult struct {
 // ObservedWorkspaceV1 is host-deterministic workspace state for switch/fresh.
 // Git and verified results here override conflicting SemanticHandoff claims.
 type ObservedWorkspaceV1 struct {
-	SchemaVersion   int              `json:"schemaVersion"`
-	Branch          string           `json:"branch,omitempty"`
-	Head            string           `json:"head,omitempty"`
-	Worktree        string           `json:"worktree,omitempty"`
-	Porcelain       string           `json:"porcelain,omitempty"`
+	SchemaVersion   int               `json:"schemaVersion"`
+	Branch          string            `json:"branch,omitempty"`
+	Head            string            `json:"head,omitempty"`
+	Worktree        string            `json:"worktree,omitempty"`
+	Porcelain       string            `json:"porcelain,omitempty"`
 	SHAs            map[string]string `json:"shas,omitempty"`
-	ObservedAt      time.Time        `json:"observedAt,omitempty"`
-	GenerationID    string           `json:"generationId,omitempty"`
-	EventCursor     string           `json:"eventCursor,omitempty"`
-	VerifiedResults []VerifiedResult `json:"verifiedResults,omitempty"`
+	ObservedAt      time.Time         `json:"observedAt,omitempty"`
+	GenerationID    string            `json:"generationId,omitempty"`
+	EventCursor     string            `json:"eventCursor,omitempty"`
+	VerifiedResults []VerifiedResult  `json:"verifiedResults,omitempty"`
+}
+
+// ObservedOrchestratorSchemaVersion is the wire version for ObservedOrchestratorV1.
+const ObservedOrchestratorSchemaVersion = 1
+
+// ObservedOrchestratorV1 is host-deterministic FLEET state for an orchestrator
+// switch or fresh conversation: what the coordinator was actually coordinating.
+//
+// It is the orchestrator's analogue of ObservedWorkspaceV1, and exists for the
+// same reason. A worker's untrusted claims are about git; an orchestrator's are
+// about its workers — which sessions it started, what they are doing, whether
+// they finished. Those claims are the ones most likely to be stale or invented
+// after a long conversation, and they are exactly the facts AO holds
+// authoritatively in its own session table. So the host reads them rather than
+// asking, and the compiler prefers this over anything the agent asserts.
+//
+// Only durable, AO-owned facts belong here. Anything the orchestrator merely
+// believes about a worker stays in SemanticHandoffV1 as a claim.
+type ObservedOrchestratorV1 struct {
+	SchemaVersion int       `json:"schemaVersion"`
+	ProjectID     ProjectID `json:"projectId,omitempty"`
+	ObservedAt    time.Time `json:"observedAt,omitempty"`
+	GenerationID  string    `json:"generationId,omitempty"`
+	// Workers is every non-orchestrator session in the project, terminated ones
+	// included: "the worker you think is still running finished an hour ago" is
+	// precisely the correction this is for.
+	Workers []ObservedWorkerV1 `json:"workers,omitempty"`
+}
+
+// ObservedWorkerV1 is one worker as AO records it, not as the orchestrator
+// remembers it.
+// Deliberately limited to what the session record itself holds. PR state lives
+// behind a different store surface, and a field the observer cannot populate
+// honestly is worse than an absent one — the whole point of Observed is that
+// everything in it is a fact AO checked.
+type ObservedWorkerV1 struct {
+	SessionID    SessionID    `json:"sessionId"`
+	Harness      AgentHarness `json:"harness,omitempty"`
+	RoleID       string       `json:"roleId,omitempty"`
+	Branch       string       `json:"branch,omitempty"`
+	Activity     string       `json:"activity,omitempty"`
+	IsTerminated bool         `json:"isTerminated,omitempty"`
 }
 
 // CompiledHandoff is the host-authored prompt fragment for the target session.
@@ -63,4 +105,7 @@ type CompiledHandoff struct {
 	// Semantic / Observed copies used to build Text (audit).
 	Semantic SemanticHandoffV1   `json:"semantic,omitempty"`
 	Observed ObservedWorkspaceV1 `json:"observed,omitempty"`
+	// ObservedOrchestrator is populated only for orchestrator handoffs; a worker
+	// has no fleet to describe.
+	ObservedOrchestrator *ObservedOrchestratorV1 `json:"observedOrchestrator,omitempty"`
 }

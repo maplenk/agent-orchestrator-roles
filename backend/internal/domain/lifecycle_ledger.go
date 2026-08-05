@@ -11,13 +11,21 @@ const (
 	LifecycleKindResume            LifecycleLedgerKind = "resume"
 	LifecycleKindFailover          LifecycleLedgerKind = "failover"
 	LifecycleKindFreshConversation LifecycleLedgerKind = "fresh_conversation"
+	// LifecycleKindOrchestratorFresh is an orchestrator's in-place fresh
+	// conversation. It is a distinct kind rather than reusing
+	// fresh_conversation because recovery and audit must be able to tell the two
+	// apart without re-reading the session: an orchestrator's recovery runs
+	// under the project ownership gate and its handoff carries fleet state, so
+	// "which saga is this?" cannot be answered by the phase alone.
+	LifecycleKindOrchestratorFresh LifecycleLedgerKind = "orchestrator_fresh_conversation"
 )
 
 // Valid reports whether k is a known ledger kind.
 func (k LifecycleLedgerKind) Valid() bool {
 	switch k {
 	case LifecycleKindSwitch, LifecycleKindPause, LifecycleKindResume,
-		LifecycleKindFailover, LifecycleKindFreshConversation:
+		LifecycleKindFailover, LifecycleKindFreshConversation,
+		LifecycleKindOrchestratorFresh:
 		return true
 	default:
 		return false

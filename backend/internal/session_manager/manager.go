@@ -66,8 +66,18 @@ var (
 	// ErrSwitchPostStop means the source runtime was already stopped; the
 	// compiled handoff is retained on the lifecycle ledger for target retry.
 	ErrSwitchPostStop = errors.New("session: switch failed after source stop; handoff retained")
-	// ErrNotWorker means switch/fresh is only defined for worker sessions.
+	// ErrNotWorker means this switch/fresh entry point is worker-only.
+	// Orchestrators use FreshOrchestratorConversation, which gates first.
 	ErrNotWorker = errors.New("session: worker kind required")
+	// ErrNotOrchestrator means an orchestrator-only operation was asked for a
+	// worker session.
+	ErrNotOrchestrator = errors.New("session: orchestrator kind required")
+	// ErrOrchestratorCrossHarness means a cross-harness orchestrator switch was
+	// requested. Deferred to 2B-3 and blocked on Claude read-only enforcement:
+	// a strict orchestrator must be workspaceWrites:false, which only Codex can
+	// satisfy today, so codex→codex (a fresh conversation) is the only legal
+	// strict in-place move.
+	ErrOrchestratorCrossHarness = errors.New("session: cross-harness orchestrator switch is not supported yet")
 	// ErrSwitchNothingToRecover means no incomplete post_stop saga exists for
 	// the session (already acked, never reached post_stop, or not a switch).
 	ErrSwitchNothingToRecover = errors.New("session: no incomplete post_stop switch to recover")
@@ -2138,7 +2148,12 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	}
 	var unresolved []error
 	for _, rec := range recs {
-		if rec.IsTerminated || rec.Kind != domain.KindWorker {
+		// Orchestrators included since 2B-1: an orchestrator whose fresh
+		// conversation crashed post-stop has a stopped source and no target,
+		// and skipping it here left the project with no coordinator until
+		// someone noticed. RecoverSwitchFromPostStop takes the project gate
+		// itself for those.
+		if rec.IsTerminated || (rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator) {
 			continue
 		}
 		if _, err := m.RecoverSwitchFromPostStop(ctx, rec.ID); err != nil {

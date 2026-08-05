@@ -28,10 +28,11 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Concurrent daemon ownership lease | **Done** — `datadirlock` on `AO_DATA_DIR` before store/reconcile |
 | `switch_supported` production | **true** for Claude/Codex (promoted after 2A close-out accept) |
 | Phase 2B-0a/0b (ownership + uniqueness) | **Complete** — project gate, migration 0046, fail-closed boot chain, constraint mapping, launch-cleanup hardening, **and boot restore now gated with deterministic survivor selection + marker neutralization + a single ownership resolver** |
-| Phase 2B-1 onward (orchestrator switch/fresh) | **Not started** — worker-only guards still stand; `ObservedOrchestratorV1` designed, not built |
+| Phase 2B-1 (orchestrator in-place fresh) | **Landed** — first *product-visible* 2B behaviour. `FreshOrchestratorConversation` gates the project **before** the switch fence, keeps session id/worktree/branch, and compiles `ObservedOrchestratorV1` (the project's live+terminated worker fleet, read from AO's session table) into the handoff. Cross-harness explicitly refused (2B-3) |
+| Phase 2B-2 / 2B-3 | **Not started** — durable replacement recoverability; cross-harness orchestrator switch (blocked on Claude RO) |
 | Phase 3A / 3B | **Not started** |
 
-**Next eng (critical path):** **2B-1** (orchestrator in-place fresh conversation) — the first *product-visible* 2B behaviour. Everything landed so far is coordinator **safety**: it prevents two orchestrators owning a project, but delivers no new user-facing capability. Phase 1-F / Claude RO remains parallel, and blocks 2B-3 (strict cross-harness orchestrator switch).
+**Next eng (critical path):** **2B-2** (replacement durable recoverability — persist replacement intent before retirement so a zero-owner interval is always auto-recovered, plus the two-write retirement window in `finalizeRetirement`). Then Phase 3A. Phase 1-F / Claude RO remains parallel and blocks **2B-3** (cross-harness orchestrator switch), which 2B-1 deliberately refuses today.
 
 ---
 
@@ -153,7 +154,7 @@ orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
 |-------|--------|
 | 2B-0a Project ownership gate | **Landed.** Manager-owned, project-keyed exclusion; `EnsureOrchestrator` is the single gated ownership command. All public orchestrator mutations self-acquire (`Spawn`, `Retire`, `Restore`, `Kill`, `Resume`, `Rollback`, `Cleanup`). Also fixed the canonical-workspace alias: a retired row kept naming the path its successor owned, so `Kill`/`Cleanup` on the predecessor destroyed the live orchestrator's worktree. Service delegates and keeps auth/telemetry/presentation outside the gate. `RestoreAll` was carried into 2B-0b and is gated there |
 | 2B-0b Coordinator uniqueness | **Landed.** Migration 0046 partial unique index + reconciliation, capturing each loser's execution identity into `orchestrator_reap_queue` before clearing it; fail-closed boot reaper draining that queue ahead of every surface; unique-constraint errors mapped to `ErrActiveOrchestratorExists` (409) instead of an opaque 500; `MarkSpawned` launch-cleanup window hardened so a failed launch leaves neither an untracked runtime nor a phantom-live row, with `ErrLaunchCleanupUnresolved` propagated through restore *and* post_stop recovery to a fatal boot gate. **Boot restore closed the last ungated path:** `RestoreAll` now restores at most one orchestrator per project under that project's gate, held across *both* the survivor decision and the restore, because `workspace.Restore` adopts the shared canonical worktree before any row flips — so the index alone never sees the damage. Losing candidates and candidates displaced by an already-live owner have their markers neutralized (rows only; the preserved ref survives), mirroring 0046 — and neutralization is a **durable precondition** of restoring the winner, not best-effort: a surviving loser marker does not stay a loser, so once the winner is killed that stale row becomes the only restorable orchestrator and a later boot resurrects the session this election superseded. A marker **read** failure is likewise not an absence: it abandons the whole project's election rather than letting an older candidate be promoted on incomplete evidence into the shared canonical worktree. All three failures — undeletable loser marker, unreadable marker, unreadable project session list — are boot-fatal via `ErrBootUnsafe`, the shared marker the daemon gate keys on, so a new fail-closed condition becomes fatal by wrapping it rather than by editing `daemon.go`. Not having *looked* leaves the identical durable hazard as having failed to *delete*: an unexamined marker is still eligible, so killing the current owner would let a predecessor return on a later boot. Each leaf's membership is pinned by a table test, since the gate keys only on the parent and an unwrapped leaf would silently stop being fatal. `activeOrchestratorSessionID` now applies `newestOrchestratorRecord` too: first-match-in-list-order returned the *oldest* active orchestrator, so workers spawned while two were briefly active were told to report to the one being superseded |
-| 2B-1 In-place orchestrator fresh conversation | Parameterize `KindWorker` guards; boot recovery; `ObservedOrchestratorV1` handoff |
+| 2B-1 In-place orchestrator fresh conversation | **Landed.** `KindWorker` guards parameterized across manager saga, recovery and service; `SwitchWorker` stays worker-only as an entry point while `FreshOrchestratorConversation` takes the **project gate before `beginSwitch`** (lock order `projectOwnership -> beginSwitch`, never inverted — otherwise `EnsureOrchestrator` could retire the session mid-saga). New ledger kind `orchestrator_fresh_conversation` so recovery and audit can tell the sagas apart. `Reconcile` post_stop recovery now includes orchestrators, which previously left a crashed mid-switch project with no coordinator. `ObservedOrchestratorV1` compiles the project's fleet — live **and** terminated workers, read from the session table rather than the outgoing agent's recollection — into the handoff; an unreadable fleet degrades rather than aborts, since it is context and the switch is remedying context loss. In-place keeps the session id, so live workers (whose prompts embed it at spawn/restore only) never need rebinding |
 | 2B-2 Replacement durable recoverability | Persist replacement intent before retirement; a zero-owner interval is auto-recovered, never terminal |
 | 2B-3 Cross-harness orchestrator switch | Non-strict only — **strict is blocked on 1-B (Claude RO)**, since a strict orchestrator must be `workspaceWrites:false` and only Codex enforces RO |
 | Deferred | Successor-session handoff (needs live-worker rebind + worktree release sequencing) |
@@ -220,8 +221,9 @@ cross-harness orchestrator switch on strict projects (2B-3).
 ### Sequencing sketch
 
 ```text
-2B-0a/0b ownership + uniqueness ──► LANDED (safety only, no user-facing change)
-Now ──► 2B-1 orch in-place fresh ──► 2B-2 recoverability ──► 2B-3 cross-harness
+2B-0a/0b ownership + uniqueness ──► LANDED (safety only)
+2B-1 orch in-place fresh      ──► LANDED (first user-facing 2B behaviour)
+Now ──► 2B-2 recoverability ──► 2B-3 cross-harness (needs Claude RO)
      ──► 3A pause ──► 3B continue/failover  (then promote limit_detection)
      ──► Integration
      ║
@@ -295,5 +297,5 @@ Still open:
 ## 7. Immediate next action
 
 1. ~~Accept 2A close-out + promote `SwitchSupported` for Claude/Codex~~ — **done**.
-2. ~~Start **Phase 2B** (orch ownership transfer)~~ — **2B-0a and 2B-0b complete** (ownership gate, uniqueness, fail-closed boot chain, gated boot restore, single resolver). Next: **2B-1** (orchestrator in-place fresh conversation) — parameterize the `KindWorker` guards, add `ObservedOrchestratorV1` + compiler path, a new ledger kind, and orchestrator recovery in `Reconcile`. **Phase 1-F / Claude RO** stays parallel and gates 2B-3.
+2. ~~Start **Phase 2B**~~ — **2B-0a, 2B-0b and 2B-1 complete**. Next: **2B-2** (replacement durable recoverability + the two-write retirement window). **Phase 1-F / Claude RO** stays parallel and gates 2B-3.
 3. Keep `limit_detection_supported` false until Phase 3 structured-limit evidence.

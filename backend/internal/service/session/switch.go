@@ -37,6 +37,20 @@ type SwitchWorkerOutcome struct {
 type switchCommander interface {
 	SwitchWorker(ctx context.Context, req sessionmanager.SwitchRequest) (sessionmanager.SwitchResult, error)
 	FreshConversation(ctx context.Context, sessionID domain.SessionID, semantic domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error)
+	// FreshOrchestratorConversation is the orchestrator entry point. It is
+	// separate because it must take the project ownership gate BEFORE the
+	// switch fence; routing an orchestrator through FreshConversation would
+	// acquire those locks in the wrong order.
+	FreshOrchestratorConversation(ctx context.Context, sessionID domain.SessionID, semantic domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error)
+}
+
+// freshConversationFor dispatches on kind so the caller cannot pick the wrong
+// lock order by accident.
+func freshConversationFor(ctx context.Context, sc switchCommander, rec domain.SessionRecord, sem domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
+	if rec.Kind == domain.KindOrchestrator {
+		return sc.FreshOrchestratorConversation(ctx, rec.ID, sem)
+	}
+	return sc.FreshConversation(ctx, rec.ID, sem)
 }
 
 // ErrSwitchNotWired means the process commander does not implement switch (tests).
@@ -56,7 +70,21 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	if !ok {
 		return SwitchWorkerOutcome{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	}
-	if rec.Kind != domain.KindWorker {
+	switch rec.Kind {
+	case domain.KindWorker:
+		// Full switch/fresh matrix.
+	case domain.KindOrchestrator:
+		// 2B-1: in-place FRESH conversation only. Cross-harness is 2B-3 and is
+		// blocked on Claude read-only enforcement — a strict orchestrator must
+		// be workspaceWrites:false and only Codex enforces that, so shipping it
+		// for non-strict projects alone would create a capability strict
+		// projects can never have.
+		if !req.Fresh && strings.TrimSpace(string(req.TargetHarness)) != "" &&
+			domain.AgentHarness(strings.TrimSpace(string(req.TargetHarness))) != rec.Harness {
+			return SwitchWorkerOutcome{}, apierr.Invalid("ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED",
+				"Orchestrators support in-place fresh conversation only; cross-harness switch is not available yet", nil)
+		}
+	default:
 		return SwitchWorkerOutcome{}, apierr.Invalid("NOT_A_WORKER", "Only worker sessions support switch/fresh conversation", nil)
 	}
 	if rec.IsTerminated {
@@ -98,7 +126,7 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 
 	// Fresh conversation: same harness only — never accepts free-form target.
 	if req.Fresh {
-		res, err := sc.FreshConversation(ctx, req.SessionID, sem)
+		res, err := freshConversationFor(ctx, sc, rec, sem)
 		if err != nil {
 			return SwitchWorkerOutcome{}, toAPIError(err)
 		}
@@ -117,7 +145,7 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 
 	// Same harness → fresh conversation path (no free-form cross-provider model).
 	if to == rec.Harness {
-		res, err := sc.FreshConversation(ctx, req.SessionID, sem)
+		res, err := freshConversationFor(ctx, sc, rec, sem)
 		if err != nil {
 			return SwitchWorkerOutcome{}, toAPIError(err)
 		}

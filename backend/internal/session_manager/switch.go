@@ -50,6 +50,20 @@ type switchPayload struct {
 // Current Harness/Role remain the source until durable target_ack promotes the
 // pending pin. Generation ID is the launched RuntimeLaunchID.
 func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchResult, error) {
+	// Worker entry point. Orchestrators must arrive via
+	// FreshOrchestratorConversation, which takes the project ownership gate
+	// BEFORE the switch fence this acquires — entering here would take the locks
+	// in the wrong order.
+	if rec, ok, err := m.store.GetSession(ctx, req.SessionID); err == nil && ok && rec.Kind != domain.KindWorker {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
+	}
+	return m.switchUnderOwnership(ctx, req)
+}
+
+// switchUnderOwnership is the saga proper. Callers are responsible for holding
+// whatever ownership a session's KIND requires before entering: nothing, for a
+// worker; the project gate, for an orchestrator.
+func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest) (SwitchResult, error) {
 	if !m.beginSwitch(req.SessionID) {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchInProgress)
 	}
@@ -62,8 +76,16 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 	if !ok {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotFound)
 	}
-	if rec.Kind != domain.KindWorker {
+	if rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
+	}
+	// Cross-harness orchestrator switch is 2B-3, blocked on Claude RO: a strict
+	// orchestrator must be read-only and only Codex enforces that, so allowing
+	// it for non-strict projects would ship a path strict projects can never
+	// take. Same-harness fresh conversation is the whole of 2B-1.
+	if rec.Kind == domain.KindOrchestrator && !req.FreshConversation &&
+		req.TargetHarness != "" && req.TargetHarness != rec.Harness {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrOrchestratorCrossHarness)
 	}
 	if rec.IsTerminated {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrTerminated)
@@ -79,6 +101,12 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 
 	fromHarness := rec.Harness
 	toHarness, kind, sameHarness := resolveSwitchTarget(req, fromHarness)
+	if rec.Kind == domain.KindOrchestrator {
+		// A distinct kind so recovery and audit can tell the two sagas apart
+		// without re-reading the session: an orchestrator's recovery must run
+		// under the project gate, and its handoff carries fleet state.
+		kind = domain.LifecycleKindOrchestratorFresh
+	}
 
 	if err := m.requireSwitchCaps(fromHarness, toHarness, sameHarness); err != nil {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, err)
@@ -126,14 +154,34 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 		GenerationID: sourceGen,
 		Now:          m.clock(),
 	})
+	// An orchestrator additionally carries its fleet. Observed here, under the
+	// project gate and before the source stops, for the same reason the git
+	// observation is: it must describe the world the outgoing conversation
+	// actually lived in.
+	//
+	// A read failure degrades rather than aborts. The fleet is context, not a
+	// safety invariant — losing it makes the fresh conversation less informed,
+	// whereas failing the switch strands an orchestrator that is already out of
+	// context, which is the condition being remedied.
+	var fleet *domain.ObservedOrchestratorV1
+	if rec.Kind == domain.KindOrchestrator {
+		observed, fleetErr := m.ObserveOrchestratorFleet(ctx, rec.ProjectID, sourceGen)
+		if fleetErr != nil {
+			m.logger.Warn("switch: fleet observation failed; handoff will omit it",
+				"sessionID", rec.ID, "projectID", rec.ProjectID, "error", fleetErr)
+		} else {
+			fleet = &observed
+		}
+	}
 	compiled := handoff.Compile(handoff.CompileInput{
-		Semantic:         sem,
-		Observed:         obs,
-		RoleID:           roleID,
-		TargetGeneration: targetGen,
-		SameHarness:      sameHarness,
-		FromHarness:      fromHarness,
-		ToHarness:        toHarness,
+		Semantic:             sem,
+		Observed:             obs,
+		ObservedOrchestrator: fleet,
+		RoleID:               roleID,
+		TargetGeneration:     targetGen,
+		SameHarness:          sameHarness,
+		FromHarness:          fromHarness,
+		ToHarness:            toHarness,
 	})
 	payloadBytes, _ := json.Marshal(switchPayload{Semantic: sem, Observed: obs, Compiled: compiled.Text})
 	payload := string(payloadBytes)
@@ -240,11 +288,31 @@ func (m *Manager) FreshConversation(ctx context.Context, sessionID domain.Sessio
 // RecoverSwitchFromPostStop re-drives incomplete post_stop (or pending pin).
 // Never launches a second target while a runtime with the pending generation is live.
 func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domain.SessionID) (SwitchResult, error) {
+	// Kind decides which locks this needs, so it is resolved before either is
+	// taken. An orchestrator's recovery relaunches into the canonical worktree
+	// and must hold the project gate for the same reason its saga does, and in
+	// the same order: projectOwnership -> beginSwitch.
+	pre, ok, err := m.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, err)
+	}
+	if !ok {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotFound)
+	}
+	if pre.Kind == domain.KindOrchestrator {
+		release, gateErr := m.acquireProjectOwnership(ctx, pre.ProjectID)
+		if gateErr != nil {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, gateErr)
+		}
+		defer release()
+	}
+
 	if !m.beginSwitch(sessionID) {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchInProgress)
 	}
 	defer m.endSwitch(sessionID)
 
+	// Re-read under both protections; the pre-gate read resolved kind only.
 	rec, ok, err := m.store.GetSession(ctx, sessionID)
 	if err != nil {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, err)
@@ -252,7 +320,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	if !ok {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotFound)
 	}
-	if rec.Kind != domain.KindWorker {
+	if rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotWorker)
 	}
 	if rec.IsTerminated {

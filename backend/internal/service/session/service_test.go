@@ -978,33 +978,34 @@ func TestSessionRenameMissingSessionReturnsNotFound(t *testing.T) {
 // fakeCommander records Kill/Spawn calls so a test can assert the
 // clean-orchestrator ordering without wiring a real session engine.
 type fakeCommander struct {
-	killed          []domain.SessionID
-	retired         []domain.SessionID
-	sent            []domain.SessionID
-	sentMessages    []string
-	cleanupProjects []domain.ProjectID
-	killErr         error
-	retireErr       error
-	sendErr         error
-	cleanupErr      error
-	spawnErr        error
-	spawnRecord     domain.SessionRecord
-	spawnFunc       func(ports.SpawnConfig) domain.SessionRecord
-	spawnCalls      int
-	spawned         bool
-	spawnedCfg      ports.SpawnConfig
-	killsAtSpawn    int
-	restoreErr      error
-	restoreResult   sessionmanager.RestoreResult
-	switchErr       error
-	switchRecord    domain.SessionRecord
-	switchCalls     int
-	freshCalls      int
-	lastSwitch      sessionmanager.SwitchRequest
-	ensureCalls     int
-	ensureClean     bool
-	ensureCfg       ports.SpawnConfig
-	ensureReuse     domain.SessionRecord
+	killed                 []domain.SessionID
+	retired                []domain.SessionID
+	sent                   []domain.SessionID
+	sentMessages           []string
+	cleanupProjects        []domain.ProjectID
+	killErr                error
+	retireErr              error
+	sendErr                error
+	cleanupErr             error
+	spawnErr               error
+	spawnRecord            domain.SessionRecord
+	spawnFunc              func(ports.SpawnConfig) domain.SessionRecord
+	spawnCalls             int
+	spawned                bool
+	spawnedCfg             ports.SpawnConfig
+	killsAtSpawn           int
+	restoreErr             error
+	restoreResult          sessionmanager.RestoreResult
+	switchErr              error
+	switchRecord           domain.SessionRecord
+	switchCalls            int
+	freshCalls             int
+	orchestratorFreshCalls int
+	lastSwitch             sessionmanager.SwitchRequest
+	ensureCalls            int
+	ensureClean            bool
+	ensureCfg              ports.SpawnConfig
+	ensureReuse            domain.SessionRecord
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -1110,6 +1111,19 @@ func (f *fakeCommander) SwitchWorker(_ context.Context, req sessionmanager.Switc
 		Session: rec, GenerationID: "gen-sw-1", Kind: domain.LifecycleKindSwitch,
 	}, nil
 }
+
+// FreshOrchestratorConversation records the orchestrator entry point
+// separately: the service must route by kind, and a fake that answered both
+// through one counter could not tell a correct dispatch from a wrong one.
+func (f *fakeCommander) FreshOrchestratorConversation(ctx context.Context, id domain.SessionID, sem domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
+	f.orchestratorFreshCalls++
+	res, err := f.FreshConversation(ctx, id, sem)
+	if err == nil {
+		res.Kind = domain.LifecycleKindOrchestratorFresh
+	}
+	return res, err
+}
+
 func (f *fakeCommander) FreshConversation(_ context.Context, id domain.SessionID, _ domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
 	if f.switchErr != nil {
 		return sessionmanager.SwitchResult{}, f.switchErr

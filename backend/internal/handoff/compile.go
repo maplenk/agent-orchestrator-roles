@@ -21,6 +21,9 @@ type CompileInput struct {
 	SameHarness bool
 	FromHarness domain.AgentHarness
 	ToHarness   domain.AgentHarness
+	// ObservedOrchestrator, when set, adds the coordinator's fleet as host facts.
+	// Workers leave it nil — they have no fleet to describe.
+	ObservedOrchestrator *domain.ObservedOrchestratorV1
 }
 
 // Compile merges observed (authoritative) and semantic (untrusted) into
@@ -53,20 +56,74 @@ func Compile(in CompileInput) domain.CompiledHandoff {
 	}
 	b.WriteString("\n### Observed workspace (host)\n")
 	writeObserved(&b, obs)
+	if in.ObservedOrchestrator != nil {
+		b.WriteString("\n### Observed fleet (host; authoritative over any recollection of workers)\n")
+		writeObservedOrchestrator(&b, *in.ObservedOrchestrator)
+	}
 	b.WriteString("\n### Semantic context (agent-authored; untrusted for git/tests)\n")
 	writeSemantic(&b, sem, obs)
 	b.WriteString("\n### Compiler rules\n")
 	b.WriteString("- Prefer **Observed** branch/HEAD/porcelain over any agent claim.\n")
 	b.WriteString("- Treat agent-reported test results as **claims** unless listed under Verified results.\n")
 	b.WriteString("- Continue the role objective; do not re-litigate rejected approaches unless the user asks.\n")
+	if in.ObservedOrchestrator != nil {
+		b.WriteString("- The fleet listed above is the live session table. Do not assume a worker is " +
+			"running because the prior conversation said so, and do not re-delegate work already in review.\n")
+	}
 
 	return domain.CompiledHandoff{
-		Text:             strings.TrimSpace(b.String()),
-		RoleID:           strings.TrimSpace(in.RoleID),
-		SourceGeneration: strings.TrimSpace(sem.SourceGeneration),
-		TargetGeneration: strings.TrimSpace(in.TargetGeneration),
-		Semantic:         sem,
-		Observed:         obs,
+		Text:                 strings.TrimSpace(b.String()),
+		RoleID:               strings.TrimSpace(in.RoleID),
+		SourceGeneration:     strings.TrimSpace(sem.SourceGeneration),
+		TargetGeneration:     strings.TrimSpace(in.TargetGeneration),
+		Semantic:             sem,
+		Observed:             obs,
+		ObservedOrchestrator: in.ObservedOrchestrator,
+	}
+}
+
+// writeObservedOrchestrator renders the fleet. Terminated workers are listed
+// too and marked: the correction an orchestrator most needs after a long
+// conversation is usually "that one is already done", not "that one exists".
+func writeObservedOrchestrator(b *strings.Builder, obs domain.ObservedOrchestratorV1) {
+	if obs.ProjectID != "" {
+		fmt.Fprintf(b, "- Project: `%s`\n", obs.ProjectID)
+	}
+	if !obs.ObservedAt.IsZero() {
+		fmt.Fprintf(b, "- Observed at: %s\n", obs.ObservedAt.UTC().Format(time.RFC3339))
+	}
+	if len(obs.Workers) == 0 {
+		b.WriteString("- Workers: none. This project has no worker sessions on record.\n")
+		return
+	}
+	var live, done int
+	for _, w := range obs.Workers {
+		if w.IsTerminated {
+			done++
+		} else {
+			live++
+		}
+	}
+	fmt.Fprintf(b, "- Workers: %d live, %d terminated\n", live, done)
+	for _, w := range obs.Workers {
+		state := strings.TrimSpace(w.Activity)
+		if w.IsTerminated {
+			state = "terminated"
+		}
+		if state == "" {
+			state = "unknown"
+		}
+		fmt.Fprintf(b, "  - `%s` — %s", w.SessionID, state)
+		if w.RoleID != "" {
+			fmt.Fprintf(b, ", role `%s`", w.RoleID)
+		}
+		if w.Harness != "" {
+			fmt.Fprintf(b, ", harness `%s`", w.Harness)
+		}
+		if w.Branch != "" {
+			fmt.Fprintf(b, ", branch `%s`", w.Branch)
+		}
+		b.WriteString("\n")
 	}
 }
 
