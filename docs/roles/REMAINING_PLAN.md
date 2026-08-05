@@ -139,15 +139,26 @@ Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 
 ---
 
-### Phase 2B — Orchestrator ownership transfer (~3–5 working days)
+### Phase 2B — Orchestrator ownership transfer (~5–8 working days)
 
-| Task | Detail |
-|------|--------|
-| Coordinator lease | |
-| Nudge/routing rebind | |
-| Pending message transfer | |
-| Generation fencing + target ack | |
-| Recovery | Source dead / successor fails |
+**Plan:** `PHASE2B_PLAN.md` (design landed; implementation not started).
+Scope decided: **in-place switch now, successor-session handoff deferred**;
+**fence only, no new durable inbox** (upstream shipped and reverted durable
+orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
+
+| Slice | Detail |
+|-------|--------|
+| 2B-0 Coordinator uniqueness | Migration 0046 partial unique index; one resolver, not two (`activeOrchestratorSessionID` vs `newestSession` disagree today) |
+| 2B-1 In-place orchestrator fresh conversation | Parameterize `KindWorker` guards; project-keyed single-flight; boot recovery; worker-roster handoff |
+| 2B-2 Replacement recovery | Failed successor spawn must not leave zero orchestrators |
+| 2B-3 Cross-harness orchestrator switch | Non-strict only — **strict is blocked on 1-B (Claude RO)**, since a strict orchestrator must be `workspaceWrites:false` and only Codex enforces RO |
+| Deferred | Successor-session handoff (needs live-worker rebind + worktree release sequencing) |
+
+**Estimate correction:** MASTER_PLAN §8's 3–5 d did not account for coordinator
+uniqueness or replacement recovery.
+
+**Roadmap correction:** 1-B (Claude RO) is *not* fully parallel — it blocks
+cross-harness orchestrator switch on strict projects (2B-3).
 
 ---
 
