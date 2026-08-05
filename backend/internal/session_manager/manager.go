@@ -2490,7 +2490,15 @@ func DefaultSpawnBranch(id domain.SessionID, kind domain.SessionKind, prefix str
 		return ""
 	}
 	branchNamespace := generatedBranchNamespace(dataDir)
-	if projectKind == domain.ProjectKindWorkspace {
+	// Workspace projects give each worker a per-session branch shared across the
+	// root and child repos. Orchestrators are the exception in every project
+	// kind: their worktree is canonical per project
+	// (<managedRoot>/<projectID>/orchestrator/<prefix>-orchestrator), so the
+	// branch must be canonical too. A per-session branch on a project-canonical
+	// path cannot survive retire-and-replace — Create adopts the existing
+	// registration and returns the previous session's branch — and it makes
+	// verifyOrchestratorReplacement reject every workspace-project orchestrator.
+	if projectKind == domain.ProjectKindWorkspace && kind != domain.KindOrchestrator {
 		return aoBranch(branchNamespace, string(id))
 	}
 	return defaultSessionBranch(id, kind, prefix, branchNamespace)

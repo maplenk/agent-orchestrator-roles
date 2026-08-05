@@ -362,7 +362,11 @@ func (s *Service) activeOrchestrators(ctx context.Context, projectID domain.Proj
 	return s.List(ctx, ListFilter{ProjectID: projectID, Active: &active, OrchestratorOnly: true})
 }
 
-const orchestratorRetireNotice = "AO is replacing this project orchestrator. Stop coordinating new work now; a fresh orchestrator will take over in a new workspace."
+// orchestratorRetireNotice warns the outgoing orchestrator to stop coordinating.
+// It must not promise a new workspace: the orchestrator worktree and branch are
+// canonical per project, so the successor reuses this exact workspace after
+// RetireForReplacement releases it.
+const orchestratorRetireNotice = "AO is replacing this project orchestrator. Stop coordinating new work now; a fresh orchestrator will take over this workspace."
 
 func (s *Service) sendRetireNotice(ctx context.Context, id domain.SessionID) error {
 	if err := s.manager.Send(ctx, id, orchestratorRetireNotice); err != nil {
