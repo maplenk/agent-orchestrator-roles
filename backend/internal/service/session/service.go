@@ -172,8 +172,12 @@ func (s *Service) Spawn(ctx context.Context, cfg ports.SpawnConfig) (domain.Sess
 		// Ownership is the manager's boundary: the idempotent "is there already
 		// an orchestrator" check and any spawn must be one atomic operation, and
 		// only the manager can hold that gate across them.
-		sess, _, err := s.ensureOrchestrator(ctx, cfg, false)
-		return sess, 0, 0, err
+		//
+		// Prompt metrics are surfaced by POST /api/v1/sessions, so a genuinely
+		// new orchestrator must report real byte counts; only a reused session
+		// reports zero (nothing was rendered for it).
+		out, err := s.ensureOrchestrator(ctx, cfg, false)
+		return out.session, out.promptBytes, out.systemPromptBytes, err
 	}
 	return s.spawn(ctx, cfg)
 }
@@ -316,11 +320,21 @@ func (s *Service) emitSpawnFailed(cfg ports.SpawnConfig, err error, durationMs i
 // active orchestrator already exists it is returned as-is. A business rule that
 // belongs here, not in the HTTP controller.
 func (s *Service) SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool) (domain.Session, error) {
-	sess, _, err := s.ensureOrchestrator(ctx, ports.SpawnConfig{
+	out, err := s.ensureOrchestrator(ctx, ports.SpawnConfig{
 		ProjectID: projectID,
 		Kind:      domain.KindOrchestrator,
 	}, clean)
-	return sess, err
+	return out.session, err
+}
+
+// ensureOrchestratorOutcome is the internal result of ensureOrchestrator.
+// promptBytes/systemPromptBytes are zero for a reused session: nothing was
+// rendered for it.
+type ensureOrchestratorOutcome struct {
+	session           domain.Session
+	promptBytes       int
+	systemPromptBytes int
+	reused            bool
 }
 
 // ensureOrchestrator delegates the ownership-sensitive part — resolve current
@@ -328,23 +342,23 @@ func (s *Service) SpawnOrchestrator(ctx context.Context, projectID domain.Projec
 // across the whole sequence. Everything the service owns (project
 // authorization, telemetry, presentation conversion, replacement verification)
 // happens outside that gate: before it, or after it has been released.
-func (s *Service) ensureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (domain.Session, bool, error) {
+func (s *Service) ensureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (ensureOrchestratorOutcome, error) {
 	cfg.Kind = domain.KindOrchestrator
 	project, err := s.requireProject(ctx, cfg.ProjectID)
 	if err != nil {
-		return domain.Session{}, false, err
+		return ensureOrchestratorOutcome{}, err
 	}
 	start := s.now()
 	firstSession, err := s.isFirstSession(ctx)
 	if err != nil {
-		return domain.Session{}, false, fmt.Errorf("count sessions: %w", err)
+		return ensureOrchestratorOutcome{}, fmt.Errorf("count sessions: %w", err)
 	}
 	cfg = s.withIssueContext(ctx, cfg, project)
 
 	res, err := s.manager.EnsureOrchestrator(ctx, cfg, clean)
 	if err != nil {
 		s.emitSpawnFailed(cfg, err, s.now().Sub(start).Milliseconds())
-		return domain.Session{}, false, toAPIError(err)
+		return ensureOrchestratorOutcome{}, toAPIError(err)
 	}
 	// Gate released. Telemetry and presentation from here on.
 	if !res.Reused {
@@ -355,14 +369,19 @@ func (s *Service) ensureOrchestrator(ctx context.Context, cfg ports.SpawnConfig,
 	}
 	sess, err := s.toSession(ctx, res.Record)
 	if err != nil {
-		return domain.Session{}, false, err
+		return ensureOrchestratorOutcome{}, err
 	}
 	if !res.Reused {
 		if err := s.verifyOrchestratorReplacement(project, sess); err != nil {
-			return domain.Session{}, false, err
+			return ensureOrchestratorOutcome{}, err
 		}
 	}
-	return sess, res.Reused, nil
+	return ensureOrchestratorOutcome{
+		session:           sess,
+		promptBytes:       res.PromptBytes,
+		systemPromptBytes: res.SystemPromptBytes,
+		reused:            res.Reused,
+	}, nil
 }
 
 func (s *Service) verifyOrchestratorReplacement(project domain.ProjectRecord, sess domain.Session) error {

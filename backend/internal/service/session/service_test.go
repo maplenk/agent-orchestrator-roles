@@ -2439,3 +2439,43 @@ func sameStrings(got, want []string) bool {
 	}
 	return true
 }
+
+// TestSpawnGenericOrchestratorPreservesPromptMetrics guards the response
+// contract: POST /api/v1/sessions surfaces prompt byte counts, so a genuinely
+// new orchestrator must report real values. Only a reused session reports zero,
+// because nothing was rendered for it.
+func TestSpawnGenericOrchestratorPreservesPromptMetrics(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+	fc := &fakeCommander{}
+	svc := &Service{manager: fc, store: st}
+
+	const prompt = "coordinate this project"
+	_, promptBytes, _, err := svc.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer",
+		Kind:      domain.KindOrchestrator,
+		Harness:   domain.HarnessClaudeCode,
+		Prompt:    prompt,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if promptBytes != len(prompt) {
+		t.Fatalf("promptBytes = %d, want %d for a newly spawned orchestrator", promptBytes, len(prompt))
+	}
+
+	// A reused orchestrator renders nothing and must stay at zero.
+	existing := domain.SessionRecord{ID: "mer-orch", ProjectID: "mer", Kind: domain.KindOrchestrator}
+	st.sessions["mer-orch"] = existing
+	reuse := &fakeCommander{ensureReuse: existing}
+	svc2 := &Service{manager: reuse, store: st}
+	_, promptBytes, systemPromptBytes, err := svc2.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindOrchestrator, Prompt: prompt,
+	})
+	if err != nil {
+		t.Fatalf("Spawn (reuse): %v", err)
+	}
+	if promptBytes != 0 || systemPromptBytes != 0 {
+		t.Fatalf("reused session metrics = (%d, %d), want zero", promptBytes, systemPromptBytes)
+	}
+}

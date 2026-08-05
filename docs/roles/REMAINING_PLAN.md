@@ -148,7 +148,7 @@ orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
 
 | Slice | Detail |
 |-------|--------|
-| 2B-0a Project ownership gate | **Landed.** Manager-owned, project-keyed exclusion; `EnsureOrchestrator` is the single gated ownership command; `Spawn(orchestrator)`, `RetireForReplacement` and orchestrator `RestoreWithMode` self-acquire. Service delegates and keeps auth/telemetry/presentation outside the gate. **`RestoreAll` still open — carried into 2B-0b** |
+| 2B-0a Project ownership gate | **Landed.** Manager-owned, project-keyed exclusion; `EnsureOrchestrator` is the single gated ownership command. All public orchestrator mutations self-acquire (`Spawn`, `Retire`, `Restore`, `Kill`, `Resume`, `Rollback`, `Cleanup`). Also fixed the canonical-workspace alias: a retired row kept naming the path its successor owned, so `Kill`/`Cleanup` on the predecessor destroyed the live orchestrator's worktree. Service delegates and keeps auth/telemetry/presentation outside the gate. **`RestoreAll` still open — carried into 2B-0b** |
 | 2B-0b Coordinator uniqueness | Migration 0046 partial unique index + reconciliation (deterministic survivor, marker neutralization, probe-authoritative reap); one resolver, not two (`activeOrchestratorSessionID` vs `newestSession` disagree today) |
 | 2B-1 In-place orchestrator fresh conversation | Parameterize `KindWorker` guards; boot recovery; `ObservedOrchestratorV1` handoff |
 | 2B-2 Replacement durable recoverability | Persist replacement intent before retirement; a zero-owner interval is auto-recovered, never terminal |

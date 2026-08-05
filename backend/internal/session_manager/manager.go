@@ -961,15 +961,32 @@ func (m *Manager) rollbackSpawn(ctx context.Context, id domain.SessionID) (delet
 		m.cleanupSystemPromptDir(id)
 		return true, false, nil
 	}
-	killed, err = m.Kill(ctx, id)
+	// killUnderOwnership, not Kill: RollbackSpawn may already hold the project
+	// gate, and re-acquiring it here would deadlock.
+	killed, err = m.killUnderOwnership(ctx, id)
 	if err != nil {
 		return false, false, err
 	}
 	return false, killed, nil
 }
 
-// RollbackSpawn is the public surface of rollbackSpawn for service-layer callers.
+// RollbackSpawn is the public surface of rollbackSpawn for service-layer
+// callers. An orchestrator rollback takes the project ownership gate: it can
+// arrive arbitrarily late (it undoes an out-of-band step after Spawn returned)
+// and must not race a replacement or tear down a successor's workspace.
 func (m *Manager) RollbackSpawn(ctx context.Context, id domain.SessionID) (deleted, killed bool, err error) {
+	rec, ok, getErr := m.store.GetSession(ctx, id)
+	if getErr != nil {
+		return false, false, fmt.Errorf("rollback %s: %w", id, getErr)
+	}
+	if !ok || rec.Kind != domain.KindOrchestrator {
+		return m.rollbackSpawn(ctx, id)
+	}
+	release, acqErr := m.acquireProjectOwnership(ctx, rec.ProjectID)
+	if acqErr != nil {
+		return false, false, fmt.Errorf("rollback %s: %w", id, acqErr)
+	}
+	defer release()
 	return m.rollbackSpawn(ctx, id)
 }
 
@@ -983,7 +1000,30 @@ func (m *Manager) RollbackSpawn(ctx context.Context, id domain.SessionID) (delet
 // failed partway, handle lost after a crash) is still terminated after the
 // available destroy steps are skipped so it can be cleaned up from the
 // dashboard.
+// Killing an orchestrator takes the project ownership gate, so a teardown
+// cannot interleave with a replacement that is minting its successor.
 func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return false, fmt.Errorf("kill %s: %w", id, err)
+	}
+	if !ok {
+		return false, nil // already gone: benign race
+	}
+	if rec.Kind != domain.KindOrchestrator {
+		return m.killUnderOwnership(ctx, id)
+	}
+	release, err := m.acquireProjectOwnership(ctx, rec.ProjectID)
+	if err != nil {
+		return false, fmt.Errorf("kill %s: %w", id, err)
+	}
+	defer release()
+	return m.killUnderOwnership(ctx, id)
+}
+
+// killUnderOwnership is Kill's body. Callers must already hold the project
+// ownership gate for orchestrator sessions.
+func (m *Manager) killUnderOwnership(ctx context.Context, id domain.SessionID) (bool, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return false, fmt.Errorf("kill %s: %w", id, err)
@@ -995,6 +1035,16 @@ func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
 	m.destroyBrowserBestEffort(ctx, id)
 	handle := runtimeHandle(rec.Metadata)
 	ws := workspaceInfo(rec)
+	// A superseded orchestrator row must never tear down the canonical
+	// workspace its successor now owns. Terminate the row, skip the workspace.
+	if aliased, aliasErr := m.canonicalWorkspaceHeldByActiveOrchestrator(ctx, rec); aliasErr != nil {
+		return false, fmt.Errorf("kill %s: %w", id, aliasErr)
+	} else if aliased {
+		m.logger.Warn("kill: workspace is owned by the active orchestrator; skipping teardown",
+			"sessionID", id, "project", rec.ProjectID, "path", ws.Path)
+		ws = ports.WorkspaceInfo{}
+		handle = ports.RuntimeHandle{}
+	}
 
 	var workspaceProjectRows []ports.WorkspaceRepoInfo
 	workspaceProject := false
@@ -1185,10 +1235,68 @@ func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id dom
 	if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
 		return fmt.Errorf("retire replacement %s: clear restore markers: %w", id, err)
 	}
+	// Release this row's claim on the workspace before anything can spawn a
+	// successor onto it. The orchestrator worktree and branch are canonical per
+	// project, so a retired row that keeps recording them stays a live alias for
+	// whatever the successor owns — and any later path-keyed teardown (Kill,
+	// Cleanup) would destroy the *current* orchestrator's worktree. The worktree
+	// is already force-destroyed above, so these fields describe nothing.
+	if err := m.releaseRetiredWorkspaceClaim(ctx, rec.ID); err != nil {
+		return fmt.Errorf("retire replacement %s: %w", id, err)
+	}
 	if err := m.lcm.MarkTerminated(ctx, rec.ID); err != nil {
 		return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
 	}
 	return nil
+}
+
+// releaseRetiredWorkspaceClaim clears the workspace/runtime ownership fields of
+// a retired session so its row can never alias a successor's canonical
+// workspace. Role pin and identity are preserved for audit.
+func (m *Manager) releaseRetiredWorkspaceClaim(ctx context.Context, id domain.SessionID) error {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("release workspace claim: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	rec.Metadata.WorkspacePath = ""
+	rec.Metadata.WorkspaceRepoPath = ""
+	rec.Metadata.Branch = ""
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(ctx, rec); err != nil {
+		return fmt.Errorf("release workspace claim: %w", err)
+	}
+	return nil
+}
+
+// canonicalWorkspaceHeldByActiveOrchestrator reports whether rec's recorded
+// workspace path is also recorded by a different, still-active orchestrator in
+// the same project. Because the orchestrator worktree is canonical per project,
+// that means the path belongs to the current owner and must not be torn down on
+// behalf of a superseded row. Defence in depth behind
+// releaseRetiredWorkspaceClaim, which prevents the alias from existing at all.
+func (m *Manager) canonicalWorkspaceHeldByActiveOrchestrator(ctx context.Context, rec domain.SessionRecord) (bool, error) {
+	path := strings.TrimSpace(rec.Metadata.WorkspacePath)
+	if path == "" || rec.Kind != domain.KindOrchestrator {
+		return false, nil
+	}
+	recs, err := m.store.ListSessions(ctx, rec.ProjectID)
+	if err != nil {
+		return false, fmt.Errorf("list sessions for %s: %w", rec.ProjectID, err)
+	}
+	for _, other := range recs {
+		if other.ID == rec.ID || other.IsTerminated || other.Kind != domain.KindOrchestrator {
+			continue
+		}
+		if strings.TrimSpace(other.Metadata.WorkspacePath) == path {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *Manager) stopPreviewBestEffort(ctx context.Context, id domain.SessionID) {
@@ -1316,11 +1424,25 @@ func (m *Manager) relaunchRestoredSession(ctx context.Context, rec domain.Sessio
 // identity and never changes the durable terminated flag as an intermediate
 // step.
 func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
+	// Lock order is project ownership -> session resume fence, never the
+	// reverse: an exited orchestrator must not be relaunched while a
+	// replacement is retiring it.
+	if rec, ok, err := m.store.GetSession(ctx, id); err != nil {
+		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, err)
+	} else if ok && rec.Kind == domain.KindOrchestrator {
+		release, acqErr := m.acquireProjectOwnership(ctx, rec.ProjectID)
+		if acqErr != nil {
+			return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, acqErr)
+		}
+		defer release()
+	}
 	if !m.beginAgentResume(id) {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrResumeInProgress)
 	}
 	defer m.endAgentResume(id)
 
+	// Reload under both protections; the pre-gate read above resolved kind and
+	// project only.
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, err)
@@ -2430,7 +2552,17 @@ type CleanupResult struct {
 // Cleanup reclaims the workspaces of terminal sessions in a project. A workspace
 // whose teardown is refused (uncommitted work) is never forced; it is reported
 // in Skipped with the reason so the refusal is visible instead of silent.
+// Cleanup takes the project ownership gate for its whole run: it reclaims
+// terminated sessions by their recorded workspace path, and a superseded
+// orchestrator row must not be reclaimed while (or after) a replacement hands
+// that canonical path to a successor.
 func (m *Manager) Cleanup(ctx context.Context, project domain.ProjectID) (CleanupResult, error) {
+	release, err := m.acquireProjectOwnership(ctx, project)
+	if err != nil {
+		return CleanupResult{}, fmt.Errorf("cleanup %s: %w", project, err)
+	}
+	defer release()
+
 	recs, err := m.cleanupRecords(ctx, project)
 	if err != nil {
 		return CleanupResult{}, fmt.Errorf("cleanup %s: %w", project, err)
@@ -2443,6 +2575,17 @@ func (m *Manager) Cleanup(ctx context.Context, project domain.ProjectID) (Cleanu
 		ws := workspaceInfo(rec)
 		if ws.Path == "" {
 			m.cleanupSystemPromptDir(rec.ID)
+			continue
+		}
+		// Never reclaim a canonical orchestrator workspace that the current
+		// owner is using: a superseded row can still name it.
+		if aliased, aliasErr := m.canonicalWorkspaceHeldByActiveOrchestrator(ctx, rec); aliasErr != nil {
+			return CleanupResult{}, fmt.Errorf("cleanup %s: %w", project, aliasErr)
+		} else if aliased {
+			result.Skipped = append(result.Skipped, CleanupSkip{
+				SessionID: rec.ID,
+				Reason:    "workspace is owned by the project's active orchestrator",
+			})
 			continue
 		}
 		if h := runtimeHandle(rec.Metadata); h.ID != "" {

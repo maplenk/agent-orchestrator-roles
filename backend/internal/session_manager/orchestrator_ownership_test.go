@@ -330,3 +330,185 @@ func TestNewestOrchestratorRecord_IsDeterministic(t *testing.T) {
 		t.Fatalf("survivor = %s, want the newest CreatedAt a0", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Canonical-workspace aliasing
+//
+// The orchestrator worktree is canonical per project, so a superseded row that
+// keeps recording it is a live alias for whatever the successor owns. These
+// tests cover both layers of the fix: retirement releases the claim, and any
+// path-keyed teardown refuses a path the active orchestrator holds.
+// ---------------------------------------------------------------------------
+
+// TestRetireForReplacement_ReleasesWorkspaceClaim is the root fix: a retired row
+// must stop naming the canonical workspace it no longer owns.
+func TestRetireForReplacement_ReleasesWorkspaceClaim(t *testing.T) {
+	m, st, _ := ownershipHarness(t, nil, "mer")
+	seedOrchestrator(st, "mer-a", "mer", time.Now().Add(-time.Hour), false)
+
+	if err := m.RetireForReplacement(context.Background(), "mer-a"); err != nil {
+		t.Fatalf("RetireForReplacement: %v", err)
+	}
+	got := st.sessions["mer-a"].Metadata
+	if got.WorkspacePath != "" || got.Branch != "" || got.RuntimeHandleID != "" {
+		t.Fatalf("retired row still claims workspace ownership: %+v", got)
+	}
+	if !st.sessions["mer-a"].IsTerminated {
+		t.Fatal("retired row must be terminated")
+	}
+}
+
+// TestKill_SupersededOrchestratorLeavesSuccessorIntact is the sequential bug:
+// replace A with B, then kill A. B keeps its workspace.
+func TestKill_SupersededOrchestratorLeavesSuccessorIntact(t *testing.T) {
+	m, st, _ := ownershipHarness(t, nil, "mer")
+	seedOrchestrator(st, "mer-a", "mer", time.Now().Add(-time.Hour), false)
+
+	res, err := m.EnsureOrchestrator(context.Background(), ports.SpawnConfig{ProjectID: "mer"}, true)
+	if err != nil {
+		t.Fatalf("EnsureOrchestrator: %v", err)
+	}
+	successor := res.Record.ID
+	successorPath := st.sessions[successor].Metadata.WorkspacePath
+	if successorPath == "" {
+		t.Fatal("successor has no workspace path; fixture cannot exercise the alias")
+	}
+
+	if _, err := m.Kill(context.Background(), "mer-a"); err != nil {
+		t.Fatalf("Kill(superseded): %v", err)
+	}
+
+	if st.sessions[successor].IsTerminated {
+		t.Fatal("killing the superseded orchestrator terminated the successor")
+	}
+	if got := st.sessions[successor].Metadata.WorkspacePath; got != successorPath {
+		t.Fatalf("successor workspace path changed: %q -> %q", successorPath, got)
+	}
+	active := activeOrchestratorIDs(t, m, "mer")
+	if len(active) != 1 || active[0] != successor {
+		t.Fatalf("active orchestrators = %v, want only the successor %s", active, successor)
+	}
+}
+
+// aliasedFixture builds the legacy shape this fix defends against: a terminated
+// predecessor whose row still records the canonical path the active successor
+// owns. Rows written before releaseRetiredWorkspaceClaim look exactly like this.
+func aliasedFixture(t *testing.T) (*Manager, *fakeStore, *fakeWorkspace, string) {
+	t.Helper()
+	st := newFakeStore()
+	st.num = 100
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	ws := &fakeWorkspace{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}},
+		Workspace: ws, Store: st, Messenger: &fakeMessenger{},
+		Lifecycle: &fakeLCM{store: st},
+		LookPath:  func(string) (string, error) { return "/bin/true", nil },
+	})
+	const canonical = "/ws/mer/orchestrator/mer-orchestrator"
+	st.sessions["mer-old"] = domain.SessionRecord{
+		ID: "mer-old", ProjectID: "mer", Kind: domain.KindOrchestrator, IsTerminated: true,
+		Metadata: domain.SessionMetadata{WorkspacePath: canonical, Branch: "ao/mer-orchestrator"},
+	}
+	st.sessions["mer-new"] = domain.SessionRecord{
+		ID: "mer-new", ProjectID: "mer", Kind: domain.KindOrchestrator,
+		Metadata: domain.SessionMetadata{WorkspacePath: canonical, Branch: "ao/mer-orchestrator"},
+	}
+	return m, st, ws, canonical
+}
+
+func TestKill_RefusesWorkspaceOwnedByActiveOrchestrator(t *testing.T) {
+	m, st, ws, canonical := aliasedFixture(t)
+
+	if _, err := m.Kill(context.Background(), "mer-old"); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if ws.lastDestroyInfo.Path == canonical {
+		t.Fatal("killed the canonical workspace owned by the active orchestrator")
+	}
+	if st.sessions["mer-new"].IsTerminated {
+		t.Fatal("active orchestrator was terminated")
+	}
+}
+
+func TestCleanup_SkipsWorkspaceOwnedByActiveOrchestrator(t *testing.T) {
+	m, st, ws, canonical := aliasedFixture(t)
+
+	res, err := m.Cleanup(context.Background(), "mer")
+	if err != nil {
+		t.Fatalf("Cleanup: %v", err)
+	}
+	if ws.lastDestroyInfo.Path == canonical {
+		t.Fatal("cleanup reclaimed the canonical workspace owned by the active orchestrator")
+	}
+	for _, id := range res.Cleaned {
+		if id == "mer-old" {
+			t.Fatal("superseded orchestrator must not be reported as cleaned")
+		}
+	}
+	var skipped bool
+	for _, s := range res.Skipped {
+		if s.SessionID == "mer-old" {
+			skipped = true
+			if s.Reason == "" {
+				t.Error("skip must carry a user-facing reason")
+			}
+		}
+	}
+	if !skipped {
+		t.Fatalf("mer-old must be skipped with a reason; got %+v", res)
+	}
+	if st.sessions["mer-new"].IsTerminated {
+		t.Fatal("active orchestrator was terminated")
+	}
+}
+
+// TestPublicOrchestratorMutationsBlockOnTheGate proves every public mutation
+// path acquires ownership rather than racing a replacement. Each call must
+// block while the gate is held and complete once it is released; the returned
+// error is irrelevant (some legitimately fail on state), only the blocking is.
+func TestPublicOrchestratorMutationsBlockOnTheGate(t *testing.T) {
+	cases := []struct {
+		name string
+		call func(*Manager) error
+	}{
+		{"Kill", func(m *Manager) error { _, err := m.Kill(context.Background(), "mer-a"); return err }},
+		{"RetireForReplacement", func(m *Manager) error { return m.RetireForReplacement(context.Background(), "mer-a") }},
+		{"RestoreWithMode", func(m *Manager) error { _, err := m.RestoreWithMode(context.Background(), "mer-a"); return err }},
+		{"ResumeAgentWithMode", func(m *Manager) error { _, err := m.ResumeAgentWithMode(context.Background(), "mer-a"); return err }},
+		{"RollbackSpawn", func(m *Manager) error { _, _, err := m.RollbackSpawn(context.Background(), "mer-a"); return err }},
+		{"Cleanup", func(m *Manager) error { _, err := m.Cleanup(context.Background(), "mer"); return err }},
+		{"EnsureOrchestrator", func(m *Manager) error {
+			_, err := m.EnsureOrchestrator(context.Background(), ports.SpawnConfig{ProjectID: "mer"}, false)
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, st, _ := ownershipHarness(t, nil, "mer")
+			seedOrchestrator(st, "mer-a", "mer", time.Now().Add(-time.Hour), false)
+
+			release, err := m.acquireProjectOwnership(context.Background(), "mer")
+			if err != nil {
+				t.Fatalf("acquire: %v", err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- tc.call(m) }()
+
+			select {
+			case <-done:
+				release()
+				t.Fatalf("%s proceeded while the project ownership gate was held", tc.name)
+			case <-time.After(150 * time.Millisecond):
+			}
+
+			release()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s never proceeded after the gate was released", tc.name)
+			}
+		})
+	}
+}
