@@ -277,6 +277,7 @@ add the index. Specify and test:
 | Ordering | Reconciliation must complete before the daemon serves, alongside the existing `Reconcile` passes |
 | Restore preflight | `Restore` of a terminated orchestrator must be refused **before** runtime/workspace creation when another active owner exists — failing after creation leaks a worktree |
 | Constraint loss at spawn | If `MarkSpawned` loses the unique-index race, cleanup of the just-created runtime must also be probe-authoritative, reusing `destroyRuntimeProbed` (`switch.go:596-611`) rather than a bare `Destroy` |
+| **Drain failures fail closed** | Boot reconciliation must **not** retire a loser unless its execution death is *authoritative*. `drainScopedShells` is deliberately best-effort for interactive cleanup — a shell that cannot be confirmed closed is logged and skipped — but reconciliation must treat an unconfirmed runtime or shell as a **refusal to retire**, leaving the duplicate for the next pass rather than releasing a workspace something may still be executing in |
 - The lease is **not** released mid-saga: an in-place switch keeps the same
   session id, so the lease value is stable across the whole transfer and only
   the generation changes. This is what makes the in-place shape cheap.
