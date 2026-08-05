@@ -147,18 +147,21 @@ Found while mapping; all predate this phase.
 
 | # | Defect | Evidence |
 |---|--------|----------|
-| D1 | **Two active orchestrators are reachable.** `Service.Restore` takes no orchestrator lock and does no uniqueness check; boot `RestoreAll` relaunches every marker-carrying session with no per-project dedup. The service mutex is process-local (`map[ProjectID]*sync.Mutex`), so it is also useless across daemons. | `service/session/service.go:438-449`, `:121-122`, `:422-436`; `manager.go:1720-1745` |
+| D1 | **Two active orchestrators are reachable in-process.** `Service.Restore` takes no orchestrator lock and does no uniqueness check; boot `RestoreAll` relaunches every marker-carrying session with no per-project dedup. The service mutex is process-local and is not taken on either path. (It is *not* a cross-daemon gap — `datadirlock` has excluded a second daemon since `9480bdc7`.) | `service/session/service.go:438-449`, `:121-122`, `:422-436`; `manager.go:1720-1745` |
 | D2 | **Retire-succeeded-but-spawn-failed leaves the project with zero orchestrators and no recovery path.** `verifyOrchestratorReplacement` errors *after* the successor is live, with no rollback, and the predecessor is already destroyed. | `service/session/service.go:334-350`, `:374-389` |
-| D3 | **The retire notice is factually wrong.** It promises "a fresh orchestrator will take over in a **new workspace**"; the successor reuses the identical canonical path and branch. | `service/session/service.go:365` vs `workspace.go:1238-1244` |
-| D4 | **Workspace-kind projects break the branch invariant.** `DefaultSpawnBranch` returns `ao/<sessionID>` for `ProjectKindWorkspace` regardless of kind, while `verifyOrchestratorReplacement` asserts the canonical orchestrator branch. | `manager.go:2488-2497` vs `service/session/service.go:384-387` |
+| ~~D3~~ | ~~Retire notice promises a "new workspace"~~ — **fixed** in `85065146` | — |
+| ~~D4~~ | ~~Workspace-kind projects break the orchestrator branch invariant~~ — **fixed** in `85065146` | — |
 | D5 | **Stale dead code/comment.** `lifecycle/manager.go:23-25` still documents a worker-idle "dispatcher [that] reads it to resolve the current orchestrator at delivery time"; that dispatcher was deleted in `2f6d98f2`. `sessionguard.NudgeCoordination` (`guard.go:158-168`) has zero production callers for the same reason. | as cited |
 
-D1 is the important one: it is the same gap as the missing lease, and it has a
-cheap enforcement — a **partial unique index** on
-`(project_id) WHERE kind='orchestrator' AND is_terminated=0`. That makes the
-database, not a process-local mutex, the arbiter of "one coordinator per
-project". Boot restore must then handle the constraint by failing that one
-restore closed rather than aborting the whole pass.
+D3 and D4 were landed separately as `85065146`, ahead of this phase: they are
+independent user-visible correctness bugs and do not belong in the migration's
+failure surface. **D5 is likewise independent cleanup and must not ride in the
+migration commit** — dead-code removal and a schema change should not share a
+revert boundary.
+
+D1 is the structural one. It is the same gap as the missing lease, and the
+database — not a process-local mutex — should arbitrate it. See §3.2, which also
+explains why the index alone is insufficient.
 
 ### 2.5 What transfers unchanged from 2A (reuse, do not reinvent)
 
@@ -205,19 +208,52 @@ CREATE UNIQUE INDEX idx_sessions_one_active_orchestrator
 ```
 
 This makes "one coordinator per project" a database invariant rather than a
-process-local convention, and it closes D1 (which no amount of service-layer
-locking can close, since `Restore`/`RestoreAll`/a second daemon all bypass the
-mutex). With the invariant enforced, "who is the orchestrator" becomes a
-*total* function and no lease row is required.
+process-local convention. `activeOrchestratorSessionID` and
+`activeOrchestrators`/`newestSession` both become readers of that single
+guaranteed row, so the §2.1 tie-break divergence stops being *reachable* rather
+than merely being papered over.
 
-- `activeOrchestratorSessionID` and `activeOrchestrators`/`newestSession` both
-  become readers of that single guaranteed row, eliminating the §2.1 divergence.
-  The tie-break disagreement stops being reachable rather than merely being
-  papered over.
-- **Migration risk:** existing databases may already violate the constraint
-  (D1 is reachable today). The migration must terminate or reconcile duplicates
-  before adding the index, and boot restore must fail a violating restore
-  closed without aborting the whole pass.
+**The index is necessary but not sufficient, and must not be mistaken for the
+ownership boundary.** It arbitrates final row cardinality; it cannot serialize
+the operations that race to produce those rows. In particular it cannot prevent
+`Restore`, boot `RestoreAll`, a switch/recovery saga, and the retire→spawn
+replacement sequence from concurrently destroying or *adopting* the same
+canonical workspace — and `gitworktree.Create` adopts rather than fails
+(§2.1b), so the damage happens before any row is written.
+
+**Required: a manager-owned, project-keyed gate** (or an equivalent durable
+CAS) that spans the *entire* operation, explicitly including the interval
+between retirement and successor spawn. Requirements:
+
+- Lives in the session manager, where the switch fence lives — not only in the
+  service layer. Today's `lockOrchestratorProject`
+  (`service/session/service.go:422-436`) is service-layer and process-local, and
+  `Service.Restore` (`:438-449`) and `RestoreAll` never take it at all.
+- Covers: orchestrator switch/fresh, switch recovery, orchestrator `Restore`,
+  boot `RestoreAll`, and retire-through-successor-spawn as one critical section.
+- Composes with the existing session-keyed `beginSwitch` single-flight
+  (`switch.go:667-678`), which remains necessary and is not a substitute.
+
+**Correction on prior reasoning.** An earlier draft justified the index partly
+as protection against a second daemon. That is wrong: `datadirlock` has taken an
+exclusive lease on `AO_DATA_DIR` before `sqlite.Open` since `9480bdc7`, so a
+second AO daemon never reaches the store. The index remains worthwhile for
+legacy databases already carrying duplicates, for in-process restore races, and
+as defense in depth — not for multi-daemon.
+
+### 3.2b Migration and losing-runtime reconciliation (must be specified before coding)
+
+Existing databases can already violate the constraint, so `0046` cannot simply
+add the index. Specify and test:
+
+| Concern | Requirement |
+|---------|-------------|
+| Survivor | A **deterministic** rule (newest by `CreatedAt`, then `UpdatedAt`, then lexical `ID` — matching `sessionNewer`, `service.go:412`), not `ListSessions` order |
+| Losers | Marked terminated **and** their `session_worktrees` restore markers neutralized, or boot `RestoreAll` will resurrect them on every restart |
+| Live loser runtimes | **Probe-authoritative** reap before serving traffic — a best-effort `Destroy` can leave a live process holding the canonical worktree |
+| Ordering | Reconciliation must complete before the daemon serves, alongside the existing `Reconcile` passes |
+| Restore preflight | `Restore` of a terminated orchestrator must be refused **before** runtime/workspace creation when another active owner exists — failing after creation leaks a worktree |
+| Constraint loss at spawn | If `MarkSpawned` loses the unique-index race, cleanup of the just-created runtime must also be probe-authoritative, reusing `destroyRuntimeProbed` (`switch.go:596-611`) rather than a bare `Destroy` |
 - The lease is **not** released mid-saga: an in-place switch keeps the same
   session id, so the lease value is stable across the whole transfer and only
   the generation changes. This is what makes the in-place shape cheap.
@@ -232,11 +268,21 @@ mutex). With the invariant enforced, "who is the orchestrator" becomes a
 prompt for `KindOrchestrator`). Replace it, do not fake it:
 
 - Keep `SemanticHandoffV1` (agent-authored, untrusted) unchanged.
-- Add a host-computed **worker roster**: for each live worker in the project —
-  session id, role id, harness, activity state, branch, PR facts. This is
-  entirely AO-owned data read from the sessions table, so it is legitimately
-  *observed* under DoD invariant 11 and needs no agent attestation.
+- Define a **new versioned artifact `ObservedOrchestratorV1`** — do *not*
+  overload or reshape worker `ObservedWorkspaceV1`, which stays git-anchored and
+  worker-owned. Two observed types, one compiler rule.
 - Compiler rule stays: observed facts override semantic claims.
+
+`ObservedOrchestratorV1` contract, to be fixed before implementation:
+
+| Aspect | Specification |
+|--------|---------------|
+| Content | Per live worker in the project: session id, role id, harness, activity state, branch, and PR facts |
+| Source | Sessions come from the session store; **PR facts do not live on the session row** — they are a separate read via `ListPRFactsForSession` (`storage/sqlite/store/pr_facts.go:30`, used at `service/session/service.go:719`). The compiler must take an explicit store port for both, not reach through a session record |
+| Ordering | **Deterministic** — sort by session id. Never `ListSessions` order, so the compiled text is stable and diffable across generations |
+| Size bound | Hard cap on roster entries; the handoff is injected into a system prompt and must not scale without limit with project size |
+| Truncation | **Explicit and visible** — when the cap is hit, the compiled text must say how many workers were omitted. A silently truncated roster is worse than no roster, because the successor cannot tell it is incomplete |
+| Provenance | Entirely AO-owned data, so it is legitimately *observed* under DoD invariant 11 and needs no agent attestation |
 
 `SwitchPending.OriginalTask` is meaningless here and must be left empty rather
 than populated with a synthetic prompt.
@@ -255,19 +301,24 @@ either path preserves now, which is the concrete P1 win for this phase.
 
 | Slice | Scope | Est. | Depends on |
 |-------|-------|------|------------|
-| **2B-0** | **Coordinator uniqueness**: migration 0046 partial unique index + duplicate reconciliation, both resolvers read the single row, restore paths fail closed on violation. Closes **D1**, and fixes **D3**/**D4** (both one-liners in the same code) | 1–2 d | — |
-| **2B-1** | Orchestrator in-place **fresh conversation**: parameterize the `KindWorker` guards (`switch.go:64`, `:254`, `manager.go:1673`, `service/session/switch.go:59`), project-keyed single-flight, `Reconcile` recovery for orchestrators, worker-roster handoff, new ledger kind | 2–3 d | 2B-0 |
-| **2B-2** | Replacement-path **recovery**: close **D2** so a failed successor spawn cannot leave a project with zero orchestrators | 1 d | 2B-0 |
+| **2B-0a** | **Project ownership gate**: manager-owned, project-keyed exclusion spanning switch/fresh, recovery, orchestrator `Restore`, boot `RestoreAll`, and retire-through-successor-spawn (§3.2) | 1–2 d | — |
+| **2B-0b** | **Coordinator uniqueness**: migration 0046 partial unique index, plus the reconciliation spec in §3.2b (deterministic survivor, marker neutralization, probe-authoritative reap, restore preflight). Closes **D1** | 1–2 d | 2B-0a |
+| **2B-1** | Orchestrator in-place **fresh conversation**: parameterize the `KindWorker` guards (`switch.go:64`, `:254`, `manager.go:1673`, `service/session/switch.go:59`), `Reconcile` recovery for orchestrators, `ObservedOrchestratorV1` handoff, new ledger kind | 2–3 d | 2B-0b |
+| **2B-2** | Replacement **durable recoverability**: persist replacement intent before retirement so a zero-owner interval is always auto-recovered (**D2**, per DoD 5b) | 1–2 d | 2B-0b |
 | **2B-3** | **Cross-harness** orchestrator switch | 1–2 d | 2B-1. non-strict only; **strict blocked on 1-B (Claude RO)** |
 | *deferred* | Successor-session handoff (new session id, worker rebind push) | — | 2B-2; needs both a live-worker rebind mechanism and worktree-release sequencing (§2.1b), neither of which exists |
 
-Estimate for 2B-0..2B-3 ≈ **5–8 working days**, versus the 3–5 in MASTER_PLAN §8.
-The delta is coordinator uniqueness and replacement recovery — real gaps that
-estimate did not account for, both discovered by mapping rather than assumed.
+Estimate for 2B-0a..2B-3 ≈ **6–11 working days**, versus the 3–5 in
+MASTER_PLAN §8. The delta is the ownership gate, coordinator uniqueness with its
+reconciliation path, and replacement recoverability — real gaps that estimate did
+not account for, all discovered by mapping rather than assumed. The upper bound
+is driven by 2B-0b: migrating databases that may already violate the invariant is
+the least predictable work in the phase.
 
-**Sequencing note.** 2B-0 is first because every later slice assumes a single
-well-defined coordinator. Landing the saga on top of a project that can hold two
-active orchestrators sharing one worktree would produce exactly the ambiguous
+**Sequencing note.** The ownership gate (2B-0a) comes before the constraint
+(2B-0b), and both before the saga. The gate serializes the operations; the index
+arbitrates the rows. Landing the saga on a project that can still hold two active
+orchestrators adopting one worktree would reproduce exactly the ambiguous
 generation-ownership failures Phase 2A spent its review budget eliminating.
 
 ---
@@ -275,7 +326,11 @@ generation-ownership failures Phase 2A spent its review budget eliminating.
 ## 5. Definition of done
 
 1. An orchestrator fresh conversation preserves session id, workspace, branch,
-   role pin, and `canSpawn` capability hash.
+   the durable role pin, and `ResolvedPermissions.CanSpawn`. It must **rotate**
+   the spawn credential, never preserve it: `relaunchSession` issues a fresh
+   token and hash on every relaunch precisely "so a terminated/killed session's
+   prior token cannot be reused" (`manager.go:1359-1369`). Preserving
+   `SpawnCapabilityHash` across a generation would reintroduce that hole.
 2. At most one generation owns orchestrator input at the boundary — all three
    2A fences apply, verified by test.
 3. Pre-stop failure leaves the orchestrator usable (probe-confirmed-alive
@@ -286,8 +341,20 @@ generation-ownership failures Phase 2A spent its review budget eliminating.
 5. Exactly one session answers "who is the orchestrator" for a project, across
    both resolvers — enforced by the database, and verified to hold through
    `Restore`, boot `RestoreAll`, and a concurrent second daemon.
-5b. A failed successor spawn never leaves a project with zero orchestrators
-   (D2), and the retire notice describes what actually happens (D3).
+5b. **Replacement is durably recoverable** (D2). "Never zero orchestrators" is
+   not achievable under retire-first semantics — the canonical-workspace
+   collision (§2.1b) forces retirement to release the worktree before the
+   successor can create it, so a spawn failure necessarily leaves a
+   zero-owner interval. The achievable guarantee is: **replacement intent is
+   persisted before retirement, and a zero-owner state is always automatically
+   recovered** (on retry or at next boot reconcile), never terminal.
+
+   The two failure modes are distinct and must be evidenced separately:
+
+   | Failure | State | Required behavior |
+   |---------|-------|-------------------|
+   | Spawn fails after retirement | Zero orchestrators | Persisted intent drives automatic recovery; project is never stranded |
+   | `verifyOrchestratorReplacement` fails | Successor is **already live and serving** | API reports failure; must not imply the successor is absent, and must not destroy a healthy orchestrator as a side effect |
 6. Lifecycle ledger records every orchestrator switch/fresh with the same
    `requested → pre_stop → post_stop → target_ack` sequence and no unexplained
    `failed`.
