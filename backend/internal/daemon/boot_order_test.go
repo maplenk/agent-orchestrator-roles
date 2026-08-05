@@ -128,19 +128,7 @@ func TestBootOrder_ReapQueueDrainsBeforeSessionReconciliationAndServing(t *testi
 
 	// Must come before: every one of these either mutates durable state or
 	// exposes a surface, and none may happen while an obligation is unconfirmed.
-	after := []struct {
-		call, why string
-	}{
-		{"sweepShellTerminals", "a best-effort sweep must not precede the fatal gate"},
-		{"httpd.NewWithDeps", "the API server must not be built before the gate passes"},
-		{"browserruntime.Listen", "the browser runtime listener is a live surface"},
-		{"browserBroker.Serve", "serving browser control exposes the workspace"},
-		{"restoreMobileOnBoot", "re-arming the mobile LAN listener exposes the API"},
-		{"sessMgr.Reconcile", "generic reconciliation must follow the queue drain"},
-		{"lcStack.ReconcileRuntime", "runtime reconciliation must follow the queue drain"},
-		{"srv.Run", "the daemon must not serve with an outstanding obligation"},
-	}
-	for _, a := range after {
+	for _, a := range stepsBehindTheFatalGates() {
 		pos, ok := first[a.call]
 		if !ok {
 			t.Errorf("%s is not called in Run at all; this assertion has gone stale", a.call)
@@ -150,6 +138,140 @@ func TestBootOrder_ReapQueueDrainsBeforeSessionReconciliationAndServing(t *testi
 			t.Errorf("%s runs at %s, BEFORE the reap drain at %s — %s",
 				a.call, fset.Position(pos), fset.Position(drainPos), a.why)
 		}
+	}
+}
+
+// gatedStep is a boot step that must not run until the fatal gates have passed.
+type gatedStep struct{ call, why string }
+
+// stepsBehindTheFatalGates lists everything that either mutates durable state or
+// exposes a surface to a client. Both fatal gates — the reap-queue drain and
+// session reconciliation — are checked against this same list, because a gate
+// that runs after a listener is already live cannot prevent serving.
+func stepsBehindTheFatalGates() []gatedStep {
+	return []gatedStep{
+		{"httpd.NewWithDeps", "the API server must not be built before the gates pass"},
+		{"preview.NewPoller", "the preview poller drives sessions"},
+		{"browserruntime.Listen", "the browser runtime listener is a live surface"},
+		{"browserBroker.Serve", "serving browser control exposes the workspace"},
+		{"restoreMobileOnBoot", "re-arming the mobile LAN listener exposes the API"},
+		{"supervisor.Listen", "the supervisor link is a live surface"},
+		{"srv.Run", "the daemon must not serve with an outstanding obligation"},
+	}
+}
+
+// TestBootOrder_SessionReconcileGateAlsoPrecedesEverySurface pins the second
+// fatal gate.
+//
+// Reconcile is only mostly best-effort: ErrLaunchCleanupUnresolved means a
+// relaunch left a runtime executing that nothing will sweep before the next
+// restart, and that aborts boot. It previously ran AFTER browserruntime.Listen
+// /Serve and restoreMobileOnBoot, so making it fatal would still have exposed
+// live surfaces first — the gate has to precede them to mean anything.
+//
+// It must still follow the reap drain and the shell-closer wiring: Reconcile
+// tears down worktrees, which needs the closer, and the drain owns the
+// stronger claim on the same runtimes.
+func TestBootOrder_SessionReconcileGateAlsoPrecedesEverySurface(t *testing.T) {
+	fset, run := parseRunFunc(t)
+	first, count := callOrder(run)
+
+	const reconcile = "sessMgr.Reconcile"
+	pos, ok := first[reconcile]
+	if !ok {
+		t.Fatalf("%s is not called in Run", reconcile)
+	}
+	if count[reconcile] != 1 {
+		t.Fatalf("%s called %d times, want exactly once", reconcile, count[reconcile])
+	}
+
+	for _, b := range []gatedStep{
+		{"sessMgr.SetShellTerminalCloser", "Reconcile tears down worktrees and needs the shell closer"},
+		{"sessMgr.DrainOrchestratorReapQueue", "the reap queue owns the stronger claim on the same runtimes"},
+		{"sweepShellTerminals", "the previous-run shell sweep precedes session reconciliation"},
+	} {
+		bp, found := first[b.call]
+		if !found {
+			t.Errorf("%s is not called in Run at all", b.call)
+			continue
+		}
+		if bp > pos {
+			t.Errorf("%s runs at %s, AFTER session reconcile at %s — %s",
+				b.call, fset.Position(bp), fset.Position(pos), b.why)
+		}
+	}
+
+	for _, a := range stepsBehindTheFatalGates() {
+		ap, found := first[a.call]
+		if !found {
+			t.Errorf("%s is not called in Run at all; this assertion has gone stale", a.call)
+			continue
+		}
+		if ap < pos {
+			t.Errorf("%s runs at %s, BEFORE session reconcile at %s — %s",
+				a.call, fset.Position(ap), fset.Position(pos), a.why)
+		}
+	}
+}
+
+// TestBootOrder_UnresolvedCleanupAbortsBoot pins that the fatal condition is
+// actually wired, and that it is SELECTIVE: only ErrLaunchCleanupUnresolved
+// aborts. Every other reconcile failure stays logged, or an unrelated store
+// hiccup would stop the daemon starting at all.
+func TestBootOrder_UnresolvedCleanupAbortsBoot(t *testing.T) {
+	fset, run := parseRunFunc(t)
+
+	var branch *ast.IfStmt
+	ast.Inspect(run.Body, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok || ifs.Init == nil {
+			return true
+		}
+		if strings.Contains(stmtText(ifs.Init), "sessMgr.Reconcile") {
+			branch = ifs
+			return false
+		}
+		return true
+	})
+	if branch == nil {
+		t.Fatal("no `if err := sessMgr.Reconcile(...); err != nil` in Run")
+	}
+
+	var (
+		guarded bool
+		returns int
+		logs    int
+	)
+	ast.Inspect(branch.Body, func(n ast.Node) bool {
+		switch node := n.(type) {
+		case *ast.CallExpr:
+			name := renderCallee(node.Fun)
+			if name == "errors.Is" {
+				for _, arg := range node.Args {
+					if strings.Contains(renderCallee(arg), "ErrLaunchCleanupUnresolved") {
+						guarded = true
+					}
+				}
+			}
+			if name == "log.Error" {
+				logs++
+			}
+		case *ast.ReturnStmt:
+			returns++
+		}
+		return true
+	})
+	if !guarded {
+		t.Errorf("the reconcile-failure branch at %s does not test for ErrLaunchCleanupUnresolved: "+
+			"boot cannot tell an outstanding runtime from an ordinary failure", fset.Position(branch.Pos()))
+	}
+	if returns == 0 {
+		t.Errorf("the reconcile-failure branch at %s never returns: an unresolved runtime would not "+
+			"stop the daemon serving", fset.Position(branch.Pos()))
+	}
+	if logs == 0 {
+		t.Errorf("the reconcile-failure branch at %s has no logged path: making EVERY reconcile "+
+			"failure fatal would stop boot on unrelated errors", fset.Position(branch.Pos()))
 	}
 }
 

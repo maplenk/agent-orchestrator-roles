@@ -410,6 +410,27 @@ func TestRestoreAll_OrdinaryRelaunchFailureStillSkips(t *testing.T) {
 // RestoreAll only walks terminated rows. Reconcile is the last place the
 // condition is visible, so logging it there loses it for good.
 func TestReconcile_CollectsUnresolvedCleanupFromPostStopRecovery(t *testing.T) {
+	st, m := postStopRecoveryHarness(t)
+
+	err := m.Reconcile(context.Background())
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("Reconcile = %v, want ErrLaunchCleanupUnresolved so boot can refuse to serve", err)
+	}
+
+	// And the reason it had to be caught HERE: the row is still active, so no
+	// later pass could have collected it.
+	got := st.sessions["mer-1"]
+	if got.IsTerminated {
+		t.Fatal("fixture drifted: recovery terminated the session, so this is no longer the " +
+			"invisible-to-downstream path the test exists for")
+	}
+}
+
+// postStopRecoveryHarness builds a boot in which post_stop recovery relaunches
+// a target that then refuses to die: an active worker with an incomplete
+// post_stop, a MarkSpawned that fails, and a runtime that survives teardown.
+func postStopRecoveryHarness(t *testing.T) (*fakeStore, *Manager) {
+	t.Helper()
 	st := newFakeStore()
 	ws := t.TempDir()
 	art, sha := pinImplementorTemplate(t, st)
@@ -448,18 +469,25 @@ func TestReconcile_CollectsUnresolvedCleanupFromPostStopRecovery(t *testing.T) {
 	})
 	m.switchCapsOverride = testSwitchCaps
 	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+	return st, m
+}
+
+// TestReconcile_RelistFailureStillCarriesCollectedCleanup: the re-list between
+// the recovery and live passes is mandatory, and its failure used to return
+// bare. Anything already collected describes a runtime executing RIGHT NOW, so
+// a boot gate keying on ErrLaunchCleanupUnresolved would have seen only a store
+// error and served anyway.
+func TestReconcile_RelistFailureStillCarriesCollectedCleanup(t *testing.T) {
+	st, m := postStopRecoveryHarness(t)
+	// First ListAllSessions succeeds (drives recovery); the re-list fails.
+	st.listAllFailAfter = 2
 
 	err := m.Reconcile(context.Background())
 	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
-		t.Fatalf("Reconcile = %v, want ErrLaunchCleanupUnresolved so boot can refuse to serve", err)
+		t.Fatalf("Reconcile = %v, want the collected cleanup preserved through the re-list failure", err)
 	}
-
-	// And the reason it had to be caught HERE: the row is still active, so no
-	// later pass could have collected it.
-	got := st.sessions[id]
-	if got.IsTerminated {
-		t.Fatal("fixture drifted: recovery terminated the session, so this is no longer the " +
-			"invisible-to-downstream path the test exists for")
+	if !strings.Contains(err.Error(), "re-list sessions") {
+		t.Errorf("err = %v, want the store failure reported too", err)
 	}
 }
 

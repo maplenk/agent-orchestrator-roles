@@ -2139,7 +2139,10 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	// Re-list: recovery may have updated harness/runtime handles.
 	recs, err = m.store.ListAllSessions(ctx)
 	if err != nil {
-		return fmt.Errorf("reconcile: re-list sessions: %w", err)
+		// Joined, not returned bare: anything already collected above describes
+		// a runtime that is executing right now, and a caller gating on
+		// ErrLaunchCleanupUnresolved would miss it behind a plain store error.
+		return errors.Join(append(unresolved, fmt.Errorf("reconcile: re-list sessions: %w", err))...)
 	}
 	for _, rec := range recs {
 		if rec.IsTerminated {

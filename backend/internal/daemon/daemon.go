@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 	"github.com/aoagents/agent-orchestrator/backend/internal/terminal"
@@ -280,6 +282,38 @@ func Run() error {
 
 	// Ordinary best-effort reconciliation, now that the fatal gate has passed.
 	sweepShellTerminals(ctx, shellTermSvc, log)
+
+	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and
+	// terminate dead ones, reap leaked tmux, then restore shutdown-saved
+	// sessions.
+	//
+	// Mostly best-effort — a per-session failure is logged and boot continues —
+	// with ONE fatal condition. ErrLaunchCleanupUnresolved means a relaunch left
+	// a runtime executing that nothing is scheduled to sweep: Reconcile's own
+	// terminated-session reap pass has already run by then, and post_stop
+	// recovery keeps its session active, so neither is revisited before the next
+	// restart. Serving in that state is the same hazard the reap queue exists to
+	// prevent, so it gets the same answer.
+	//
+	// This sits HERE, before the API server is even constructed, for that fatal
+	// case to mean anything: it previously ran after browserruntime.Listen/Serve
+	// and restoreMobileOnBoot, so a fatal return would still have exposed live
+	// surfaces first. Everything client-facing — preview poller, browser runtime,
+	// mobile LAN, supervisor, srv.Run — now follows it.
+	if reconcileErr := sessMgr.Reconcile(ctx); reconcileErr != nil {
+		if errors.Is(reconcileErr, sessionmanager.ErrLaunchCleanupUnresolved) {
+			stop()
+			lcStack.Stop()
+			if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+				log.Error("cdc pipeline shutdown", "err", cdcErr)
+			}
+			return fmt.Errorf("reconcile sessions on boot: %w", reconcileErr)
+		}
+		log.Error("reconcile sessions on boot failed", "err", reconcileErr)
+	}
+	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
+		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
+	}
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
 	// to start the daemon. pushRegistry (interface) is assigned only when load
@@ -369,17 +403,6 @@ func Run() error {
 	// Best-effort: never blocks boot.
 	if err := restoreMobileOnBoot(mobilebridge.Path(cfg.DataDir), lan); err != nil {
 		log.Warn("restore mobile bridge on boot failed", "err", err)
-	}
-
-	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and
-	// terminate dead ones, reap leaked tmux, then restore shutdown-saved
-	// sessions. Best-effort: a failure is logged but never blocks boot. Placed
-	// before srv.Run so sessions are consistent before the server serves.
-	if reconcileErr := sessMgr.Reconcile(ctx); reconcileErr != nil {
-		log.Error("reconcile sessions on boot failed", "err", reconcileErr)
-	}
-	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
-		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
 
 	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.

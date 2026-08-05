@@ -51,6 +51,10 @@ type fakeStore struct {
 	updateCount     int
 	updateFailAfter int // 0 = never; fail on the Nth UpdateSession (1-based)
 	updateErr       error
+	// listAllCount / listAllFailAfter inject ListAllSessions failures, so a
+	// Reconcile pass can fail its re-list after already collecting findings.
+	listAllCount     int
+	listAllFailAfter int // 0 = never; fail on the Nth ListAllSessions (1-based)
 	// failLedgerPhase, when non-empty, makes AppendLifecycleLedger fail for that phase.
 	failLedgerPhase domain.LifecycleLedgerPhase
 	appendLedgerErr error
@@ -199,6 +203,12 @@ func (f *fakeStore) ListSessions(_ context.Context, p domain.ProjectID) ([]domai
 	return out, nil
 }
 func (f *fakeStore) ListAllSessions(context.Context) ([]domain.SessionRecord, error) {
+	f.listAllCount++
+	// listAllFailAfter targets Reconcile's mandatory RE-list specifically, which
+	// happens after post_stop recovery has already collected findings.
+	if f.listAllFailAfter > 0 && f.listAllCount >= f.listAllFailAfter {
+		return nil, errors.New("injected list failure")
+	}
 	var out []domain.SessionRecord
 	for _, r := range f.sessions {
 		out = append(out, r)
