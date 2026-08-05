@@ -661,6 +661,14 @@ func toAPIError(err error) error {
 			"Switch runtime state is uncertain; inspect session and recover carefully", nil)
 	case errors.Is(err, sessionmanager.ErrNotWorker):
 		return apierr.Invalid("NOT_A_WORKER", "Only worker sessions support switch/fresh conversation", nil)
+	case errors.Is(err, sessionmanager.ErrNotOrchestrator):
+		return apierr.Invalid("NOT_AN_ORCHESTRATOR", "This operation requires an orchestrator session", nil)
+	case errors.Is(err, sessionmanager.ErrOrchestratorCrossHarness):
+		// Mapped here too, not only at the service's own pre-check: the manager
+		// re-applies this refusal on the recovery path, and an unmapped
+		// sentinel would surface as a 500.
+		return apierr.Conflict("ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED",
+			"Orchestrators support in-place fresh conversation only; cross-harness switch is not available yet", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):

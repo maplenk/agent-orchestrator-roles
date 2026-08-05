@@ -105,6 +105,10 @@ func writeObservedOrchestrator(b *strings.Builder, obs domain.ObservedOrchestrat
 		}
 	}
 	fmt.Fprintf(b, "- Workers: %d live, %d terminated\n", live, done)
+	if obs.OmittedTerminated > 0 {
+		fmt.Fprintf(b, "- (%d older terminated workers omitted to bound this handoff; "+
+			"absence below is NOT evidence a worker never existed)\n", obs.OmittedTerminated)
+	}
 	for _, w := range obs.Workers {
 		state := strings.TrimSpace(w.Activity)
 		if w.IsTerminated {

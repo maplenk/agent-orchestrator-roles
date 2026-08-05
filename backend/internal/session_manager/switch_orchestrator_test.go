@@ -3,6 +3,7 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -74,10 +75,47 @@ func TestFreshOrchestratorConversation_KeepsIdentityInPlace(t *testing.T) {
 	}
 }
 
-// TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence pins the
-// lock order the manager's ownership boundary depends on: projectOwnership ->
-// beginSwitch. Without the gate, EnsureOrchestrator could retire and replace
-// this very session mid-saga.
+// TestFreshOrchestratorConversation_DoesNotHoldTheFenceWhileWaitingForTheGate
+// is the test that actually distinguishes lock ORDER.
+//
+// Merely showing that the operation blocks while the gate is held proves
+// nothing: an inverted implementation (beginSwitch first, then wait on the
+// gate) blocks identically. The difference is observable only in what is held
+// WHILE blocked. Correct order waits on the gate holding no fence, so the
+// per-session fence is still free; inverted order holds the fence while
+// waiting, which is the same-project deadlock this ordering exists to prevent.
+func TestFreshOrchestratorConversation_DoesNotHoldTheFenceWhileWaitingForTheGate(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	release, err := m.acquireProjectOwnership(context.Background(), st.sessions[id].ProjectID)
+	if err != nil {
+		t.Fatalf("pre-acquire: %v", err)
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.FreshOrchestratorConversation(context.Background(), id, domain.SemanticHandoffV1{})
+		done <- err
+	}()
+
+	// Let it reach whichever lock it takes first.
+	select {
+	case <-done:
+		t.Fatal("orchestrator fresh completed while the project gate was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	// The switch fence must still be free. beginSwitch returning true proves it
+	// was NOT taken before the gate.
+	if !m.beginSwitch(id) {
+		t.Fatal("the switch fence is held while blocked on the project gate: locks are taken " +
+			"beginSwitch -> projectOwnership, the inversion that deadlocks recovery for the same project")
+	}
+	m.endSwitch(id)
+}
+
+// TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence pins that
+// the gate is taken at all. Ordering is covered separately above.
 func TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence(t *testing.T) {
 	m, st, id := orchestratorSwitchHarness(t)
 	release, err := m.acquireProjectOwnership(context.Background(), st.sessions[id].ProjectID)
@@ -140,9 +178,118 @@ func TestSwitchOrchestrator_RejectsCrossHarness(t *testing.T) {
 	_, err := m.switchUnderOwnership(context.Background(), SwitchRequest{
 		SessionID:     id,
 		TargetHarness: domain.HarnessClaudeCode,
-	})
+	}, true)
 	if !errors.Is(err, ErrOrchestratorCrossHarness) {
 		t.Fatalf("err = %v, want ErrOrchestratorCrossHarness", err)
+	}
+}
+
+// TestSwitchWorker_RejectsOrchestratorEvenWhenTheGuardReadFails is the
+// fail-closed half. The kind check must sit on the AUTHORITATIVE read inside
+// the saga, not on a pre-read that has to guess when it errors: a pre-read that
+// falls through on error skips the gate at exactly the moment it learned
+// nothing.
+func TestSwitchWorker_RejectsOrchestratorEvenWhenTheGuardReadFails(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	// The old implementation did a throwaway GetSession first and ignored its
+	// error; nothing here makes that read succeed for it to key on.
+	_ = st
+
+	_, err := m.SwitchWorker(context.Background(), SwitchRequest{SessionID: id, FreshConversation: true})
+	if !errors.Is(err, ErrNotWorker) {
+		t.Fatalf("err = %v, want ErrNotWorker: an orchestrator on the worker entry point would hold "+
+			"beginSwitch without the project gate", err)
+	}
+	// And it must be refused BEFORE any saga work: no ledger event, no stop.
+	if len(st.ledger) != 0 {
+		t.Errorf("the saga started for an ungated orchestrator: %d ledger events", len(st.ledger))
+	}
+}
+
+// TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin: recovery
+// re-drives a DURABLE record, so it must re-apply the refusals the request path
+// applies. A pending pin is not authorization.
+func TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-x", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessCodex, ToHarness: domain.HarnessClaudeCode,
+	}
+	rec.Metadata.RuntimeHandleID = ""
+	st.sessions[id] = rec
+
+	_, err := m.RecoverSwitchFromPostStop(context.Background(), id)
+	if !errors.Is(err, ErrOrchestratorCrossHarness) {
+		t.Fatalf("err = %v, want ErrOrchestratorCrossHarness: recovery would otherwise launch a "+
+			"different harness into the canonical orchestrator workspace at boot", err)
+	}
+}
+
+// TestIsSwitchLedgerKind_CoversEverySagaKind: findPhasePayload,
+// findRecoverablePostStop and hasIncompletePostStop all filter through this, so
+// an omitted kind silently disables the ledger fallback — the path that exists
+// for when the pending pin is gone.
+func TestIsSwitchLedgerKind_CoversEverySagaKind(t *testing.T) {
+	for _, k := range []domain.LifecycleLedgerKind{
+		domain.LifecycleKindSwitch,
+		domain.LifecycleKindFreshConversation,
+		domain.LifecycleKindOrchestratorFresh,
+	} {
+		if !isSwitchLedgerKind(k) {
+			t.Errorf("%q is appended by the switch saga but invisible to recovery", k)
+		}
+	}
+	for _, k := range []domain.LifecycleLedgerKind{
+		domain.LifecycleKindPause, domain.LifecycleKindResume, domain.LifecycleKindFailover,
+	} {
+		if isSwitchLedgerKind(k) {
+			t.Errorf("%q is not a switch saga kind but recovery treats it as one", k)
+		}
+	}
+}
+
+// TestObserveOrchestratorFleet_BoundsTerminatedHistory: this text goes into the
+// target's launch prompt — into argv on Codex — and the launch happens AFTER
+// the source stopped. Unbounded history would produce an oversized prompt at
+// the moment failure is most expensive, and post-stop recovery would retry it
+// forever.
+func TestObserveOrchestratorFleet_BoundsTerminatedHistory(t *testing.T) {
+	m, st, _ := orchestratorSwitchHarness(t)
+	for i := 0; i < 200; i++ {
+		id := domain.SessionID(fmt.Sprintf("mer-old-%03d", i))
+		st.sessions[id] = domain.SessionRecord{
+			ID: id, ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
+		}
+	}
+	// Live workers are never dropped.
+	for i := 0; i < 5; i++ {
+		id := domain.SessionID(fmt.Sprintf("mer-live-%d", i))
+		st.sessions[id] = domain.SessionRecord{
+			ID: id, ProjectID: "mer", Kind: domain.KindWorker,
+			Activity: domain.Activity{State: domain.ActivityActive},
+		}
+	}
+
+	obs, err := m.ObserveOrchestratorFleet(context.Background(), "mer", "gen-1")
+	if err != nil {
+		t.Fatalf("observe: %v", err)
+	}
+	if len(obs.Workers) > 5+maxObservedTerminatedWorkers {
+		t.Fatalf("fleet not bounded: %d entries", len(obs.Workers))
+	}
+	var live int
+	for _, w := range obs.Workers {
+		if !w.IsTerminated {
+			live++
+		}
+	}
+	if live != 5 {
+		t.Errorf("live workers = %d, want all 5 kept: they are what the coordinator must act on", live)
+	}
+	if obs.OmittedTerminated != 200-maxObservedTerminatedWorkers {
+		t.Errorf("omitted count = %d, want %d — silent truncation reads as a complete fleet",
+			obs.OmittedTerminated, 200-maxObservedTerminatedWorkers)
 	}
 }
 

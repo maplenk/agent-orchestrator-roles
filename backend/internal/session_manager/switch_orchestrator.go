@@ -40,24 +40,57 @@ func (m *Manager) ObserveOrchestratorFleet(ctx context.Context, projectID domain
 		ObservedAt:    m.clock(),
 		GenerationID:  generationID,
 	}
+	var live, terminated []domain.ObservedWorkerV1
 	for _, rec := range recs {
 		if rec.Kind == domain.KindOrchestrator {
 			continue
 		}
-		obs.Workers = append(obs.Workers, domain.ObservedWorkerV1{
+		w := domain.ObservedWorkerV1{
 			SessionID:    rec.ID,
 			Harness:      rec.Harness,
 			RoleID:       rec.Metadata.Role.RoleID,
 			Branch:       rec.Metadata.Branch,
 			Activity:     string(rec.Activity.State),
 			IsTerminated: rec.IsTerminated,
-		})
+		}
+		if rec.IsTerminated {
+			terminated = append(terminated, w)
+		} else {
+			live = append(live, w)
+		}
 	}
 	// Stable order: the compiled handoff is embedded in a launch prompt, and an
 	// order that shifts between runs makes diffing two handoffs useless.
-	sort.Slice(obs.Workers, func(i, j int) bool { return obs.Workers[i].SessionID < obs.Workers[j].SessionID })
+	byID := func(s []domain.ObservedWorkerV1) {
+		sort.Slice(s, func(i, j int) bool { return s[i].SessionID < s[j].SessionID })
+	}
+	byID(live)
+	byID(terminated)
+
+	// BOUNDED, and the bound is not cosmetic. This text goes into the target's
+	// launch prompt — on Codex, into argv — and the launch happens AFTER the
+	// source has stopped. A project with thousands of historical workers would
+	// therefore produce an oversized prompt at the one moment failure is most
+	// expensive, and post-stop recovery would retry the same oversized prompt
+	// forever.
+	//
+	// Live workers are never dropped: they are what the coordinator must act on,
+	// and a project cannot have an unbounded number of them running. Terminated
+	// ones are history, so the newest are kept and the rest are counted. Dropping
+	// silently would be the real hazard — a truncated fleet that reads as
+	// complete — so the omission is reported in the rendered text.
+	obs.Workers = live
+	if len(terminated) > maxObservedTerminatedWorkers {
+		obs.OmittedTerminated = len(terminated) - maxObservedTerminatedWorkers
+		terminated = terminated[len(terminated)-maxObservedTerminatedWorkers:]
+	}
+	obs.Workers = append(obs.Workers, terminated...)
 	return obs, nil
 }
+
+// maxObservedTerminatedWorkers caps the history carried into a handoff. Live
+// workers are exempt; see ObserveOrchestratorFleet.
+const maxObservedTerminatedWorkers = 25
 
 // FreshOrchestratorConversation restarts a project's orchestrator in place with
 // a compiled handoff, keeping its session id, worktree and branch.
@@ -100,5 +133,5 @@ func (m *Manager) FreshOrchestratorConversation(ctx context.Context, sessionID d
 		SessionID:         sessionID,
 		Semantic:          semantic,
 		FreshConversation: true,
-	})
+	}, true)
 }

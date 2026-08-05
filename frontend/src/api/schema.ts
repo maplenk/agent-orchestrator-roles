@@ -1608,7 +1608,7 @@ export interface components {
         SwitchWorkerResponse: {
             generationId: string;
             /** @enum {string} */
-            kind: "switch" | "fresh_conversation";
+            kind: "switch" | "fresh_conversation" | "orchestrator_fresh_conversation";
             ok: boolean;
             session: components["schemas"]["ControllersSessionView"];
             sessionId: string;

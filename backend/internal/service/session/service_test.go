@@ -978,6 +978,11 @@ func TestSessionRenameMissingSessionReturnsNotFound(t *testing.T) {
 // fakeCommander records Kill/Spawn calls so a test can assert the
 // clean-orchestrator ordering without wiring a real session engine.
 type fakeCommander struct {
+	// mu guards the recording fields. TestSpawn's concurrency case drives Spawn
+	// from several goroutines at once, so an unguarded counter is a real race
+	// that made `go test -race` unusable for this whole package — and a fake
+	// that races is a fake whose assertions cannot be trusted either.
+	mu                     sync.Mutex
 	killed                 []domain.SessionID
 	retired                []domain.SessionID
 	sent                   []domain.SessionID
@@ -1009,6 +1014,8 @@ type fakeCommander struct {
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if f.spawnErr != nil {
 		return domain.SessionRecord{}, 0, 0, f.spawnErr
 	}
@@ -1077,11 +1084,14 @@ func (f *fakeCommander) RollbackSpawn(context.Context, domain.SessionID) (bool, 
 // session_manager; here we only record that the service delegated, and reuse
 // Spawn so spawnErr/spawnRecord keep working.
 func (f *fakeCommander) EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (sessionmanager.EnsureOrchestratorResult, error) {
+	f.mu.Lock()
 	f.ensureCalls++
 	f.ensureClean = clean
 	f.ensureCfg = cfg
-	if f.ensureReuse.ID != "" {
-		return sessionmanager.EnsureOrchestratorResult{Record: f.ensureReuse, Reused: true}, nil
+	reuse := f.ensureReuse
+	f.mu.Unlock()
+	if reuse.ID != "" {
+		return sessionmanager.EnsureOrchestratorResult{Record: reuse, Reused: true}, nil
 	}
 	rec, promptBytes, systemPromptBytes, err := f.Spawn(ctx, cfg)
 	if err != nil {

@@ -81,7 +81,10 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 		// projects can never have.
 		if !req.Fresh && strings.TrimSpace(string(req.TargetHarness)) != "" &&
 			domain.AgentHarness(strings.TrimSpace(string(req.TargetHarness))) != rec.Harness {
-			return SwitchWorkerOutcome{}, apierr.Invalid("ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED",
+			// Conflict, not Invalid: the request is well-formed and the target
+			// harness is a real one. What is unavailable is the state
+			// transition, which clients distinguish from malformed input.
+			return SwitchWorkerOutcome{}, apierr.Conflict("ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED",
 				"Orchestrators support in-place fresh conversation only; cross-harness switch is not available yet", nil)
 		}
 	default:

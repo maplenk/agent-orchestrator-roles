@@ -4470,6 +4470,7 @@ components:
           enum:
           - switch
           - fresh_conversation
+          - orchestrator_fresh_conversation
           type: string
         ok:
           type: boolean

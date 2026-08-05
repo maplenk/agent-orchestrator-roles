@@ -71,10 +71,15 @@ type ObservedOrchestratorV1 struct {
 	ProjectID     ProjectID `json:"projectId,omitempty"`
 	ObservedAt    time.Time `json:"observedAt,omitempty"`
 	GenerationID  string    `json:"generationId,omitempty"`
-	// Workers is every non-orchestrator session in the project, terminated ones
+	// Workers is the project's non-orchestrator sessions, terminated ones
 	// included: "the worker you think is still running finished an hour ago" is
-	// precisely the correction this is for.
+	// precisely the correction this is for. Bounded — see OmittedTerminated.
 	Workers []ObservedWorkerV1 `json:"workers,omitempty"`
+	// OmittedTerminated counts terminated workers left out of Workers to keep
+	// the handoff bounded. Reported rather than dropped silently: a truncated
+	// fleet that reads as complete is worse than an explicitly partial one,
+	// because the coordinator would treat absence as evidence.
+	OmittedTerminated int `json:"omittedTerminated,omitempty"`
 }
 
 // ObservedWorkerV1 is one worker as AO records it, not as the orchestrator

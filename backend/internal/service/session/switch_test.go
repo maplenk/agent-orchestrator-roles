@@ -147,6 +147,69 @@ func TestSwitchWorker_SameHarnessIsFresh(t *testing.T) {
 	}
 }
 
+// TestSwitchWorker_OrchestratorFreshRoutesToTheGatedEntryPoint: the two entry
+// points take DIFFERENT LOCKS, so dispatching by kind is a correctness
+// requirement, not tidiness. Routing an orchestrator through the worker
+// FreshConversation would run its saga without the project ownership gate.
+func TestSwitchWorker_OrchestratorFreshRoutesToTheGatedEntryPoint(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	st.sessions[id] = rec
+
+	cmd := &fakeCommander{}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+	out, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{SessionID: id, Fresh: true})
+	if err != nil {
+		t.Fatalf("orchestrator fresh: %v", err)
+	}
+	if cmd.orchestratorFreshCalls != 1 {
+		t.Fatalf("orchestrator entry point called %d times: the saga would run ungated",
+			cmd.orchestratorFreshCalls)
+	}
+	if cmd.switchCalls != 0 {
+		t.Errorf("cross-harness switch path used for an orchestrator: %d", cmd.switchCalls)
+	}
+	if out.Kind != domain.LifecycleKindOrchestratorFresh {
+		t.Errorf("outcome kind = %q, want %q — the API contract must expose the real kind",
+			out.Kind, domain.LifecycleKindOrchestratorFresh)
+	}
+}
+
+// TestSwitchWorker_OrchestratorCrossHarnessIsConflict: the request is
+// well-formed and the harness is real; what is unavailable is the state
+// transition. Clients distinguish that from malformed input.
+func TestSwitchWorker_OrchestratorCrossHarnessIsConflict(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	st.sessions[id] = rec
+
+	cmd := &fakeCommander{}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want an apierr", err)
+	}
+	if apiErr.Kind != apierr.KindConflict {
+		t.Fatalf("kind = %v, want Conflict: a refused state transition is not malformed input", apiErr.Kind)
+	}
+	if apiErr.Code != "ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED" {
+		t.Errorf("code = %q", apiErr.Code)
+	}
+	if cmd.orchestratorFreshCalls != 0 || cmd.switchCalls != 0 {
+		t.Error("the manager was called despite the refusal")
+	}
+}
+
 func TestSwitchWorker_EmptyConfiguredModelRejectsExplicitModel(t *testing.T) {
 	st := newFakeStore()
 	id := domain.SessionID("mer-1")

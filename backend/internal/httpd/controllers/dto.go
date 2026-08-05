@@ -289,8 +289,8 @@ type BrowserCapabilityHeader struct {
 // Omitted for operator/desktop clients. When present, X-AO-Spawn-Capability
 // must match the AO_SPAWN_CAPABILITY issued to that session.
 type SpawnCallerHeaders struct {
-	CallerSessionID  string `header:"X-AO-Caller-Session-Id" description:"AO session id of the agent initiating spawn (from AO_SESSION_ID)."`
-	SpawnCapability  string `header:"X-AO-Spawn-Capability" description:"Opaque spawn capability from AO_SPAWN_CAPABILITY."`
+	CallerSessionID string `header:"X-AO-Caller-Session-Id" description:"AO session id of the agent initiating spawn (from AO_SESSION_ID)."`
+	SpawnCapability string `header:"X-AO-Spawn-Capability" description:"Opaque spawn capability from AO_SPAWN_CAPABILITY."`
 }
 
 // BrowserStatusResponse reports whether the desktop-owned browser transport is
@@ -420,7 +420,7 @@ type SwitchWorkerResponse struct {
 	OK           bool             `json:"ok"`
 	SessionID    domain.SessionID `json:"sessionId"`
 	GenerationID string           `json:"generationId"`
-	Kind         string           `json:"kind" enum:"switch,fresh_conversation"`
+	Kind         string           `json:"kind" enum:"switch,fresh_conversation,orchestrator_fresh_conversation"`
 	Session      SessionView      `json:"session"`
 }
 

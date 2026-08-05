@@ -49,21 +49,26 @@ type switchPayload struct {
 // SwitchWorker runs the #3548-class worker switch / fresh-conversation saga.
 // Current Harness/Role remain the source until durable target_ack promotes the
 // pending pin. Generation ID is the launched RuntimeLaunchID.
+// SwitchWorker is the worker entry point. Orchestrators must arrive via
+// FreshOrchestratorConversation, which takes the project ownership gate BEFORE
+// the switch fence — entering here would take the locks in the wrong order.
+//
+// The kind check lives on the AUTHORITATIVE read inside the saga rather than on
+// a pre-read here. A pre-read has to decide what to do when it fails, and every
+// answer is wrong: proceeding admits an orchestrator with no gate, and refusing
+// turns a transient store blip into a failed worker switch. Passing
+// ownershipHeld through instead means the one read that already exists decides,
+// and it cannot fail open.
 func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchResult, error) {
-	// Worker entry point. Orchestrators must arrive via
-	// FreshOrchestratorConversation, which takes the project ownership gate
-	// BEFORE the switch fence this acquires — entering here would take the locks
-	// in the wrong order.
-	if rec, ok, err := m.store.GetSession(ctx, req.SessionID); err == nil && ok && rec.Kind != domain.KindWorker {
-		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
-	}
-	return m.switchUnderOwnership(ctx, req)
+	return m.switchUnderOwnership(ctx, req, false)
 }
 
-// switchUnderOwnership is the saga proper. Callers are responsible for holding
-// whatever ownership a session's KIND requires before entering: nothing, for a
-// worker; the project gate, for an orchestrator.
-func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest) (SwitchResult, error) {
+// switchUnderOwnership is the saga proper. ownershipHeld asserts that the caller
+// already holds whatever ownership this session's KIND requires: nothing for a
+// worker, the project gate for an orchestrator. It is not a hint — an
+// orchestrator reaching here without it is refused, because the alternative is
+// running the saga with an inverted lock order.
+func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, ownershipHeld bool) (SwitchResult, error) {
 	if !m.beginSwitch(req.SessionID) {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchInProgress)
 	}
@@ -77,6 +82,13 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest) (
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotFound)
 	}
 	if rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
+	}
+	if rec.Kind == domain.KindOrchestrator && !ownershipHeld {
+		// Reached the worker entry point. Continuing would hold beginSwitch
+		// without the project gate, so a concurrent EnsureOrchestrator(clean)
+		// could retire and replace this session while its own saga stops and
+		// relaunches it.
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
 	}
 	// Cross-harness orchestrator switch is 2B-3, blocked on Claude RO: a strict
@@ -299,7 +311,8 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	if !ok {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotFound)
 	}
-	if pre.Kind == domain.KindOrchestrator {
+	gated := pre.Kind == domain.KindOrchestrator
+	if gated {
 		release, gateErr := m.acquireProjectOwnership(ctx, pre.ProjectID)
 		if gateErr != nil {
 			return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, gateErr)
@@ -322,6 +335,15 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	}
 	if rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrNotWorker)
+	}
+	// The pre-gate read decided whether to take the gate; this read is the
+	// authoritative one. Checking only "is it a known kind" would be weaker than
+	// the decision already made, so recovery would proceed ungated if the two
+	// reads disagreed. Session kind is immutable in practice, which is exactly
+	// why a disagreement means something is wrong rather than something changed.
+	if (rec.Kind == domain.KindOrchestrator) != gated {
+		return SwitchResult{}, fmt.Errorf(
+			"recover switch %s: session kind changed under the gate decision (%s); refusing", sessionID, rec.Kind)
 	}
 	if rec.IsTerminated {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrTerminated)
@@ -431,6 +453,16 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	}
 	if toHarness == "" {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: missing target harness", sessionID)
+	}
+	// Recovery re-drives a DURABLE record, so it must re-apply the refusals the
+	// request path applies — a pending pin is not authorization. Without this,
+	// a row carrying {kind:"switch", from:"codex", to:"claude-code"} on an
+	// orchestrator would launch Claude Code into the canonical orchestrator
+	// workspace and promote it, doing at boot exactly what
+	// ErrOrchestratorCrossHarness refuses interactively.
+	if rec.Kind == domain.KindOrchestrator && toHarness != rec.Harness {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w (pending target %q)",
+			sessionID, ErrOrchestratorCrossHarness, toHarness)
 	}
 	if _, ok := m.agents.Agent(toHarness); !ok {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %q", sessionID, ErrUnknownHarness, toHarness)
@@ -821,8 +853,17 @@ type recoverablePostStop struct {
 	GenerationID string
 }
 
+// isSwitchLedgerKind selects the ledger kinds the post_stop recovery machinery
+// understands. It must list EVERY kind the switch saga can append, or the
+// ledger fallback silently stops working for that kind: findPhasePayload,
+// findRecoverablePostStop and hasIncompletePostStop all filter through here, so
+// an omitted kind makes recovery answer ErrSwitchNothingToRecover for a session
+// that has a real unacknowledged post_stop — and the fallback exists precisely
+// for when the pending pin is gone.
 func isSwitchLedgerKind(k domain.LifecycleLedgerKind) bool {
-	return k == domain.LifecycleKindSwitch || k == domain.LifecycleKindFreshConversation
+	return k == domain.LifecycleKindSwitch ||
+		k == domain.LifecycleKindFreshConversation ||
+		k == domain.LifecycleKindOrchestratorFresh
 }
 
 func findPhasePayload(events []domain.LifecycleLedgerRecord, gen string, phase domain.LifecycleLedgerPhase) string {

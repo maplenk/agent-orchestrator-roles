@@ -6,7 +6,7 @@ gated boot restore with deterministic survivor selection + marker neutralization
 single ownership resolver) — see the slice table in §7. **2B-1 landed** — orchestrator in-place fresh conversation is live: the guards are
 parameterized, `FreshOrchestratorConversation` gates the project before the switch
 fence, and `ObservedOrchestratorV1` compiles the fleet into the handoff.
-**2B-2 landed** — replacement intent (migration 0047) is persisted before retirement
+**2B-2 landed** (and 2B-1 hardened after review: migration **0048** admits the new ledger kind, which the SQLite CHECK had rejected outright) — replacement intent (migration 0047) is persisted before retirement
 and boot recovery makes a zero-owner interval non-terminal; `finalizeRetirement` is
 now crash-consistent. **2B-3 not started**: cross-harness orchestrator switch is
 deliberately refused until Claude RO lands.
