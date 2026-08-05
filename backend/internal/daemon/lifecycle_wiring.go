@@ -124,6 +124,12 @@ type sessionLifecycle interface {
 	// confirm superseded orchestrators are dead. Fail-closed and FATAL at boot,
 	// unlike Reconcile — so it is listed separately rather than folded into it.
 	DrainOrchestratorReapQueue(ctx context.Context) error
+	// RecoverOrchestratorReplacements re-drives replacements interrupted mid
+	// retire→spawn (migration 0047), so a project is never stuck with zero
+	// orchestrators. Deliberately NOT boot-fatal: a project without a
+	// coordinator is inert, and stopping a daemon that is fine for every other
+	// project would be the worse outcome.
+	RecoverOrchestratorReplacements(ctx context.Context) error
 	Kill(ctx context.Context, id domain.SessionID) (bool, error)
 	// AllowTerminalInput is the terminal mux input gate (switch-pending fence).
 	// Required so daemon wiring cannot silently drop the security boundary.

@@ -106,6 +106,27 @@ func (m *Manager) EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig,
 		return EnsureOrchestratorResult{Record: rec, PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes}, nil
 	}
 
+	// Persist intent BEFORE the first destructive step. Retire-first semantics
+	// force a zero-owner interval — the canonical worktree must be released
+	// before the successor can create it — so the guarantee cannot be "never
+	// zero"; it is "never stuck at zero". Writing this first is what makes the
+	// difference: a crash or spawn failure from here on leaves a durable record
+	// that the project is owed an orchestrator, which boot recovery honours.
+	//
+	// A failure to record intent aborts BEFORE anything is destroyed. Retiring
+	// without it is the one ordering that can strand a project silently.
+	var retiring domain.SessionID
+	if len(existing) > 0 {
+		retiring = newestOrchestratorRecord(existing).ID
+	}
+	if err := m.store.PutOrchestratorReplacementIntent(ctx, domain.OrchestratorReplacementIntent{
+		ProjectID:        cfg.ProjectID,
+		RetiredSessionID: retiring,
+		RequestedAt:      m.clock(),
+	}); err != nil {
+		return EnsureOrchestratorResult{}, fmt.Errorf("record replacement intent for %s: %w", cfg.ProjectID, err)
+	}
+
 	for _, orch := range existing {
 		// Best effort: a retire notice can legitimately be suppressed (pane
 		// exited, awaiting input). Replacement must not depend on it landing.
@@ -120,9 +141,23 @@ func (m *Manager) EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig,
 
 	rec, promptBytes, systemPromptBytes, err := m.spawnUnderOwnership(ctx, cfg)
 	if err != nil {
+		// Intent deliberately RETAINED: the project is now at zero owners and
+		// this is exactly the state recovery exists for.
 		return EnsureOrchestratorResult{}, err
 	}
+	m.dischargeReplacementIntent(ctx, cfg.ProjectID)
 	return EnsureOrchestratorResult{Record: rec, PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes}, nil
+}
+
+// dischargeReplacementIntent clears a project's obligation once a successor is
+// live. Best-effort by design: a retained intent costs one redundant "is there
+// an orchestrator?" check on the next boot, which finds one and discharges it,
+// whereas failing the call would report a successful replacement as an error.
+func (m *Manager) dischargeReplacementIntent(ctx context.Context, project domain.ProjectID) {
+	if err := m.store.DeleteOrchestratorReplacementIntent(ctx, project); err != nil {
+		m.logger.Warn("orchestrator replacement intent not cleared; boot will re-check",
+			"project", project, "err", err)
+	}
 }
 
 // activeOrchestratorRecords lists every non-terminated orchestrator for a

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -65,6 +66,11 @@ type fakeStore struct {
 	// time rather than by breaking the whole store.
 	worktreeListErr   map[domain.SessionID]error
 	worktreeDeleteErr map[domain.SessionID]error
+	// intents mirrors orchestrator_replacement_intent (migration 0047).
+	intents         map[domain.ProjectID]domain.OrchestratorReplacementIntent
+	intentPutErr    error
+	intentListErr   error
+	intentDeleteErr error
 	// listSessionsErr fails the per-project read RestoreAll takes under the gate.
 	listSessionsErr error
 	// sharedLog, when non-nil, receives an ordered call entry for each
@@ -81,6 +87,7 @@ func newFakeStore() *fakeStore {
 		artifacts:     map[string]fakeTemplateArtifact{},
 		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
 
+		intents:           map[domain.ProjectID]domain.OrchestratorReplacementIntent{},
 		worktreeListErr:   map[domain.SessionID]error{},
 		worktreeDeleteErr: map[domain.SessionID]error{},
 	}
@@ -151,6 +158,57 @@ func (f *fakeStore) UpdateSession(_ context.Context, rec domain.SessionRecord) e
 		return errors.New("injected update failure")
 	}
 	f.sessions[rec.ID] = rec
+	return nil
+}
+
+// --- orchestrator replacement intent (migration 0047) ---
+
+func (f *fakeStore) PutOrchestratorReplacementIntent(_ context.Context, in domain.OrchestratorReplacementIntent) error {
+	if f.intentPutErr != nil {
+		return f.intentPutErr
+	}
+	if f.intents == nil {
+		f.intents = map[domain.ProjectID]domain.OrchestratorReplacementIntent{}
+	}
+	// Upsert preserving bookkeeping, mirroring the real ON CONFLICT clause.
+	if prev, ok := f.intents[in.ProjectID]; ok {
+		in.AttemptCount = prev.AttemptCount
+		in.LastAttemptAt = prev.LastAttemptAt
+		in.LastError = prev.LastError
+	}
+	f.intents[in.ProjectID] = in
+	return nil
+}
+
+func (f *fakeStore) ListOrchestratorReplacementIntents(context.Context) ([]domain.OrchestratorReplacementIntent, error) {
+	if f.intentListErr != nil {
+		return nil, f.intentListErr
+	}
+	out := make([]domain.OrchestratorReplacementIntent, 0, len(f.intents))
+	for _, in := range f.intents {
+		out = append(out, in)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ProjectID < out[j].ProjectID })
+	return out, nil
+}
+
+func (f *fakeStore) DeleteOrchestratorReplacementIntent(_ context.Context, p domain.ProjectID) error {
+	if f.intentDeleteErr != nil {
+		return f.intentDeleteErr
+	}
+	delete(f.intents, p)
+	return nil
+}
+
+func (f *fakeStore) RecordOrchestratorReplacementAttempt(_ context.Context, p domain.ProjectID, at time.Time, cause string) error {
+	in, ok := f.intents[p]
+	if !ok {
+		return nil
+	}
+	in.AttemptCount++
+	in.LastAttemptAt = &at
+	in.LastError = cause
+	f.intents[p] = in
 	return nil
 }
 

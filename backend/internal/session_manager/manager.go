@@ -244,6 +244,19 @@ type Store interface {
 	DeleteOrchestratorReapEntry(ctx context.Context, id domain.SessionID) error
 	// RecordOrchestratorReapAttempt stamps a failed drain for visibility.
 	RecordOrchestratorReapAttempt(ctx context.Context, id domain.SessionID, at time.Time) error
+	// PutOrchestratorReplacementIntent records that a project is owed an
+	// orchestrator, written BEFORE retirement so a zero-owner interval is
+	// recoverable. Upsert: the project gate makes a competing intent
+	// unrepresentable, so a second write is a retry of the same obligation.
+	PutOrchestratorReplacementIntent(ctx context.Context, intent domain.OrchestratorReplacementIntent) error
+	// ListOrchestratorReplacementIntents returns outstanding replacements. A
+	// missing table must surface as an error, never as an empty list.
+	ListOrchestratorReplacementIntents(ctx context.Context) ([]domain.OrchestratorReplacementIntent, error)
+	// DeleteOrchestratorReplacementIntent discharges a project's obligation,
+	// only once a successor is actually live.
+	DeleteOrchestratorReplacementIntent(ctx context.Context, project domain.ProjectID) error
+	// RecordOrchestratorReplacementAttempt stamps a failed recovery.
+	RecordOrchestratorReplacementAttempt(ctx context.Context, project domain.ProjectID, at time.Time, cause string) error
 	// ListLifecycleLedger returns events for a session oldest-first.
 	ListLifecycleLedger(ctx context.Context, sessionID domain.SessionID) ([]domain.LifecycleLedgerRecord, error)
 }
@@ -1461,12 +1474,28 @@ func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id dom
 // path, and any later path-keyed teardown (Kill, Cleanup) would destroy the
 // current orchestrator's worktree. Keeping this in one helper is what stops a
 // future branch from terminating without releasing.
+// Retirement is two writes and cannot be one: MarkTerminated goes through the
+// lifecycle manager (activity state, flight bookkeeping, container reaping),
+// while releasing the claim is a plain metadata update. A crash between them is
+// therefore possible, and the ORDER decides which residue it leaves.
+//
+// Terminate first. The residue is then a terminated row that still names the
+// canonical workspace — an alias, already defended by
+// canonicalWorkspaceHeldByActiveOrchestrator and cleared by
+// reconcileOrchestratorRetirement at boot.
+//
+// The reverse order looks tidier and is worse. Releasing the claim first leaves
+// an ACTIVE orchestrator with no workspace: it still occupies the project's
+// single active slot under migration 0046, so no successor can be created,
+// while EnsureOrchestrator's idempotent path happily returns it and hands the
+// caller a coordinator that owns nothing. That state is both more damaging and
+// less obviously wrong than a stale path on a dead row.
 func (m *Manager) finalizeRetirement(ctx context.Context, id domain.SessionID) error {
-	if err := m.releaseRetiredWorkspaceClaim(ctx, id); err != nil {
-		return fmt.Errorf("retire replacement %s: %w", id, err)
-	}
 	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
 		return fmt.Errorf("retire replacement %s: mark terminated: %w", id, err)
+	}
+	if err := m.releaseRetiredWorkspaceClaim(ctx, id); err != nil {
+		return fmt.Errorf("retire replacement %s: %w", id, err)
 	}
 	return nil
 }

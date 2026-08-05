@@ -319,6 +319,20 @@ func Run() error {
 	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
 		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
 	}
+
+	// Re-drive replacements interrupted mid retire→spawn, so a project is never
+	// stuck with zero orchestrators (migration 0047).
+	//
+	// Runs AFTER Reconcile deliberately: that pass adopts crash-surviving
+	// runtimes, so an orchestrator that is actually alive is recognised as the
+	// project's owner here rather than being treated as missing and spawned
+	// over. Logged rather than fatal — a project without a coordinator is
+	// inert, and stopping a daemon that is healthy for every other project
+	// would be the worse outcome. The intent is durable, so nothing is lost by
+	// trying again on the next boot.
+	if recoverErr := sessMgr.RecoverOrchestratorReplacements(ctx); recoverErr != nil {
+		log.Error("recover orchestrator replacements on boot failed", "err", recoverErr)
+	}
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
 	// to start the daemon. pushRegistry (interface) is assigned only when load
