@@ -988,12 +988,18 @@ var ErrLaunchCleanupUnresolved = errors.New("session: launch cleanup unresolved"
 // write that deliberately leaves is_terminated alone, which matters because the
 // motivating failure is migration 0046's index rejecting the activation, and
 // that write would fail again.
-// A runtime whose death is NOT confirmed leaves the caller with an obligation
-// either way, so the error return distinguishes the two outcomes that matter:
-// nil means the survivor was recorded and is reachable; ErrLaunchCleanupUnresolved
-// means it was not, and nothing can find it. The compensating write can fail for
-// the very condition that rejected MarkSpawned, so treating it as best-effort
-// would let the caller report a leak as handled.
+// UNCONFIRMED DEATH IS ALWAYS AN ERROR, recorded or not. Recording the survivor
+// makes it reapable *eventually*; it does not make it gone. The distinction that
+// matters to a caller is only how bad the state is, and both are bad enough that
+// boot must not serve on either:
+//
+//   - recorded: a live runtime executing in the session's workspace that the
+//     NEXT boot can find. But Reconcile's terminated-session reap pass runs
+//     BEFORE RestoreAll, so nothing sweeps it during THIS boot.
+//   - not recorded: the same live runtime, which nothing can ever find.
+//
+// Returning nil for the first would leave the boot gate with nothing to key on,
+// which is exactly the hole this closes.
 func (m *Manager) reapFailedLaunchRuntime(ctx context.Context, operation string, id domain.SessionID, handle ports.RuntimeHandle, launchID string) (confirmedDead bool, err error) {
 	dead, probeErr := m.destroyRuntimeProbed(ctx, handle.ID)
 	if dead {
@@ -1007,7 +1013,12 @@ func (m *Manager) reapFailedLaunchRuntime(ctx context.Context, operation string,
 	}
 	m.logger.Error("runtime survived a launch that could not be adopted; recorded its identity so it stays reapable",
 		"operation", operation, "sessionID", id, "handleID", handle.ID, "error", probeErr)
-	return false, nil
+	if probeErr != nil {
+		return false, fmt.Errorf("%w: death of runtime %q could not be established after %s of %s; identity recorded: %w",
+			ErrLaunchCleanupUnresolved, handle.ID, operation, id, probeErr)
+	}
+	return false, fmt.Errorf("%w: runtime %q survived %s of %s and is still executing; identity recorded",
+		ErrLaunchCleanupUnresolved, handle.ID, operation, id)
 }
 
 // adoptOrphanedLaunchRuntime records the execution identity of a runtime that
@@ -2142,7 +2153,15 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 //     log and continue (still relaunch the agent, never delete the ref).
 //  3. Relaunch via the existing Restore method.
 //
-// Failures on individual sessions are logged and do not abort the loop.
+// Failures on individual sessions are logged and do not abort the loop, with
+// ONE exception: a relaunch that left an unresolved runtime
+// (ErrLaunchCleanupUnresolved) is collected and returned. Skipping it would be
+// wrong in a way the others are not — Reconcile's terminated-session reap pass
+// runs BEFORE this loop, so a runtime that outlived a failed restore is
+// executing in the session's workspace with nothing scheduled to sweep it until
+// the next boot. Returning it is what lets boot refuse to serve; making that
+// refusal fatal is the remaining half, tracked as 2B-0b.
+//
 // Phase 2B gap (tracked as 2B-0b in docs/roles/PHASE2B_PLAN.md): unlike
 // RestoreWithMode, this loop restores workspaces directly and does NOT take the
 // project ownership gate, so it can resurrect more than one orchestrator per
@@ -2155,6 +2174,7 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("restore-all: list sessions: %w", err)
 	}
+	var unresolved []error
 	for _, rec := range recs {
 		if !rec.IsTerminated {
 			continue
@@ -2244,6 +2264,15 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 		// Step 3: relaunch the agent in the restored workspace.
 		if _, err := m.relaunchRestoredSession(ctx, rec, project, ws); err != nil {
 			switch {
+			case errors.Is(err, ErrLaunchCleanupUnresolved):
+				// NOT skippable. A failed restore whose runtime outlived
+				// teardown is executing in the session's workspace right now,
+				// and Reconcile's terminated-session reap pass has already run
+				// (see step 3 of its own doc comment) — so nothing sweeps it
+				// until the next boot. Collected and returned rather than
+				// logged, so the caller can refuse to serve.
+				m.logger.Error("restore-all: relaunch left an unresolved runtime", "sessionID", rec.ID, "error", err)
+				unresolved = append(unresolved, err)
 			case errors.Is(err, ErrNotResumable):
 				// A promptless, unresumable worker is intentionally left terminated:
 				// expected, not an operational failure, so log it quietly.
@@ -2275,7 +2304,9 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 			}
 		}
 	}
-	return nil
+	// Every other session was still restored: an unresolved runtime on one is a
+	// reason not to SERVE, not a reason to abandon the rest of the pass.
+	return errors.Join(unresolved...)
 }
 
 func restorableWorktreeRows(rows []domain.SessionWorktreeRecord) []domain.SessionWorktreeRecord {

@@ -110,8 +110,16 @@ func TestResumeAgent_ConstraintLossRecordsSurvivingRuntime(t *testing.T) {
 	m, st, _ := resumeHarness(t, domain.KindOrchestrator, rt)
 	m.lcm.(*fakeLCM).markSpawnedErr = domain.ErrActiveOrchestratorExists
 
-	if _, err := m.ResumeAgentWithMode(context.Background(), "mer-1"); !errors.Is(err, domain.ErrActiveOrchestratorExists) {
+	_, err := m.ResumeAgentWithMode(context.Background(), "mer-1")
+	if !errors.Is(err, domain.ErrActiveOrchestratorExists) {
 		t.Fatalf("err = %v", err)
+	}
+	// Recording the survivor makes it reapable EVENTUALLY; it does not make it
+	// gone. Returning nil here would leave the boot gate nothing to key on,
+	// while a live runtime executes in the session's workspace.
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("err = %v, want ErrLaunchCleanupUnresolved: unconfirmed death is unresolved "+
+			"even when the survivor was recorded", err)
 	}
 
 	got := st.sessions["mer-1"]
@@ -139,8 +147,12 @@ func TestResumeAgent_UncertainProbeRecordsSurvivingRuntime(t *testing.T) {
 	m, st, _ := resumeHarness(t, domain.KindOrchestrator, rt)
 	m.lcm.(*fakeLCM).markSpawnedErr = domain.ErrActiveOrchestratorExists
 
-	if _, err := m.ResumeAgentWithMode(context.Background(), "mer-1"); !errors.Is(err, domain.ErrActiveOrchestratorExists) {
+	_, err := m.ResumeAgentWithMode(context.Background(), "mer-1")
+	if !errors.Is(err, domain.ErrActiveOrchestratorExists) {
 		t.Fatalf("err = %v", err)
+	}
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("err = %v, want ErrLaunchCleanupUnresolved for an inconclusive probe", err)
 	}
 	got := st.sessions["mer-1"]
 	if got.Metadata.RuntimeHandleID != "h1" || got.Metadata.RuntimeLaunchID != "launch-new" {
@@ -268,6 +280,123 @@ func TestResumeAgent_SuccessfulTerminationStillClearsIdentity(t *testing.T) {
 	got := st.sessions["mer-1"]
 	if !got.IsTerminated || got.Metadata.RuntimeHandleID != "" {
 		t.Fatalf("clean rollback = terminated:%v meta:%+v", got.IsTerminated, got.Metadata)
+	}
+}
+
+// TestSwitchWorker_LaunchFailurePreservesBothSentinels: finishSwitchTarget
+// formats the relaunch error into ErrSwitchPostStop. Using "%w: %v" kept only
+// the text, so a post-stop that ALSO left a runtime executing was
+// indistinguishable from a clean one — and boot, which keys on
+// ErrLaunchCleanupUnresolved, could not tell them apart. Both must survive the
+// unwrap chain.
+func TestSwitchWorker_LaunchFailurePreservesBothSentinels(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	// The switch target is Created (restartHandle is nil), so it lands on "h1";
+	// only that runtime refuses to die.
+	rt := &stubbornRuntime{
+		fakeRuntime: &fakeRuntime{aliveByHandle: map[string]bool{"h1": true}},
+		stubbornID:  "h1",
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+
+	_, err := m.SwitchWorker(context.Background(), SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	if !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("err = %v, want ErrSwitchPostStop preserved", err)
+	}
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("err = %v, want ErrLaunchCleanupUnresolved preserved alongside it", err)
+	}
+}
+
+// TestRestoreAll_ReturnsUnresolvedCleanupInsteadOfSkipping is the boot-level
+// half.
+//
+// Reconcile's terminated-session reap pass runs BEFORE RestoreAll, so a runtime
+// that outlived a failed restore is executing in the session's workspace with
+// nothing scheduled to sweep it until the next boot. Logging and continuing —
+// which is right for every other per-session failure here — would let the
+// daemon serve in exactly that state. It must reach the caller.
+func TestRestoreAll_ReturnsUnresolvedCleanupInsteadOfSkipping(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1",
+			AgentSessionID: "agent-x", Prompt: "keep going",
+		},
+	}
+	// The shutdown-saved marker is what makes RestoreAll pick it up.
+	st.worktrees["mer-1"] = []domain.SessionWorktreeRecord{
+		{SessionID: "mer-1", RepoName: domain.RootWorkspaceRepoName, WorktreePath: "/ws/mer-1", Branch: "ao/mer-1", State: "removed"},
+	}
+	rt := &stubbornRuntime{
+		fakeRuntime: &fakeRuntime{aliveByHandle: map[string]bool{"h1": true}},
+		stubbornID:  "h1",
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex"}}}},
+		Workspace: &fakeWorkspace{path: "/ws/mer-1"}, Store: st, Messenger: &fakeMessenger{},
+		Lifecycle:   &fakeLCM{store: st},
+		DataDir:     t.TempDir(),
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		Executable:  func() (string, error) { return "/opt/ao", nil },
+		NewLaunchID: func() string { return "launch-new" },
+	})
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+
+	err := m.RestoreAll(context.Background())
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("RestoreAll = %v, want ErrLaunchCleanupUnresolved surfaced so boot can refuse to serve", err)
+	}
+	if !strings.Contains(err.Error(), "mer-1") {
+		t.Errorf("err = %v, want the offending session named", err)
+	}
+}
+
+// TestRestoreAll_OrdinaryRelaunchFailureStillSkips is the control: only the
+// unresolved-runtime case is escalated. A restore that failed cleanly leaves
+// nothing executing, so it stays a logged skip and must not block boot.
+func TestRestoreAll_OrdinaryRelaunchFailureStillSkips(t *testing.T) {
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		IsTerminated: true,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1",
+			AgentSessionID: "agent-x", Prompt: "keep going",
+		},
+	}
+	st.worktrees["mer-1"] = []domain.SessionWorktreeRecord{
+		{SessionID: "mer-1", RepoName: domain.RootWorkspaceRepoName, WorktreePath: "/ws/mer-1", Branch: "ao/mer-1", State: "removed"},
+	}
+	// Runtime dies cleanly: nothing is left executing.
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: supervisedLaunchAgent{launchArgvAgent{argv: []string{"codex"}}}},
+		Workspace: &fakeWorkspace{path: "/ws/mer-1"}, Store: st, Messenger: &fakeMessenger{},
+		Lifecycle:   &fakeLCM{store: st},
+		DataDir:     t.TempDir(),
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		Executable:  func() (string, error) { return "/opt/ao", nil },
+		NewLaunchID: func() string { return "launch-new" },
+	})
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+
+	if err := m.RestoreAll(context.Background()); err != nil {
+		t.Fatalf("RestoreAll = %v, want nil: a clean restore failure must not block boot", err)
 	}
 }
 

@@ -3,6 +3,7 @@ package sessionmanager
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -496,7 +497,11 @@ func (m *Manager) finishSwitchTarget(
 	})
 	if err != nil {
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, "", "", payload)
-		return SwitchResult{}, fmt.Errorf("switch %s: %w: %v", rec.ID, ErrSwitchPostStop, err)
+		// Joined, not "%w: %v": the relaunch error may carry
+		// ErrLaunchCleanupUnresolved, and formatting it with %v keeps only the
+		// text — boot would then be unable to tell a recoverable post-stop from
+		// one that also left a runtime executing.
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", rec.ID, errors.Join(ErrSwitchPostStop, err))
 	}
 	if result.Session.Metadata.RuntimeLaunchID != targetGen {
 		// Hard invariant: generation must match. Stop target and leave pending.
