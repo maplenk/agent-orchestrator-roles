@@ -3,6 +3,7 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -126,6 +127,43 @@ func TestRestoreAll_DropsSavedOrchestratorWhenOneIsAlreadyLive(t *testing.T) {
 	}
 }
 
+// TestBootUnsafeChildren pins the membership the daemon gate depends on.
+//
+// daemon.go checks ErrBootUnsafe and nothing else, which makes each leaf's
+// wrapping load-bearing rather than cosmetic: unwrap one and the daemon keeps
+// compiling, keeps checking the parent, and silently stops treating that
+// condition as fatal. Nothing else in the suite would notice, because every
+// other test asserts on the leaf it cares about.
+func TestBootUnsafeChildren(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"launch cleanup", ErrLaunchCleanupUnresolved},
+		{"restore marker", ErrRestoreMarkerUnresolved},
+		{"orchestrator evidence", ErrOrchestratorEvidenceUnresolved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !errors.Is(tc.err, ErrBootUnsafe) {
+				t.Fatalf("%v does not match ErrBootUnsafe: the daemon gate keys on the parent, "+
+					"so this condition would no longer stop boot", tc.err)
+			}
+			// And still matchable as itself, so callers can distinguish causes.
+			wrapped := fmt.Errorf("context: %w", tc.err)
+			if !errors.Is(wrapped, tc.err) || !errors.Is(wrapped, ErrBootUnsafe) {
+				t.Fatalf("%v lost identity or parentage when wrapped", tc.err)
+			}
+		})
+	}
+
+	// Negative control: the assertion above must not pass for everything.
+	for _, err := range []error{ErrNotFound, ErrTerminated, ErrNotResumable} {
+		if errors.Is(err, ErrBootUnsafe) {
+			t.Errorf("%v matches ErrBootUnsafe: an ordinary failure would abort boot", err)
+		}
+	}
+}
+
 // TestRestoreAll_AbortsElectionWhenAMarkerCannotBeRead is the fail-closed rule
 // for incomplete evidence.
 //
@@ -142,8 +180,14 @@ func TestRestoreAll_AbortsElectionWhenAMarkerCannotBeRead(t *testing.T) {
 	// The NEWEST candidate's marker is unreadable — the dangerous direction.
 	st.worktreeListErr["mer-2"] = errors.New("database is locked")
 
-	if err := m.RestoreAll(context.Background()); err != nil {
-		t.Fatalf("RestoreAll: %v", err)
+	err := m.RestoreAll(context.Background())
+	if !errors.Is(err, ErrOrchestratorEvidenceUnresolved) {
+		t.Fatalf("RestoreAll = %v, want ErrOrchestratorEvidenceUnresolved", err)
+	}
+	// Boot must refuse to serve: the unread marker may belong to a predecessor
+	// that should have been neutralized, and it stays eligible.
+	if !errors.Is(err, ErrBootUnsafe) {
+		t.Fatalf("err = %v, want it marked ErrBootUnsafe", err)
 	}
 
 	if live := activeIDs(st, domain.KindOrchestrator); len(live) != 0 {
@@ -165,11 +209,29 @@ func TestRestoreAll_UnreadableMarkerOnAnOlderCandidateAlsoAborts(t *testing.T) {
 	savedOrchestrator(st, "mer-2", "mer", time.Now().Add(-time.Hour))
 	st.worktreeListErr["mer-1"] = errors.New("database is locked")
 
-	if err := m.RestoreAll(context.Background()); err != nil {
-		t.Fatalf("RestoreAll: %v", err)
+	if err := m.RestoreAll(context.Background()); !errors.Is(err, ErrBootUnsafe) {
+		t.Fatalf("RestoreAll = %v, want ErrBootUnsafe", err)
 	}
 	if live := activeIDs(st, domain.KindOrchestrator); len(live) != 0 {
 		t.Fatalf("restored %v while a candidate's marker was unreadable", live)
+	}
+}
+
+// TestRestoreAll_UnreadableProjectSessionsIsBootFatal covers the other place
+// evidence can go missing: the under-gate session read itself. Without it there
+// may be a predecessor we never even enumerated, which is strictly less
+// information than an unreadable marker, so it cannot be treated more leniently.
+func TestRestoreAll_UnreadableProjectSessionsIsBootFatal(t *testing.T) {
+	m, st := restoreAllHarness(t)
+	savedOrchestrator(st, "mer-1", "mer", time.Now().Add(-time.Hour))
+	st.listSessionsErr = errors.New("database is locked")
+
+	err := m.RestoreAll(context.Background())
+	if !errors.Is(err, ErrOrchestratorEvidenceUnresolved) {
+		t.Fatalf("RestoreAll = %v, want ErrOrchestratorEvidenceUnresolved", err)
+	}
+	if !errors.Is(err, ErrBootUnsafe) {
+		t.Fatalf("err = %v, want it marked ErrBootUnsafe", err)
 	}
 }
 

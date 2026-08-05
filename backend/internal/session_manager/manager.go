@@ -970,6 +970,14 @@ var ErrBootUnsafe = errors.New("session: unsafe to serve")
 // see neutralizeRestoreMarkers.
 var ErrRestoreMarkerUnresolved = fmt.Errorf("%w: restore marker not neutralized", ErrBootUnsafe)
 
+// ErrOrchestratorEvidenceUnresolved means boot could not establish which saved
+// orchestrators a project has, so it cannot know whether one should have been
+// neutralized. It is boot-fatal for the same reason as the above and by the same
+// mechanism: an unexamined marker is still eligible, so killing the current
+// owner would let a predecessor return on a later boot. Not looking and failing
+// to delete leave the identical durable hazard.
+var ErrOrchestratorEvidenceUnresolved = fmt.Errorf("%w: orchestrator restore evidence incomplete", ErrBootUnsafe)
+
 // ErrLaunchCleanupUnresolved means a failed launch could not be rolled back to
 // a state AO can describe. It is deliberately distinct from the launch failure
 // itself: a launch failing is ordinary, and the compensating writes are what
@@ -2300,8 +2308,11 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 	// may already have terminated, retired, or reparented.
 	live, err := m.store.ListSessions(ctx, projectID)
 	if err != nil {
+		// Same policy as an unreadable marker below: without this read there may
+		// be an un-neutralized predecessor we never even saw.
 		m.logger.Error("restore-all: list project sessions failed", "projectID", projectID, "error", err)
-		return nil
+		return fmt.Errorf("%w: project %s sessions unreadable: %w",
+			ErrOrchestratorEvidenceUnresolved, projectID, err)
 	}
 	activeOwner := domain.SessionID("")
 	candidates := make([]domain.SessionRecord, 0, len(live))
@@ -2323,16 +2334,23 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 	// failed read on the newest candidate silently promote an older one, which
 	// then adopts the shared canonical worktree and replays older preserved
 	// state — a wrong winner chosen from incomplete evidence, and unlike a
-	// duplicate it is not something a later boot corrects. Abort the whole
-	// project's election instead: nothing is neutralized, nothing is restored,
-	// and the next boot decides again from a complete read.
+	// duplicate it is not something a later boot corrects.
+	//
+	// Abandoning the election is necessary but NOT sufficient, so this is
+	// boot-fatal rather than a skip. An unread marker may belong to a
+	// predecessor that should have been neutralized: it survives, and it is
+	// eligible. Kill the current owner and the next boot — once the read
+	// recovers — restores that predecessor. That is the same delayed
+	// resurrection an undeletable loser marker causes, reached by not having
+	// looked rather than by having failed to delete, so it gets the same answer.
 	restorable := make([]domain.SessionRecord, 0, len(candidates))
 	for _, rec := range candidates {
 		rows, err := m.restorableMarkers(ctx, rec.ID)
 		if err != nil {
 			m.logger.Error("restore-all: abandoning orchestrator election on an unreadable marker",
 				"projectID", projectID, "sessionID", rec.ID, "error", err)
-			return nil
+			return fmt.Errorf("%w: project %s candidate %s: %w",
+				ErrOrchestratorEvidenceUnresolved, projectID, rec.ID, err)
 		}
 		if len(rows) > 0 {
 			restorable = append(restorable, rec)

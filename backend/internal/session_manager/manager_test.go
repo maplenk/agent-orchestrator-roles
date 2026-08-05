@@ -65,6 +65,8 @@ type fakeStore struct {
 	// time rather than by breaking the whole store.
 	worktreeListErr   map[domain.SessionID]error
 	worktreeDeleteErr map[domain.SessionID]error
+	// listSessionsErr fails the per-project read RestoreAll takes under the gate.
+	listSessionsErr error
 	// sharedLog, when non-nil, receives an ordered call entry for each
 	// UpsertSessionWorktree invocation so ordering tests can compare across fakes.
 	sharedLog *[]string
@@ -202,6 +204,9 @@ func (f *fakeStore) GetSessionByPendingSourceHandle(_ context.Context, handleID 
 	return domain.SessionRecord{}, false, nil
 }
 func (f *fakeStore) ListSessions(_ context.Context, p domain.ProjectID) ([]domain.SessionRecord, error) {
+	if f.listSessionsErr != nil {
+		return nil, f.listSessionsErr
+	}
 	var out []domain.SessionRecord
 	for _, r := range f.sessions {
 		if r.ProjectID == p {
