@@ -27,11 +27,11 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Target-authoritative switch prompt | **Done** @ `a3bc32be` (live footer `Harness: codex`) |
 | Concurrent daemon ownership lease | **Done** — `datadirlock` on `AO_DATA_DIR` before store/reconcile |
 | `switch_supported` production | **true** for Claude/Codex (promoted after 2A close-out accept) |
-| Phase 2B-0a/0b (ownership + uniqueness) | **Landed** — project gate, migration 0046, fail-closed boot chain, constraint mapping, launch-cleanup hardening. **Remainder:** gated `RestoreAll`, survivor selection, marker neutralization, resolver collapse |
+| Phase 2B-0a/0b (ownership + uniqueness) | **Complete** — project gate, migration 0046, fail-closed boot chain, constraint mapping, launch-cleanup hardening, **and boot restore now gated with deterministic survivor selection + marker neutralization + a single ownership resolver** |
 | Phase 2B-1 onward (orchestrator switch/fresh) | **Not started** — worker-only guards still stand; `ObservedOrchestratorV1` designed, not built |
 | Phase 3A / 3B | **Not started** |
 
-**Next eng (critical path):** finish **2B-0b** (gated `RestoreAll` + survivor selection + marker neutralization), then **2B-1** (orchestrator in-place fresh conversation) — the first product-visible 2B behaviour. Phase 1-F / Claude RO remains parallel, and blocks 2B-3 (strict cross-harness orchestrator switch).
+**Next eng (critical path):** **2B-1** (orchestrator in-place fresh conversation) — the first *product-visible* 2B behaviour. Everything landed so far is coordinator **safety**: it prevents two orchestrators owning a project, but delivers no new user-facing capability. Phase 1-F / Claude RO remains parallel, and blocks 2B-3 (strict cross-harness orchestrator switch).
 
 ---
 
@@ -152,7 +152,7 @@ orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
 | Slice | Detail |
 |-------|--------|
 | 2B-0a Project ownership gate | **Landed.** Manager-owned, project-keyed exclusion; `EnsureOrchestrator` is the single gated ownership command. All public orchestrator mutations self-acquire (`Spawn`, `Retire`, `Restore`, `Kill`, `Resume`, `Rollback`, `Cleanup`). Also fixed the canonical-workspace alias: a retired row kept naming the path its successor owned, so `Kill`/`Cleanup` on the predecessor destroyed the live orchestrator's worktree. Service delegates and keeps auth/telemetry/presentation outside the gate. **`RestoreAll` still open — carried into 2B-0b** |
-| 2B-0b Coordinator uniqueness | **Substantially landed.** Migration 0046 partial unique index + reconciliation, capturing each loser's execution identity into `orchestrator_reap_queue` before clearing it; fail-closed boot reaper draining that queue ahead of every surface; unique-constraint errors mapped to `ErrActiveOrchestratorExists` (409) instead of an opaque 500; `MarkSpawned` launch-cleanup window hardened so a failed launch leaves neither an untracked runtime nor a phantom-live row, with `ErrLaunchCleanupUnresolved` propagated through restore *and* post_stop recovery to a fatal boot gate. **Remaining:** gated `RestoreAll`, deterministic survivor selection, restore-marker neutralization, and collapsing the two resolvers into one (`activeOrchestratorSessionID` vs `newestOrchestratorRecord`) |
+| 2B-0b Coordinator uniqueness | **Landed.** Migration 0046 partial unique index + reconciliation, capturing each loser's execution identity into `orchestrator_reap_queue` before clearing it; fail-closed boot reaper draining that queue ahead of every surface; unique-constraint errors mapped to `ErrActiveOrchestratorExists` (409) instead of an opaque 500; `MarkSpawned` launch-cleanup window hardened so a failed launch leaves neither an untracked runtime nor a phantom-live row, with `ErrLaunchCleanupUnresolved` propagated through restore *and* post_stop recovery to a fatal boot gate. **Boot restore closed the last ungated path:** `RestoreAll` now restores at most one orchestrator per project under that project's gate, held across *both* the survivor decision and the restore, because `workspace.Restore` adopts the shared canonical worktree before any row flips — so the index alone never sees the damage. Losing candidates and candidates displaced by an already-live owner have their markers neutralized (rows only; the preserved ref survives), mirroring 0046, or every later boot retries them. `activeOrchestratorSessionID` now applies `newestOrchestratorRecord` too: first-match-in-list-order returned the *oldest* active orchestrator, so workers spawned while two were briefly active were told to report to the one being superseded |
 | 2B-1 In-place orchestrator fresh conversation | Parameterize `KindWorker` guards; boot recovery; `ObservedOrchestratorV1` handoff |
 | 2B-2 Replacement durable recoverability | Persist replacement intent before retirement; a zero-owner interval is auto-recovered, never terminal |
 | 2B-3 Cross-harness orchestrator switch | Non-strict only — **strict is blocked on 1-B (Claude RO)**, since a strict orchestrator must be `workspaceWrites:false` and only Codex enforces RO |
@@ -220,7 +220,7 @@ cross-harness orchestrator switch on strict projects (2B-3).
 ### Sequencing sketch
 
 ```text
-2B-0a/0b ownership + uniqueness ──► LANDED (remainder: gated RestoreAll)
+2B-0a/0b ownership + uniqueness ──► LANDED (safety only, no user-facing change)
 Now ──► 2B-1 orch in-place fresh ──► 2B-2 recoverability ──► 2B-3 cross-harness
      ──► 3A pause ──► 3B continue/failover  (then promote limit_detection)
      ──► Integration
@@ -295,5 +295,5 @@ Still open:
 ## 7. Immediate next action
 
 1. ~~Accept 2A close-out + promote `SwitchSupported` for Claude/Codex~~ — **done**.
-2. ~~Start **Phase 2B** (orch ownership transfer)~~ — **2B-0a/0b landed**. Next: finish 2B-0b (gated `RestoreAll`, deterministic survivor selection, restore-marker neutralization, resolver collapse), then 2B-1 (orchestrator in-place fresh conversation). **Phase 1-F / Claude RO** stays parallel and gates 2B-3.
+2. ~~Start **Phase 2B** (orch ownership transfer)~~ — **2B-0a and 2B-0b complete** (ownership gate, uniqueness, fail-closed boot chain, gated boot restore, single resolver). Next: **2B-1** (orchestrator in-place fresh conversation) — parameterize the `KindWorker` guards, add `ObservedOrchestratorV1` + compiler path, a new ledger kind, and orchestrator recovery in `Reconcile`. **Phase 1-F / Claude RO** stays parallel and gates 2B-3.
 3. Keep `limit_detection_supported` false until Phase 3 structured-limit evidence.

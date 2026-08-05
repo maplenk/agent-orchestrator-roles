@@ -1,9 +1,9 @@
 # Phase 2B — Orchestrator ownership transfer
 
-**Status:** **2B-0a and 2B-0b landed** (ownership gate, migration 0046 uniqueness +
-reap queue, fail-closed boot chain, constraint mapping, launch-cleanup hardening) —
-see the slice table in §7. **2B-0b remainder:** gated `RestoreAll`, deterministic
-survivor selection, restore-marker neutralization. **2B-1 onward not started**, so
+**Status:** **2B-0a and 2B-0b complete** (ownership gate, migration 0046 uniqueness +
+reap queue, fail-closed boot chain, constraint mapping, launch-cleanup hardening,
+gated boot restore with deterministic survivor selection + marker neutralization,
+single ownership resolver) — see the slice table in §7. **2B-1 onward not started**, so
 the product-visible orchestrator switch/fresh protocol does not exist yet: the
 worker-only guards still stand and `ObservedOrchestratorV1` is designed, not built.
 Written after Phase 2A close-out (`5e8476d5`).
@@ -80,20 +80,30 @@ blocked on Claude RO. Non-strict projects are unaffected.
 
 ## 2. Current state — what exists, what does not
 
-### 2.1 There is no coordinator lease; ownership is *derived*, and derived two different ways
+### 2.1 ~~There is no coordinator lease; ownership is *derived*, and derived two different ways~~ — **RESOLVED in 2B-0a/0b**
+
+*The finding as originally written, kept because it is the rationale for the
+whole slice:*
 
 | Resolver | Location | Rule |
 |----------|----------|------|
-| `activeOrchestratorSessionID` | `session_manager/manager.go:2740-2751` | **first** non-terminated orchestrator in `ListSessions` order |
-| `newestSession(activeOrchestrators(...))` | `service/session/service.go:346`, `:402-410` | **newest by `CreatedAt`** |
+| `activeOrchestratorSessionID` | `session_manager/manager.go` | **first** non-terminated orchestrator in `ListSessions` order |
+| `newestSession(activeOrchestrators(...))` | `service/session/service.go` | **newest by `CreatedAt`** |
 
 These disagree whenever a project has more than one active orchestrator — which
-is exactly the transfer window. `lockOrchestratorProject`
-(`service/session/service.go:322`) is a **process-local** mutex in the service
-layer only; it does not exist in the session manager where the switch fence
-lives, and it does not survive a daemon restart.
+is exactly the transfer window. `lockOrchestratorProject` was a **process-local**
+mutex in the service layer only; it did not exist in the session manager where
+the switch fence lives, and it did not survive a daemon restart.
 
-**This is the single real gap `MASTER_PLAN` §5.4 calls "coordinator lease".**
+**This was the single real gap `MASTER_PLAN` §5.4 calls "coordinator lease".**
+
+**Now:** the service-layer resolver and mutex are gone (2B-0a moved ownership
+into the manager behind a project-keyed gate), and `activeOrchestratorSessionID`
+applies `newestOrchestratorRecord` — the same rule as `EnsureOrchestrator` and
+migration 0046. There is one rule, in one place, and the database enforces the
+cardinality it depends on. What is still *derived* rather than leased is
+acceptable precisely because the partial unique index makes "more than one
+active orchestrator" unrepresentable.
 
 ### 2.1b The orchestrator workspace and branch are keyed by *project*, not session
 
@@ -337,8 +347,8 @@ either path preserves now, which is the concrete P1 win for this phase.
 
 | Slice | Scope | Est. | Depends on |
 |-------|-------|------|------------|
-| ~~**2B-0a**~~ | **Landed.** Manager-owned, project-keyed gate; `EnsureOrchestrator` is the single gated ownership command covering lookup → retire notice → retirement → successor spawn. Every public orchestrator mutation self-acquires via private `…UnderOwnership` helpers: `Spawn`, `RetireForReplacement`, `RestoreWithMode`, `Kill`, `ResumeAgentWithMode` (gate **before** the resume fence), `RollbackSpawn`, and `Cleanup` (project-scoped). Retirement now releases the retired row's workspace claim, and `Kill`/`Cleanup` additionally refuse a canonical path held by the active orchestrator (**D6**). Service delegates, keeping authorization, telemetry and presentation outside the gate. **Boot `RestoreAll` is not yet gated** — carried into 2B-0b, where it is needed anyway for duplicate reconciliation | done | — |
-| **2B-0b** | **Coordinator uniqueness**: migration 0046 partial unique index, plus the reconciliation spec in §3.2b (deterministic survivor, marker neutralization, probe-authoritative reap, restore preflight). Closes **D1**. **Remaining acceptance criterion — boot must not serve on an unresolved launch cleanup.** `Reconcile` runs the terminated-session reap pass *before* `RestoreAll`, so a relaunch whose runtime survived teardown is not swept until the next restart. `ErrLaunchCleanupUnresolved` is now carried by every hop **inside** Session Manager: the launch rollback returns it for every unconfirmed death (recorded or not — recording makes a survivor reapable *eventually*, not gone), and both places boot can lose it now collect and return it instead of logging. Those places are **two**, not one, and the second is the easy one to miss: `RestoreAll`'s terminated-session restores, **and** `Reconcile`'s post_stop recovery, whose session stays deliberately ACTIVE (`KeepSessionOnLaunchFailure` — a terminated session is unrecoverable) and is therefore invisible to the live pass, which skips a pending switch, and to `RestoreAll`, which only walks terminated rows. Both feed `Reconcile`'s single return — including through its mandatory re-list, whose failure must be *joined* with what was already collected rather than returned bare. **The daemon hop is now closed too**: `Reconcile`'s error aborts boot when (and only when) it carries `ErrLaunchCleanupUnresolved`, every other failure staying logged so an unrelated store hiccup cannot stop the daemon starting. Making that gate meaningful required **moving it**: it previously ran after `browserruntime.Listen`/`Serve` and `restoreMobileOnBoot`, so a fatal return would still have exposed live surfaces first. Session reconciliation now sits immediately after the reap-queue drain and the shell sweep, ahead of the API server's construction, the preview poller, the browser runtime, the mobile LAN listener, the supervisor and `srv.Run` — pinned by `boot_order_test.go`, which checks both fatal gates against one shared list of client-facing steps. What remains for this slice is the ownership gate on `RestoreAll` itself (deterministic survivor selection, marker neutralization), not the safety property | 1–2 d | 2B-0a |
+| ~~**2B-0a**~~ | **Landed.** Manager-owned, project-keyed gate; `EnsureOrchestrator` is the single gated ownership command covering lookup → retire notice → retirement → successor spawn. Every public orchestrator mutation self-acquires via private `…UnderOwnership` helpers: `Spawn`, `RetireForReplacement`, `RestoreWithMode`, `Kill`, `ResumeAgentWithMode` (gate **before** the resume fence), `RollbackSpawn`, and `Cleanup` (project-scoped). Retirement now releases the retired row's workspace claim, and `Kill`/`Cleanup` additionally refuse a canonical path held by the active orchestrator (**D6**). Service delegates, keeping authorization, telemetry and presentation outside the gate. **Boot `RestoreAll` was carried into 2B-0b and is now gated there** | done | — |
+| ~~**2B-0b**~~ | **Coordinator uniqueness**: migration 0046 partial unique index, plus the reconciliation spec in §3.2b (deterministic survivor, marker neutralization, probe-authoritative reap, restore preflight). Closes **D1**. **Remaining acceptance criterion — boot must not serve on an unresolved launch cleanup.** `Reconcile` runs the terminated-session reap pass *before* `RestoreAll`, so a relaunch whose runtime survived teardown is not swept until the next restart. `ErrLaunchCleanupUnresolved` is now carried by every hop **inside** Session Manager: the launch rollback returns it for every unconfirmed death (recorded or not — recording makes a survivor reapable *eventually*, not gone), and both places boot can lose it now collect and return it instead of logging. Those places are **two**, not one, and the second is the easy one to miss: `RestoreAll`'s terminated-session restores, **and** `Reconcile`'s post_stop recovery, whose session stays deliberately ACTIVE (`KeepSessionOnLaunchFailure` — a terminated session is unrecoverable) and is therefore invisible to the live pass, which skips a pending switch, and to `RestoreAll`, which only walks terminated rows. Both feed `Reconcile`'s single return — including through its mandatory re-list, whose failure must be *joined* with what was already collected rather than returned bare. **The daemon hop is now closed too**: `Reconcile`'s error aborts boot when (and only when) it carries `ErrLaunchCleanupUnresolved`, every other failure staying logged so an unrelated store hiccup cannot stop the daemon starting. Making that gate meaningful required **moving it**: it previously ran after `browserruntime.Listen`/`Serve` and `restoreMobileOnBoot`, so a fatal return would still have exposed live surfaces first. Session reconciliation now sits immediately after the reap-queue drain and the shell sweep, ahead of the API server's construction, the preview poller, the browser runtime, the mobile LAN listener, the supervisor and `srv.Run` — pinned by `boot_order_test.go`, which checks both fatal gates against one shared list of client-facing steps. **The `RestoreAll` gate is now closed too**, which was the last ungated path able to create a duplicate: it restores at most one orchestrator per project, holding that project's gate across **both** the survivor decision and the restore, because `workspace.Restore` adopts the shared canonical worktree before any row flips — so the index never sees the damage and splitting the two would reintroduce the race. Losing candidates, and candidates displaced by an already-live owner (Reconcile's adopt pass runs first), have their markers neutralized exactly as 0046 does to its losers — marker rows only, never the preserved ref — since a surviving marker is retried every boot. `activeOrchestratorSessionID` was collapsed onto `newestOrchestratorRecord` as well: first-match-in-list-order returned the OLDEST active orchestrator, so any worker spawned while two were briefly active was told to report to the one being superseded | done | 2B-0a |
 | **2B-1** | Orchestrator in-place **fresh conversation**: parameterize the `KindWorker` guards (`switch.go:64`, `:254`, `manager.go:1673`, `service/session/switch.go:59`), `Reconcile` recovery for orchestrators, `ObservedOrchestratorV1` handoff, new ledger kind | 2–3 d | 2B-0b |
 | **2B-2** | Replacement **durable recoverability**: persist replacement intent before retirement so a zero-owner interval is always auto-recovered (**D2a**/**D2b**, per DoD 5b). Also owns the **two-write retirement failure window**: `finalizeRetirement` releases the claim and marks terminated as separate writes, so a crash between them leaves a released-but-active row | 1–2 d | 2B-0b |
 | **2B-3** | **Cross-harness** orchestrator switch | 1–2 d | 2B-1. non-strict only; **strict blocked on 1-B (Claude RO)** |
