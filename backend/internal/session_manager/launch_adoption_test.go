@@ -400,6 +400,90 @@ func TestRestoreAll_OrdinaryRelaunchFailureStillSkips(t *testing.T) {
 	}
 }
 
+// TestReconcile_CollectsUnresolvedCleanupFromPostStopRecovery closes the third
+// loss point, and the sneakiest.
+//
+// Boot's post_stop recovery deliberately keeps the session ACTIVE on a launch
+// failure (KeepSessionOnLaunchFailure — a terminated session is unrecoverable).
+// That is correct, and it is exactly what hides an unresolved runtime from
+// everything downstream: the live pass skips a still-pending switch, and
+// RestoreAll only walks terminated rows. Reconcile is the last place the
+// condition is visible, so logging it there loses it for good.
+func TestReconcile_CollectsUnresolvedCleanupFromPostStopRecovery(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+
+	// An incomplete post_stop: source already stopped, target never acked.
+	const gen = "gen-unresolved"
+	payload := `{"semantic":{"schemaVersion":1,"objective":"recover"},"observed":{"schemaVersion":1},"compiled":"## Host-compiled handoff\n\nrecover"}`
+	rec := st.sessions[id]
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: gen, Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		OriginalTask: "implement feature", RoleID: "implementor", PayloadJSON: payload,
+	}
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	rec.Metadata.Prompt = "## Host-compiled handoff\n\nrecover"
+	st.sessions[id] = rec
+	st.ledger = []domain.LifecycleLedgerRecord{{
+		ID: string(id) + ":" + gen + ":post_stop", SessionID: id, ProjectID: "mer",
+		Kind: domain.LifecycleKindSwitch, Phase: domain.LifecyclePhasePostStop, GenerationID: gen,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex, PayloadJSON: payload,
+	}}
+
+	// The recovery target is Created, so it lands on "h1" and refuses to die.
+	rt := &stubbornRuntime{
+		fakeRuntime: &fakeRuntime{aliveByHandle: map[string]bool{"h1": true}},
+		stubbornID:  "h1",
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "must-not-mint" },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+
+	err := m.Reconcile(context.Background())
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("Reconcile = %v, want ErrLaunchCleanupUnresolved so boot can refuse to serve", err)
+	}
+
+	// And the reason it had to be caught HERE: the row is still active, so no
+	// later pass could have collected it.
+	got := st.sessions[id]
+	if got.IsTerminated {
+		t.Fatal("fixture drifted: recovery terminated the session, so this is no longer the " +
+			"invisible-to-downstream path the test exists for")
+	}
+}
+
+// TestReconcile_CleanPassReturnsNil is the control: the collector must not turn
+// an ordinary healthy boot into an error.
+func TestReconcile_CleanPassReturnsNil(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile = %v, want nil on a healthy pass", err)
+	}
+}
+
 // stubbornRuntime narrows fakeRuntime's global destroyErr/aliveErr to a single
 // handle, so a test can let the pre-launch restart probe succeed and fail only
 // the post-launch reap — the window this file is about.

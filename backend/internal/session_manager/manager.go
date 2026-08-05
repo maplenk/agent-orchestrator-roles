@@ -2100,19 +2100,37 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 //     collide with a leaked tmux of the same name.
 //  4. Restore pass: relaunch shutdown-saved sessions (existing RestoreAll).
 //
-// Best-effort throughout: a per-session failure is logged and never aborts the
-// pass or blocks boot.
+// Best-effort throughout, with ONE exception: a pass that leaves a runtime
+// executing which nothing is scheduled to sweep (ErrLaunchCleanupUnresolved) is
+// collected and returned rather than logged. Every other per-session failure is
+// logged and never aborts the pass. Both loss points feed the same return —
+// post_stop recovery below, whose session stays ACTIVE and is therefore
+// invisible to every later pass, and RestoreAll's terminated-session restores.
+// Making that return FATAL at the daemon is the remaining half, tracked as
+// 2B-0b.
 func (m *Manager) Reconcile(ctx context.Context) error {
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)
 	}
+	var unresolved []error
 	for _, rec := range recs {
 		if rec.IsTerminated || rec.Kind != domain.KindWorker {
 			continue
 		}
 		if _, err := m.RecoverSwitchFromPostStop(ctx, rec.ID); err != nil {
 			if errors.Is(err, ErrSwitchNothingToRecover) || errors.Is(err, ErrSwitchInProgress) {
+				continue
+			}
+			if errors.Is(err, ErrLaunchCleanupUnresolved) {
+				// This is the LAST place the condition is visible. Recovery
+				// keeps the row ACTIVE on purpose (KeepSessionOnLaunchFailure —
+				// a terminated session is unrecoverable), so the live pass below
+				// skips it as switch-pending and RestoreAll only walks
+				// terminated rows. Neither downstream collector can ever see it.
+				m.logger.Error("reconcile: post_stop recovery left an unresolved runtime",
+					"sessionID", rec.ID, "error", err)
+				unresolved = append(unresolved, err)
 				continue
 			}
 			m.logger.Error("reconcile: post_stop recovery failed, skipping", "sessionID", rec.ID, "error", err)
@@ -2139,7 +2157,8 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			m.logger.Error("reconcile: reap pass failed, skipping", "sessionID", rec.ID, "error", err)
 		}
 	}
-	return m.RestoreAll(ctx)
+	// errors.Join drops nils, so a healthy pass still returns nil.
+	return errors.Join(append(unresolved, m.RestoreAll(ctx))...)
 }
 
 // RestoreAll relaunches every terminated session that was saved by the last
