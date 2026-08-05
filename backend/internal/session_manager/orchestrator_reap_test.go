@@ -7,26 +7,55 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/tmux"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // reapHarness builds a Manager wired for reap-queue tests, with a recording
 // shell closer so shell-drain outcomes are observable.
 func reapHarness(t *testing.T) (*Manager, *fakeStore, *fakeRuntime, *recordingShellCloser) {
 	t.Helper()
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m, st, shells := reapHarnessWithRuntime(t, rt)
+	return m, st, rt, shells
+}
+
+// reapHarnessWithRuntime is reapHarness over a caller-supplied runtime, so a
+// test can choose whether the adapter can derive a handle from a session id.
+func reapHarnessWithRuntime(t *testing.T, rt runtimeController) (*Manager, *fakeStore, *recordingShellCloser) {
+	t.Helper()
+	m, st := reapHarnessNoShells(t, rt)
+	shells := &recordingShellCloser{}
+	m.SetShellTerminalCloser(shells)
+	return m, st, shells
+}
+
+// reapHarnessNoShells deliberately leaves the shell closer unwired, which is
+// the boot-ordering bug the reaper must refuse to paper over.
+func reapHarnessNoShells(t *testing.T, rt runtimeController) (*Manager, *fakeStore) {
+	t.Helper()
 	st := newFakeStore()
 	st.num = 100
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
-	shells := &recordingShellCloser{}
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}},
 		Workspace: &fakeWorkspace{}, Store: st, Messenger: &fakeMessenger{},
 		Lifecycle: &fakeLCM{store: st},
 		LookPath:  func(string) (string, error) { return "/bin/true", nil },
 	})
-	m.SetShellTerminalCloser(shells)
-	return m, st, rt, shells
+	return m, st
+}
+
+// tmuxNamingRuntime derives handles through the real tmux adapter, so the
+// empty-handle fallback is exercised against actual sanitisation instead of a
+// stand-in that happens to be the identity function.
+type tmuxNamingRuntime struct {
+	*fakeRuntime
+}
+
+func (r *tmuxNamingRuntime) SessionHandle(id domain.SessionID) (ports.RuntimeHandle, error) {
+	return tmux.New(tmux.Options{}).SessionHandle(id)
 }
 
 func reapEntry(id domain.SessionID, handle string) domain.OrchestratorReapEntry {
@@ -141,12 +170,13 @@ func TestDrainReapQueue_UnclosableShellFailsClosed(t *testing.T) {
 	}
 }
 
-// TestDrainReapQueue_EmptyHandleProbesSessionIDFallback guards the trap:
+// TestDrainReapQueue_EmptyHandleProbesAdapterDerivedHandle guards the trap:
 // destroyRuntimeProbed short-circuits an EMPTY handle to "confirmed dead"
 // without probing at all. That is safe inside the switch saga but wrong here,
 // so the reaper must fall back explicitly and still fail closed.
-func TestDrainReapQueue_EmptyHandleProbesSessionIDFallback(t *testing.T) {
-	m, st, rt, _ := reapHarness(t)
+func TestDrainReapQueue_EmptyHandleProbesAdapterDerivedHandle(t *testing.T) {
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m, st, _ := reapHarnessWithRuntime(t, &tmuxNamingRuntime{fakeRuntime: rt})
 	st.reapQueue = []domain.OrchestratorReapEntry{reapEntry("mer-1", "")}
 	// A runtime named after the session outlived the cleared handle field.
 	rt.aliveByHandle["mer-1"] = true
@@ -158,12 +188,97 @@ func TestDrainReapQueue_EmptyHandleProbesSessionIDFallback(t *testing.T) {
 	if len(st.reapQueue) != 1 {
 		t.Fatal("obligation must be retained")
 	}
-	// And the fallback targeted the session id, not nothing at all.
-	if got := reapProbeHandle(reapEntry("mer-1", "")).ID; got != "mer-1" {
-		t.Fatalf("fallback probe handle = %q, want the session id", got)
+
+	// And the derivation, not the raw id, decides what gets probed.
+	got, resolveErr := m.reapProbeHandle(reapEntry("mer-1", "tmux-mer-1"))
+	if resolveErr != nil || got.ID != "tmux-mer-1" {
+		t.Fatalf("recorded handle must win when present, got %q (%v)", got.ID, resolveErr)
 	}
-	if got := reapProbeHandle(reapEntry("mer-1", "tmux-mer-1")).ID; got != "tmux-mer-1" {
-		t.Fatalf("recorded handle must win when present, got %q", got)
+}
+
+// TestDrainReapQueue_EmptyHandleFallbackIsAdapterSanitized is the regression
+// for probing the raw session id. tmux registers sessions under a sanitized,
+// hash-suffixed name when the id is too long or holds characters it rejects,
+// and its IsAlive validates whatever handle it is handed — so the raw id
+// either probes a runtime that never existed (reading "dead" for something
+// that may be alive) or is rejected outright, wedging boot forever on a name
+// tmux could not have created. The fallback must ask the adapter.
+func TestDrainReapQueue_EmptyHandleFallbackIsAdapterSanitized(t *testing.T) {
+	// A session id tmux cannot use verbatim: illegal characters and too long.
+	const rawID = domain.SessionID("mer/orchestrator:2026-06-10T09:30:00Z@canonical-workspace")
+	want := tmux.SessionName(string(rawID))
+	if want == string(rawID) {
+		t.Fatalf("fixture is not exercising sanitisation: %q survived unchanged", rawID)
+	}
+
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m, st, _ := reapHarnessWithRuntime(t, &tmuxNamingRuntime{fakeRuntime: rt})
+	entry := reapEntry(rawID, "")
+	st.reapQueue = []domain.OrchestratorReapEntry{entry}
+	// The runtime is alive under the name tmux actually registered.
+	rt.aliveByHandle[want] = true
+
+	err := m.DrainOrchestratorReapQueue(context.Background())
+	if !errors.Is(err, ErrReapUnconfirmed) {
+		t.Fatalf("err = %v, want the sanitized handle probed and found alive", err)
+	}
+	if len(st.reapQueue) != 1 {
+		t.Fatal("obligation must be retained")
+	}
+	got, resolveErr := m.reapProbeHandle(entry)
+	if resolveErr != nil {
+		t.Fatalf("resolve fallback handle: %v", resolveErr)
+	}
+	if got.ID != want {
+		t.Fatalf("fallback probe handle = %q, want the adapter-derived %q", got.ID, want)
+	}
+	for _, id := range rt.destroyedIDs {
+		if id == string(rawID) {
+			t.Fatalf("probed the raw session id %q, which tmux never registers", rawID)
+		}
+	}
+}
+
+// TestDrainReapQueue_UnresolvableHandleFailsClosed: a runtime that cannot say
+// which handle a session id maps to leaves us unable to probe anything, and
+// "cannot probe" is not "dead".
+func TestDrainReapQueue_UnresolvableHandleFailsClosed(t *testing.T) {
+	// The bare fakeRuntime deliberately does NOT implement the resolver.
+	m, st, rt, _ := reapHarness(t)
+	st.reapQueue = []domain.OrchestratorReapEntry{reapEntry("mer-1", "")}
+
+	err := m.DrainOrchestratorReapQueue(context.Background())
+	if !errors.Is(err, ErrReapUnconfirmed) {
+		t.Fatalf("err = %v, want the drain to fail when no handle can be derived", err)
+	}
+	if len(st.reapQueue) != 1 {
+		t.Fatal("obligation must be retained")
+	}
+	if rt.destroyed != 0 {
+		t.Errorf("nothing should have been destroyed on a guessed handle, got %d", rt.destroyed)
+	}
+}
+
+// TestDrainReapQueue_NoShellCloserFailsClosed pins the boot-ordering contract
+// from the other side. beginShellTerminalTeardown answers "no closer wired"
+// with success — correct for ordinary teardown, fatal here, because it would
+// discharge a durable obligation while checking nothing at all. Wiring the
+// closer before the drain is a boot-order requirement, and violating it must
+// surface as a failure rather than a silently skipped check.
+func TestDrainReapQueue_NoShellCloserFailsClosed(t *testing.T) {
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": false}}
+	m, st := reapHarnessNoShells(t, rt) // SetShellTerminalCloser never called
+	st.reapQueue = []domain.OrchestratorReapEntry{reapEntry("mer-1", "tmux-mer-1")}
+
+	err := m.DrainOrchestratorReapQueue(context.Background())
+	if !errors.Is(err, ErrReapUnconfirmed) {
+		t.Fatalf("err = %v, want ErrReapUnconfirmed even though the runtime died", err)
+	}
+	if !strings.Contains(err.Error(), "shell terminal closer not wired") {
+		t.Fatalf("err = %v, want the wiring gap named", err)
+	}
+	if len(st.reapQueue) != 1 {
+		t.Fatal("an unchecked obligation must be retained, not discharged")
 	}
 }
 

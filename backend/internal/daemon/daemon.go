@@ -245,11 +245,41 @@ func Run() error {
 	// behind them. They reuse the same runtime adapter (and therefore the same
 	// terminal mux) as session panes, but keep their own ids, storage, and
 	// lifetime — see internal/service/shellterm.
-	shellTermSvc := startShellTerminals(ctx, cfg, runtimeAdapter, store, projectSvc, sessionSvc, log)
+	shellTermSvc := newShellTerminals(cfg, runtimeAdapter, store, projectSvc, sessionSvc, log)
 	// Late-bound so Kill/Cleanup close a session's scoped shells before its
 	// worktree is torn down (shellTermSvc cannot exist before sessMgr does; see
 	// SetShellTerminalCloser).
 	sessMgr.SetShellTerminalCloser(shellTermSvc)
+
+	// Discharge superseded-orchestrator reap obligations FIRST — before any
+	// reconciliation sweep, before any listener, before the API server is even
+	// constructed.
+	//
+	// Unlike everything else on the boot path this is FATAL, and deliberately
+	// not routed through Reconcile: Reconcile's errors are logged and boot
+	// continues, which is the wrong contract here. A queue entry means a
+	// superseded orchestrator's process may still be live inside the canonical
+	// workspace its successor now owns, and doing ANY reconciliation or serving
+	// in that state is exactly what migration 0046's constraint exists to
+	// prevent. A missing queue table is likewise fatal rather than read as
+	// "nothing is owed".
+	//
+	// Ordering requirements, in both directions:
+	//   - AFTER SetShellTerminalCloser: the drain confirms scoped shells are
+	//     closed and refuses to discharge an obligation without a closer wired.
+	//   - BEFORE sweepShellTerminals, Reconcile, RestoreAll, the browser
+	//     runtime listener, the mobile LAN listener, and srv.Run.
+	if reapErr := sessMgr.DrainOrchestratorReapQueue(ctx); reapErr != nil {
+		stop()
+		lcStack.Stop()
+		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
+			log.Error("cdc pipeline shutdown", "err", cdcErr)
+		}
+		return fmt.Errorf("drain orchestrator reap queue: %w", reapErr)
+	}
+
+	// Ordinary best-effort reconciliation, now that the fatal gate has passed.
+	sweepShellTerminals(ctx, shellTermSvc, log)
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
 	// to start the daemon. pushRegistry (interface) is assigned only when load
@@ -339,21 +369,6 @@ func Run() error {
 	// Best-effort: never blocks boot.
 	if err := restoreMobileOnBoot(mobilebridge.Path(cfg.DataDir), lan); err != nil {
 		log.Warn("restore mobile bridge on boot failed", "err", err)
-	}
-
-	// Discharge superseded-orchestrator reap obligations BEFORE the reconcile
-	// passes below, which reap leaked runtimes generically and then restore
-	// shutdown-saved sessions.
-	//
-	// Unlike everything else in this block this is FATAL, and deliberately not
-	// routed through Reconcile: Reconcile's errors are logged and boot
-	// continues, which is the wrong contract here. A queue entry means a
-	// superseded orchestrator's process may still be live inside the canonical
-	// workspace its successor now owns, and serving in that state is exactly
-	// what migration 0046's constraint exists to prevent. A missing queue table
-	// is likewise fatal rather than read as "nothing is owed".
-	if reapErr := sessMgr.DrainOrchestratorReapQueue(ctx); reapErr != nil {
-		return fmt.Errorf("drain orchestrator reap queue: %w", reapErr)
 	}
 
 	// Reconcile sessions on boot: adopt crash-surviving runtimes, capture and

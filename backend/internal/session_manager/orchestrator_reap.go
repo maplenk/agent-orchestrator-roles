@@ -83,32 +83,25 @@ func (m *Manager) DrainOrchestratorReapQueue(ctx context.Context) error {
 // runtime and scoped shells are dead. It returns nil only when both are
 // authoritatively confirmed, and never touches the workspace.
 func (m *Manager) reapSupersededOrchestrator(ctx context.Context, entry domain.OrchestratorReapEntry) error {
-	handle := strings.TrimSpace(entry.RuntimeHandleID)
-	if handle == "" {
-		// The row genuinely had no recorded handle. destroyRuntimeProbed
-		// short-circuits an empty handle to "confirmed dead" WITHOUT probing,
-		// which is safe inside the switch saga (the handle was just read off a
-		// live row) but is wrong here: a runtime named after the session can
-		// outlive a cleared handle field. Fall back explicitly to the session
-		// id, which is what the runtime adapters derive their handle from.
-		handle = string(entry.SessionID)
-		m.logger.Warn("orchestrator reap: no recorded handle; probing by session id",
-			"session", entry.SessionID)
+	handle, err := m.reapProbeHandle(entry)
+	if err != nil {
+		return fmt.Errorf("resolve probe handle: %w", err)
 	}
 
-	dead, err := m.destroyRuntimeProbed(ctx, handle)
+	dead, err := m.destroyRuntimeProbed(ctx, handle.ID)
 	if err != nil {
 		return fmt.Errorf("runtime probe inconclusive: %w", err)
 	}
 	if !dead {
-		return fmt.Errorf("runtime %q still alive", handle)
+		return fmt.Errorf("runtime %q still alive", handle.ID)
 	}
 
 	// Scoped shells run inside the canonical workspace the survivor now owns,
 	// so an unclosable shell is as disqualifying as a live runtime. Unlike
 	// drainScopedShells — best-effort by design for interactive cleanup — a
-	// failure here is propagated.
-	release, shellErr := m.beginShellTerminalTeardown(ctx, entry.SessionID)
+	// failure here is propagated, and unlike ordinary teardown an unwired
+	// closer is itself a failure (see requireShellTerminalTeardown).
+	release, shellErr := m.requireShellTerminalTeardown(ctx, entry.SessionID)
 	if shellErr != nil {
 		return fmt.Errorf("scoped shells not confirmed closed: %w", shellErr)
 	}
@@ -120,10 +113,39 @@ func (m *Manager) reapSupersededOrchestrator(ctx context.Context, entry domain.O
 	return nil
 }
 
-// reapProbeHandle exists so tests can assert the exact handle a fallback probes.
-func reapProbeHandle(entry domain.OrchestratorReapEntry) ports.RuntimeHandle {
+// reapProbeHandle answers which handle to probe for one queued obligation.
+//
+// A recorded handle always wins. When the row has none, the raw session id is
+// NOT a safe substitute: destroyRuntimeProbed short-circuits an empty handle to
+// "confirmed dead" without probing at all (safe inside the switch saga, where
+// the handle was just read off a live row; wrong here, since a runtime named
+// after the session can outlive a cleared handle field), and the adapters do
+// not key runtimes by the raw id — tmux sanitizes ids that are too long or
+// contain characters it rejects, and its IsAlive validates whatever handle it
+// is given. Probing the raw id would therefore either miss a live runtime or be
+// rejected outright, wedging boot on a handle that never existed.
+//
+// So the adapter is asked. A runtime that cannot answer fails the obligation
+// rather than guessing: both shipped adapters implement the capability (asserted
+// at compile time in runtimeselect), so this is a wiring error, and the whole
+// point of this path is that unconfirmed means unconfirmed.
+func (m *Manager) reapProbeHandle(entry domain.OrchestratorReapEntry) (ports.RuntimeHandle, error) {
 	if h := strings.TrimSpace(entry.RuntimeHandleID); h != "" {
-		return ports.RuntimeHandle{ID: h}
+		return ports.RuntimeHandle{ID: h}, nil
 	}
-	return ports.RuntimeHandle{ID: string(entry.SessionID)}
+	resolver, ok := m.runtime.(ports.RuntimeSessionHandleResolver)
+	if !ok {
+		return ports.RuntimeHandle{}, fmt.Errorf(
+			"no recorded handle for %s and this runtime cannot derive one from a session id", entry.SessionID)
+	}
+	handle, err := resolver.SessionHandle(entry.SessionID)
+	if err != nil {
+		return ports.RuntimeHandle{}, fmt.Errorf("derive handle for %s: %w", entry.SessionID, err)
+	}
+	if strings.TrimSpace(handle.ID) == "" {
+		return ports.RuntimeHandle{}, fmt.Errorf("runtime derived an empty handle for %s", entry.SessionID)
+	}
+	m.logger.Warn("orchestrator reap: no recorded handle; probing adapter-derived handle",
+		"session", entry.SessionID, "handle", handle.ID)
+	return handle, nil
 }

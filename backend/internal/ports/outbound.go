@@ -93,6 +93,23 @@ type RuntimeRestarter interface {
 	Restart(ctx context.Context, handle RuntimeHandle, cfg RuntimeConfig) (RuntimeHandle, error)
 }
 
+// RuntimeSessionHandleResolver reports the handle a Create for sessionID would
+// register, applying whatever derivation the adapter performs.
+//
+// It exists for one narrow job: probing a session whose recorded handle was
+// lost. The raw session id is NOT a usable substitute — tmux derives a
+// sanitized, hash-suffixed name for ids that are too long or contain characters
+// it rejects, and its IsAlive validates the handle as given. Probing the raw id
+// therefore either finds no such runtime (reading "dead" for something that may
+// be alive) or is rejected outright as an invalid handle. Only the adapter can
+// answer this, so it is asked rather than guessed.
+//
+// Implementations must be deterministic and side-effect free: this is a naming
+// derivation, not a lookup.
+type RuntimeSessionHandleResolver interface {
+	SessionHandle(sessionID domain.SessionID) (RuntimeHandle, error)
+}
+
 // RuntimeConfig is the spec for launching a session's process in a Runtime.
 // Argv is the agent's launch command as discrete arguments; each Runtime
 // shell-quotes it for its own shell, so the command survives args with spaces

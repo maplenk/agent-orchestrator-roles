@@ -320,6 +320,26 @@ func (m *Manager) beginShellTerminalTeardown(ctx context.Context, id domain.Sess
 	return closer.BeginSessionTeardown(ctx, id)
 }
 
+// requireShellTerminalTeardown is beginShellTerminalTeardown for callers that
+// cannot proceed without a shell confirmation.
+//
+// The optional form above answers "no closer wired" with success, which is
+// right for ordinary teardown: it degrades to the behaviour that predated the
+// mechanism. It is wrong for the boot reaper, whose entire contract is that an
+// unverified execution surface blocks the daemon — silently skipping the check
+// would discharge an obligation nothing ever confirmed. Wiring is a boot-order
+// fact (SetShellTerminalCloser must precede the drain), so an absent closer
+// here is a wiring bug and is reported as one.
+func (m *Manager) requireShellTerminalTeardown(ctx context.Context, id domain.SessionID) (release func(), err error) {
+	m.shellTerminalsMu.Lock()
+	closer := m.shellTerminals
+	m.shellTerminalsMu.Unlock()
+	if closer == nil {
+		return nil, errors.New("shell terminal closer not wired: cannot confirm scoped shells are closed")
+	}
+	return closer.BeginSessionTeardown(ctx, id)
+}
+
 // PreviewLifecycle is the narrow teardown hook consumed by Session Manager.
 // Keeping it here follows the consumer-owned interface boundary.
 type PreviewLifecycle interface {

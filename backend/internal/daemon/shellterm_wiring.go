@@ -13,14 +13,17 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
 )
 
-// startShellTerminals builds the standalone shell terminal service and sweeps
-// any terminals left behind by a previous app run.
+// newShellTerminals builds the standalone shell terminal service WITHOUT
+// touching any existing state.
 //
-// The sweep runs at boot, before the server serves, for the same reason session
-// reconciliation does: a client that connects first would otherwise see — and
-// try to attach to — shells belonging to an app that is already gone.
-func startShellTerminals(
-	ctx context.Context,
+// Construction is deliberately separated from the previous-run sweep
+// (sweepShellTerminals). The service must exist and be wired into Session
+// Manager before the fail-closed orchestrator reap queue drains — the drain
+// needs a shell closer to confirm a superseded orchestrator's scoped shells are
+// shut — but the sweep is ordinary best-effort reconciliation and must not run
+// until that fatal gate has passed. Fusing the two put a best-effort sweep
+// ahead of a fail-closed check.
+func newShellTerminals(
 	cfg config.Config,
 	runtime shelltermsvc.ShellRuntime,
 	store *sqlite.Store,
@@ -28,7 +31,7 @@ func startShellTerminals(
 	sessions *sessionsvc.Service,
 	log *slog.Logger,
 ) *shelltermsvc.Service {
-	svc := shelltermsvc.NewService(
+	return shelltermsvc.NewService(
 		runtime,
 		store,
 		&projectRootLocator{projects: projects},
@@ -37,12 +40,20 @@ func startShellTerminals(
 		cfg.AppRunID,
 		log,
 	)
-	// Best-effort: a failed sweep must never block boot. The rows survive and
-	// the next boot retries.
+}
+
+// sweepShellTerminals clears terminals left behind by a previous app run.
+//
+// It runs at boot, before the server serves, for the same reason session
+// reconciliation does: a client that connects first would otherwise see — and
+// try to attach to — shells belonging to an app that is already gone.
+//
+// Best-effort: a failed sweep must never block boot. The rows survive and the
+// next boot retries.
+func sweepShellTerminals(ctx context.Context, svc *shelltermsvc.Service, log *slog.Logger) {
 	if _, err := svc.ReapShellTerminalsFromPreviousAppRuns(ctx); err != nil {
 		log.Warn("reaping shell terminals from previous app runs failed", "err", err)
 	}
-	return svc
 }
 
 // projectRootLocator adapts the project service to the narrow lookup the shell

@@ -823,6 +823,18 @@ func tmuxSessionName(id domain.SessionID) (string, error) {
 	return SessionName(raw), nil
 }
 
+// SessionHandle implements ports.RuntimeSessionHandleResolver: it returns the
+// handle Create would register for sessionID. Callers that lost a recorded
+// handle must resolve through this rather than reusing the raw session id,
+// which SessionName may have sanitized away.
+func (r *Runtime) SessionHandle(sessionID domain.SessionID) (ports.RuntimeHandle, error) {
+	name, err := tmuxSessionName(sessionID)
+	if err != nil {
+		return ports.RuntimeHandle{}, err
+	}
+	return ports.RuntimeHandle{ID: name}, nil
+}
+
 // SessionName returns the tmux session name the runtime registers for a given
 // session id, applying the same sanitisation Create does. Callers that print an
 // attach hint must use this rather than the raw id.

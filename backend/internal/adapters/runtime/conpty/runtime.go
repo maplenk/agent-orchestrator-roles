@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/conpty/ptyregistry"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
@@ -52,6 +53,19 @@ func New(opts Options) *Runtime {
 		spawner:  sp,
 		sessions: make(map[string]*hostSession),
 	}
+}
+
+// SessionHandle implements ports.RuntimeSessionHandleResolver: it returns the
+// handle Create would register for sessionID. conpty keys sessions by the raw
+// id, so the derivation is the identity — but it still applies Create's
+// validation, so an id conpty could never have created is reported as an error
+// rather than handed back as a handle that probes nothing.
+func (r *Runtime) SessionHandle(sessionID domain.SessionID) (ports.RuntimeHandle, error) {
+	id := string(sessionID)
+	if !validSessionID.MatchString(id) {
+		return ports.RuntimeHandle{}, fmt.Errorf("conpty: invalid session id %q: must match ^[a-zA-Z0-9_-]+$", id)
+	}
+	return ports.RuntimeHandle{ID: id}, nil
 }
 
 // Create spawns a detached pty-host for the session, waits for READY, stores

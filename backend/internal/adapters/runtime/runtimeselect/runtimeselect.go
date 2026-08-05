@@ -28,6 +28,13 @@ type Runtime interface {
 var _ Runtime = (*tmux.Runtime)(nil)
 var _ Runtime = (*conpty.Runtime)(nil)
 
+// Both shipped adapters must also resolve a session id to the handle Create
+// would register. Consumers type-assert this optional capability and fail
+// closed without it (see the orchestrator reap queue), so losing it on either
+// adapter must be a compile error rather than a boot-time surprise.
+var _ ports.RuntimeSessionHandleResolver = (*tmux.Runtime)(nil)
+var _ ports.RuntimeSessionHandleResolver = (*conpty.Runtime)(nil)
+
 // New returns the per-platform runtime: tmux on Darwin/Linux, conpty on Windows.
 // log is accepted for signature stability with callers but is currently unused.
 func New(_ *slog.Logger) Runtime {

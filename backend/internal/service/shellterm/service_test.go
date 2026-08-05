@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,11 @@ type fakeShellRuntime struct {
 
 	createErr  error
 	destroyErr error
+	// cleanDestroyLies models a Destroy that reports success while the pty
+	// survives — tmux acknowledging a kill whose pane process outlives it, or an
+	// adapter whose bookkeeping has drifted. aliveByHandle is left untouched, so
+	// only an actual liveness probe can tell the difference.
+	cleanDestroyLies bool
 	// aliveByHandle answers IsAlive; a handle absent from the map is dead.
 	aliveByHandle map[string]bool
 	aliveErr      error
@@ -51,7 +57,7 @@ func (f *fakeShellRuntime) Destroy(_ context.Context, handle ports.RuntimeHandle
 	// failed one leaves aliveByHandle as the caller set it up, so tests can
 	// distinguish "destroy errored but it was already dead" (aliveByHandle has
 	// no entry) from "destroy errored and it is still alive" (pre-seeded true).
-	if f.destroyErr == nil {
+	if f.destroyErr == nil && !f.cleanDestroyLies {
 		delete(f.aliveByHandle, handle.ID)
 	}
 	return f.destroyErr
@@ -449,6 +455,67 @@ func TestBeginSessionTeardownReturnsErrorAndKeepsRowWhenRuntimeStaysAlive(t *tes
 
 	if len(st.records) != 1 || st.records[0].HandleID != "shellterm-1" {
 		t.Fatalf("records = %+v, want the still-alive shell's row kept", st.records)
+	}
+}
+
+// TestBeginSessionTeardownKeepsRowWhenCleanDestroyLeavesShellAlive is the
+// regression for probing only after a Destroy ERROR. A Destroy that reports
+// success has established that the teardown command was accepted, not that the
+// pty is gone — so trusting it deleted the row for a shell still holding the
+// worktree open, and reported the teardown as clean. The orchestrator reap
+// queue discharges durable obligations off this result with no second line of
+// defence, so the probe has to be unconditional.
+func TestBeginSessionTeardownKeepsRowWhenCleanDestroyLeavesShellAlive(t *testing.T) {
+	rt := newFakeShellRuntime()
+	rt.cleanDestroyLies = true // Destroy returns nil; the pane survives
+	st := &fakeShellTerminalStore{records: []ShellTerminalRecord{
+		{HandleID: "shellterm-1", SessionID: "portfolio-3"},
+	}}
+	rt.aliveByHandle["shellterm-1"] = true
+	svc := newTestService(rt, st, &fakeProjectRootLocator{})
+
+	release, err := svc.BeginSessionTeardown(context.Background(), "portfolio-3")
+	if err == nil {
+		t.Fatal("BeginSessionTeardown: want an error, the shell survived a clean destroy")
+	}
+	if release != nil {
+		t.Error("release should be nil on a failed Begin — the gate already released itself")
+	}
+	if len(st.records) != 1 || st.records[0].HandleID != "shellterm-1" {
+		t.Fatalf("records = %+v, want the surviving shell's row kept", st.records)
+	}
+	// The failure must carry a usable reason: callers fold it into aggregates
+	// with %w, so a nil error here would surface as "%!w(<nil>)".
+	if !strings.Contains(err.Error(), "shellterm-1") {
+		t.Errorf("err = %v, want the surviving handle named", err)
+	}
+}
+
+// TestBeginSessionTeardownKeepsRowWhenLivenessProbeFailsAfterCleanDestroy:
+// same path, but the probe itself cannot answer. Unknown is not dead — an
+// inconclusive probe must keep the row and fail the teardown, exactly as an
+// explicit "alive" does.
+func TestBeginSessionTeardownKeepsRowWhenLivenessProbeFailsAfterCleanDestroy(t *testing.T) {
+	rt := newFakeShellRuntime()
+	rt.aliveErr = errors.New("tmux server unreachable")
+	st := &fakeShellTerminalStore{records: []ShellTerminalRecord{
+		{HandleID: "shellterm-1", SessionID: "portfolio-3"},
+	}}
+	svc := newTestService(rt, st, &fakeProjectRootLocator{})
+	// rt.destroyErr is nil: the destroy "succeeded" and only the probe is unsure.
+
+	release, err := svc.BeginSessionTeardown(context.Background(), "portfolio-3")
+	if err == nil {
+		t.Fatal("BeginSessionTeardown: want an error, death could not be confirmed")
+	}
+	if release != nil {
+		t.Error("release should be nil on a failed Begin — the gate already released itself")
+	}
+	if len(st.records) != 1 {
+		t.Fatalf("records = %+v, want the unconfirmed shell's row kept", st.records)
+	}
+	if !strings.Contains(err.Error(), "tmux server unreachable") {
+		t.Errorf("err = %v, want the probe failure surfaced", err)
 	}
 }
 

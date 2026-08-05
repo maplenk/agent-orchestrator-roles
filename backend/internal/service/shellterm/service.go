@@ -414,22 +414,37 @@ func (s *Service) ReapShellTerminalsFromPreviousAppRuns(ctx context.Context) (in
 // and BeginSessionTeardown can't each independently forget a shell that
 // actually survived.
 //
-//   - A clean Destroy is confirmed dead.
-//   - A Destroy error is followed by an IsAlive check; an IsAlive error is
-//     treated the same as "alive" (unknown state must never let a live shell's
-//     row vanish) — only an explicit "not alive" counts as confirmed dead.
+// The IsAlive probe is UNCONDITIONAL — it is the authority here, not Destroy's
+// return value. A Destroy that reports success has only established that the
+// teardown command was accepted, which is not the same as the pty being gone:
+// tmux can report a clean kill while a pane's process survives, and a runtime
+// whose bookkeeping has drifted answers success for a handle it no longer
+// tracks. Trusting a nil Destroy would delete the row for a shell still holding
+// a worktree open, which is exactly the confusion this function exists to
+// prevent — and the orchestrator reap queue, which discharges durable
+// obligations off the back of this result, has no second line of defence.
+//
+//   - Confirmed not alive is the only path that deletes the row.
+//   - Alive, or an IsAlive error, keeps it — unknown state must never let a
+//     live shell's row vanish.
 //
 // Returns stillAlive=true when the row was deliberately kept because death
-// could not be confirmed. Callers that need 404-for-unknown-handle semantics
+// could not be confirmed, always with a non-nil reason (callers fold it into
+// user-facing aggregates, so "still alive after a clean destroy" must not
+// surface as a nil error). Callers that need 404-for-unknown-handle semantics
 // (CloseShellTerminal) look the row up themselves beforehand — by the time
 // destroyConfirmed runs, the handle is already known to exist.
-func (s *Service) destroyConfirmed(ctx context.Context, handleID string) (stillAlive bool, destroyErr error) {
-	destroyErr = s.runtime.Destroy(ctx, ports.RuntimeHandle{ID: handleID})
-	if destroyErr != nil {
-		alive, aliveErr := s.runtime.IsAlive(ctx, ports.RuntimeHandle{ID: handleID})
-		if aliveErr != nil || alive {
-			return true, destroyErr
-		}
+func (s *Service) destroyConfirmed(ctx context.Context, handleID string) (stillAlive bool, reason error) {
+	handle := ports.RuntimeHandle{ID: handleID}
+	destroyErr := s.runtime.Destroy(ctx, handle)
+	alive, aliveErr := s.runtime.IsAlive(ctx, handle)
+	switch {
+	case aliveErr != nil:
+		return true, fmt.Errorf("liveness probe after destroy failed: %w", errors.Join(destroyErr, aliveErr))
+	case alive && destroyErr != nil:
+		return true, fmt.Errorf("still alive after destroy: %w", destroyErr)
+	case alive:
+		return true, errors.New("still alive after a destroy that reported success")
 	}
 	if _, err := s.store.DeleteShellTerminalByHandleID(ctx, handleID); err != nil {
 		s.log.Warn("shell terminal: delete row after destroy failed", "handleId", handleID, "error", err)

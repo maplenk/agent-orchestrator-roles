@@ -250,6 +250,52 @@ func TestSessionNameMatchesCreateNaming(t *testing.T) {
 	}
 }
 
+// TestSessionHandleMatchesCreatedSessionName pins the port contract callers
+// rely on to probe a session whose recorded handle was lost: SessionHandle must
+// return the name Create actually registered, not the raw id. IsAlive validates
+// the handle it is given, so a raw id that tmux sanitized away either probes
+// nothing or is rejected outright — both of which read as the wrong answer to
+// "is this still running?".
+func TestSessionHandleMatchesCreatedSessionName(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	// new-session, display-message cwd verification, three set-options, has-session.
+	fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
+	const raw = domain.SessionID("repo/issue#42.1")
+
+	handle, err := r.SessionHandle(raw)
+	if err != nil {
+		t.Fatalf("SessionHandle: %v", err)
+	}
+	if handle.ID == string(raw) {
+		t.Fatalf("SessionHandle returned the raw id %q, which tmux never registers", raw)
+	}
+
+	created, err := r.Create(context.Background(), ports.RuntimeConfig{
+		SessionID:     raw,
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"echo", "hi"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if handle.ID != created.ID {
+		t.Fatalf("SessionHandle = %q, but Create registered %q", handle.ID, created.ID)
+	}
+	// And the name Create passed to tmux is the same one, not the raw id.
+	if !strings.Contains(strings.Join(fr.calls[0].args, " "), "-s "+created.ID) {
+		t.Fatalf("new-session args %v do not name %q", fr.calls[0].args, created.ID)
+	}
+}
+
+// TestSessionHandleRejectsEmptySessionID: an empty id cannot name a runtime, so
+// it must be an error rather than an empty handle a caller might probe.
+func TestSessionHandleRejectsEmptySessionID(t *testing.T) {
+	r, _ := newTestRuntime(0)
+	if _, err := r.SessionHandle(""); err == nil {
+		t.Fatal("SessionHandle(\"\"): want an error, got none")
+	}
+}
+
 // -- env key validation --
 
 func TestCreateRejectsInvalidEnvKeys(t *testing.T) {
