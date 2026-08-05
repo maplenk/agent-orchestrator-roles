@@ -629,6 +629,11 @@ func toAPIError(err error) error {
 		return apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	case errors.Is(err, sessionmanager.ErrNotRestorable):
 		return apierr.Conflict("SESSION_NOT_RESTORABLE", "Session is not restorable", nil)
+	case errors.Is(err, domain.ErrActiveOrchestratorExists):
+		// Migration 0046's index rejected the write. Without this it is an
+		// opaque 500 for a condition the caller can act on.
+		return apierr.Conflict("ACTIVE_ORCHESTRATOR_EXISTS",
+			"This project already has an active orchestrator; retire it before starting another", nil)
 	case errors.Is(err, sessionmanager.ErrTerminated):
 		return apierr.Conflict("SESSION_TERMINATED", "Session is terminated", nil)
 	case errors.Is(err, sessionmanager.ErrAgentExited):

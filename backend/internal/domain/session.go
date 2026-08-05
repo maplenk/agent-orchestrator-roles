@@ -1,6 +1,22 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrActiveOrchestratorExists is returned by the session store when a write
+// would leave a project with two active orchestrators, which migration 0046's
+// partial unique index (idx_sessions_one_active_orchestrator) forbids.
+//
+// The index is a backstop, not the primary mechanism: ownership is normally
+// serialized in-process by the per-project gate. It still fires for writes that
+// bypass the gate (boot RestoreAll) and for databases reconciled by 0046 itself,
+// and without this mapping it surfaces as an opaque 500. Callers that create or
+// reactivate an orchestrator must treat it as a conflict, and — critically —
+// must clean up any runtime they created before the losing write, or the
+// project ends up with an untracked process holding its canonical worktree.
+var ErrActiveOrchestratorExists = errors.New("domain: project already has an active orchestrator")
 
 // These ID types are distinct string types so they can't be swapped at a call
 // site by accident.

@@ -262,6 +262,12 @@ type fakeLCM struct {
 	cancelled []string
 	// terminated counts MarkTerminated calls per session id.
 	terminated map[domain.SessionID]int
+	// markSpawnedErr, when set, fails MarkSpawned WITHOUT applying any of its
+	// writes. That is the real failure shape: MarkSpawned's row update is a
+	// single UpdateSession that either lands whole or not at all, so a failed
+	// adoption leaves the row exactly as it was — still terminated on the
+	// restore path, still ACTIVE with the previous handle on the resume path.
+	markSpawnedErr error
 }
 
 func (l *fakeLCM) PrepareLaunch(id domain.SessionID, launchID string) error {
@@ -273,6 +279,9 @@ func (l *fakeLCM) CancelLaunch(id domain.SessionID, launchID string) {
 }
 func (l *fakeLCM) MarkSpawned(_ context.Context, id domain.SessionID, metadata domain.SessionMetadata) error {
 	l.completed++
+	if l.markSpawnedErr != nil {
+		return l.markSpawnedErr
+	}
 	rec := l.store.sessions[id]
 	rec.IsTerminated = false
 	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: time.Now()}

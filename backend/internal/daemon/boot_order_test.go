@@ -69,17 +69,23 @@ func parseRunFunc(t *testing.T) (*token.FileSet, *ast.FuncDecl) {
 	return nil, nil
 }
 
-// TestBootOrder_ReapQueueDrainsBeforeAnyReconciliationOrServing is the
+// TestBootOrder_ReapQueueDrainsBeforeSessionReconciliationAndServing is the
 // regression for the drain sitting too late on the boot path.
 //
 // DrainOrchestratorReapQueue is the only FATAL step in boot: a queue entry means
 // a superseded orchestrator's process may still be executing inside the
 // canonical workspace its successor now owns, and migration 0046's constraint
-// exists to prevent AO running in that state at all. Anything that reconciles
-// durable state or exposes a surface to a client must therefore sit behind it —
-// the earlier arrangement ran the best-effort shell sweep, started the browser
-// runtime listener, and re-armed the mobile LAN listener first, so an
+// exists to prevent AO running in that state at all. Session and runtime
+// reconciliation, and every client-facing surface, must therefore sit behind
+// it — the earlier arrangement ran the best-effort shell sweep, started the
+// browser runtime listener, and re-armed the mobile LAN listener first, so an
 // unconfirmed obligation did not actually stop AO from acting.
+//
+// Scope, deliberately: this does NOT claim the drain precedes all
+// initialization. Notification reconciliation and the lifecycle/activity/SCM
+// pollers are already running by then, and moving them would be a far larger
+// change for no gain — none of them touch orchestrator ownership or expose a
+// surface. The assertions below are exactly the steps that do.
 //
 // The one thing that must come BEFORE the drain is the shell closer wiring:
 // the drain confirms scoped shells are closed and refuses to discharge an
@@ -89,7 +95,7 @@ func parseRunFunc(t *testing.T) (*token.FileSet, *ast.FuncDecl) {
 // This reads source order rather than booting a daemon because the invariant IS
 // the source order: Run takes no arguments, binds real listeners, and has no
 // seam to observe these steps through.
-func TestBootOrder_ReapQueueDrainsBeforeAnyReconciliationOrServing(t *testing.T) {
+func TestBootOrder_ReapQueueDrainsBeforeSessionReconciliationAndServing(t *testing.T) {
 	fset, run := parseRunFunc(t)
 	first, count := callOrder(run)
 

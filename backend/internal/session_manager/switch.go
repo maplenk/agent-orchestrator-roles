@@ -489,6 +489,10 @@ func (m *Manager) finishSwitchTarget(
 		LaunchHarness: toHarness,
 		ForceLaunchID: targetGen,
 		RoleModel:     toModel,
+		// Post-stop recovery below refuses a terminated session, so the launch
+		// rollback must not terminate it; the ErrSwitchPostStop path here is the
+		// documented owner of this state.
+		KeepSessionOnLaunchFailure: true,
 	})
 	if err != nil {
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, "", "", payload)

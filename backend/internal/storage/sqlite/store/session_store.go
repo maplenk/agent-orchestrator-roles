@@ -29,6 +29,10 @@ func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (do
 	}
 	rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", rec.ProjectID, num))
 	if err := s.qw.InsertSession(ctx, recordToInsert(rec, num)); err != nil {
+		if isActiveOrchestratorConflict(err) {
+			return domain.SessionRecord{}, fmt.Errorf("insert session for project %s: %w",
+				rec.ProjectID, domain.ErrActiveOrchestratorExists)
+		}
 		return domain.SessionRecord{}, fmt.Errorf("insert session %s: %w", rec.ID, err)
 	}
 	return rec, nil
@@ -36,10 +40,34 @@ func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (do
 
 // UpdateSession writes the full mutable state of an existing session. The
 // id/project/num/created_at are immutable and not touched here.
+//
+// Clearing is_terminated on an orchestrator re-enters migration 0046's partial
+// unique index, so a restore/resume that races another active orchestrator
+// fails here. That is surfaced as domain.ErrActiveOrchestratorExists rather
+// than a raw driver error: the caller has usually just created a runtime and
+// must know to reap it (see session_manager.relaunchSession).
 func (s *Store) UpdateSession(ctx context.Context, rec domain.SessionRecord) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return s.qw.UpdateSession(ctx, recordToUpdate(rec))
+	if err := s.qw.UpdateSession(ctx, recordToUpdate(rec)); err != nil {
+		if isActiveOrchestratorConflict(err) {
+			return fmt.Errorf("update session %s: %w", rec.ID, domain.ErrActiveOrchestratorExists)
+		}
+		return err
+	}
+	return nil
+}
+
+// isActiveOrchestratorConflict reports whether err is migration 0046's
+// one-active-orchestrator index rejecting a write.
+//
+// SQLite names the COLUMN, not the index — "UNIQUE constraint failed:
+// sessions.project_id (2067)" — so the index name is not available to match on.
+// idx_sessions_one_active_orchestrator is the only unique index on sessions
+// (0013/0014/0020/0023 all index review_run), which makes the column
+// unambiguous; adding another would require narrowing this.
+func isActiveOrchestratorConflict(err error) bool {
+	return isSQLiteUnique(err) && strings.Contains(err.Error(), "sessions.project_id")
 }
 
 // RenameSession updates only the user-facing display name for an existing
