@@ -225,3 +225,93 @@ func TestMigration0046IsANoOpWithoutDuplicates(t *testing.T) {
 		t.Fatalf("reap queue = %d entries, want 0 on a healthy database", queued)
 	}
 }
+
+// TestMigration0046QueueSurvivesSessionDeletion pins the deletion semantics
+// under foreign keys, which production enables (sqlite.Open sets
+// _pragma=foreign_keys(1)).
+//
+// Queue presence means an OS process is still owed a confirmed death. Cascading
+// on session delete would let that obligation — and the preserved runtime
+// handle needed to carry it out — vanish silently, which is the exact opposite
+// of delete-on-authoritative-reap. The session must be undeletable until the
+// reaper has confirmed death and removed the queue row itself.
+func TestMigration0046QueueSurvivesSessionDeletion(t *testing.T) {
+	db, err := sql.Open("sqlite",
+		"file:"+filepath.Join(t.TempDir(), "ao.db")+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	upTo(t, db, 45)
+	if _, err := db.Exec(`INSERT INTO projects (id, path, registered_at) VALUES ('mer','/repo/mer','2026-01-01')`); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+	const canonical = "/ws/mer/orchestrator/mer-orchestrator"
+	seedSession(t, db, "mer-1", "mer", 1, "orchestrator", false, "2026-01-01", canonical)
+	seedSession(t, db, "mer-2", "mer", 2, "orchestrator", false, "2026-01-02", canonical) // survivor
+
+	upTo(t, db, 46)
+
+	// Guard the premise: foreign keys really are on for this connection.
+	var fk int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil {
+		t.Fatalf("read foreign_keys pragma: %v", err)
+	}
+	if fk != 1 {
+		t.Fatalf("foreign_keys = %d, want 1 — this test is meaningless without it", fk)
+	}
+
+	// Clear this session's CDC rows exactly as production DeleteSession does
+	// (change_log references sessions with NO ACTION, so it would block the
+	// delete on its own and mask what we are actually testing).
+	if _, err := db.Exec(`DELETE FROM change_log WHERE session_id='mer-1'`); err != nil {
+		t.Fatalf("clear change log: %v", err)
+	}
+
+	// 1. With every other blocker removed, the reap obligation alone must still
+	//    refuse the delete.
+	if _, err := db.Exec(`DELETE FROM sessions WHERE id='mer-1'`); err == nil {
+		t.Fatal("deleting a queued loser must fail while its reap obligation stands")
+	}
+
+	// 2. Both the session row and its preserved execution identity survive.
+	var handle string
+	if err := db.QueryRow(`SELECT runtime_handle_id FROM orchestrator_reap_queue WHERE session_id='mer-1'`).Scan(&handle); err != nil {
+		t.Fatalf("queue entry must survive the refused delete: %v", err)
+	}
+	if handle != "tmux-mer-1" {
+		t.Fatalf("preserved handle = %q, want tmux-mer-1", handle)
+	}
+	var sessions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='mer-1'`).Scan(&sessions); err != nil {
+		t.Fatalf("session count: %v", err)
+	}
+	if sessions != 1 {
+		t.Fatalf("session rows = %d, want the loser to survive the refused delete", sessions)
+	}
+
+	// 3. Once the reaper has confirmed death and removed the obligation, the
+	//    session becomes deletable.
+	if _, err := db.Exec(`DELETE FROM orchestrator_reap_queue WHERE session_id='mer-1'`); err != nil {
+		t.Fatalf("authoritative reap must be able to clear its own entry: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM sessions WHERE id='mer-1'`); err != nil {
+		t.Fatalf("session must be deletable once nothing is owed: %v", err)
+	}
+
+	// Note: production DeleteSession only ever removes SEED rows (is_terminated=0
+	// with empty workspace/handle/prompt), so a terminated migration loser is
+	// already out of its reach. RESTRICT is defence in depth against any raw or
+	// future delete path, and it makes the obligation explicit in the schema
+	// rather than implicit in one query's WHERE clause.
+
+	// The survivor was never queued and was never blocked.
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM orchestrator_reap_queue`).Scan(&queued); err != nil {
+		t.Fatalf("queue count: %v", err)
+	}
+	if queued != 0 {
+		t.Fatalf("reap queue = %d, want 0", queued)
+	}
+}

@@ -31,7 +31,17 @@
 -- deliberate — pr.last_nudge_signature records "already did this", which cannot
 -- express an outstanding obligation.
 CREATE TABLE orchestrator_reap_queue (
-    session_id        TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    -- ON DELETE RESTRICT, deliberately NOT the CASCADE used by 0025's outbox.
+    -- That cascade was right because an undelivered worker-idle event's only
+    -- instruction was "go look at this worker", which becomes obsolete when the
+    -- worker row disappears. This obligation is to kill an OS process, and it
+    -- does not become obsolete when the row goes away — cascading would let a
+    -- session delete silently discard an outstanding reap (and the preserved
+    -- handle needed to carry it out), which is the exact opposite of
+    -- delete-on-authoritative-reap. Production enables foreign_keys, so the
+    -- session cannot be deleted until the reaper has confirmed death and
+    -- removed this row itself.
+    session_id        TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE RESTRICT,
     project_id        TEXT NOT NULL,
     -- Exact pre-reconciliation execution identity. Empty handle means the row
     -- had none recorded; the reaper must fall back explicitly rather than
