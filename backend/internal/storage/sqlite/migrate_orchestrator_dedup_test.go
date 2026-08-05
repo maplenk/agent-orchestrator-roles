@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // seedOrchestrator inserts a session row directly, bypassing the store so the
@@ -122,7 +123,48 @@ func TestMigration0046ReconcilesDuplicateOrchestrators(t *testing.T) {
 		}
 	}
 
-	// 5. Untouched rows stay untouched.
+	// 5. The losers' EXACT execution identity is preserved for the fail-closed
+	//    boot reaper. These duplicates own external processes, so clearing the
+	//    handles without capturing them first would leave nothing authoritative
+	//    to probe.
+	for _, id := range []string{"mer-1", "mer-3"} {
+		var project, handle, launch, workspace string
+		var queuedAt time.Time
+		var attempts int
+		if err := db.QueryRow(`SELECT project_id, runtime_handle_id, runtime_launch_id, workspace_path, queued_at, attempt_count
+			FROM orchestrator_reap_queue WHERE session_id=?`, id).
+			Scan(&project, &handle, &launch, &workspace, &queuedAt, &attempts); err != nil {
+			t.Fatalf("loser %s must be queued for reaping: %v", id, err)
+		}
+		if project != "mer" {
+			t.Errorf("%s queued project = %q, want mer", id, project)
+		}
+		if handle != "tmux-"+id || launch != "launch-"+id {
+			t.Errorf("%s queued with handle=%q launch=%q, want the ORIGINAL pre-reconciliation identity", id, handle, launch)
+		}
+		if workspace != canonical {
+			t.Errorf("%s queued workspace = %q, want %q", id, workspace, canonical)
+		}
+		if queuedAt.IsZero() {
+			t.Errorf("%s queued_at must be set and scannable as a time", id)
+		}
+		if attempts != 0 {
+			t.Errorf("%s attempt_count = %d, want 0", id, attempts)
+		}
+	}
+
+	// 6. Only losers are queued: the survivor and untouched rows owe nothing.
+	for _, id := range []string{"mer-2", "mer-w", "mer-old", "other-1"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM orchestrator_reap_queue WHERE session_id=?`, id).Scan(&n); err != nil {
+			t.Fatalf("queue count %s: %v", id, err)
+		}
+		if n != 0 {
+			t.Errorf("%s must not be queued for reaping", id)
+		}
+	}
+
+	// 7. Untouched rows stay untouched.
 	for _, id := range []string{"mer-w", "other-1"} {
 		var terminated bool
 		var path string
@@ -137,7 +179,7 @@ func TestMigration0046ReconcilesDuplicateOrchestrators(t *testing.T) {
 		}
 	}
 
-	// 6. The constraint is live: a second active orchestrator is now rejected.
+	// 8. The constraint is live: a second active orchestrator is now rejected.
 	_, err = db.Exec(`UPDATE sessions SET is_terminated=0 WHERE id='mer-1'`)
 	if err == nil {
 		t.Fatal("re-activating a second orchestrator must violate the unique index")
@@ -171,5 +213,15 @@ func TestMigration0046IsANoOpWithoutDuplicates(t *testing.T) {
 		if terminated || path == "" {
 			t.Errorf("%s was modified by a no-op reconciliation: terminated=%v path=%q", id, terminated, path)
 		}
+	}
+
+	// A healthy database owes no reaping: an entry here would make the boot
+	// reaper probe a runtime that was never superseded.
+	var queued int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM orchestrator_reap_queue`).Scan(&queued); err != nil {
+		t.Fatalf("queue count: %v", err)
+	}
+	if queued != 0 {
+		t.Fatalf("reap queue = %d entries, want 0 on a healthy database", queued)
 	}
 }
