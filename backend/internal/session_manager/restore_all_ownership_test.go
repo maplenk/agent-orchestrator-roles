@@ -126,6 +126,127 @@ func TestRestoreAll_DropsSavedOrchestratorWhenOneIsAlreadyLive(t *testing.T) {
 	}
 }
 
+// TestRestoreAll_AbortsElectionWhenAMarkerCannotBeRead is the fail-closed rule
+// for incomplete evidence.
+//
+// "Marker absent" and "marker lookup failed" are different facts. Collapsing
+// them lets a failed read on the NEWEST candidate silently promote an older
+// one, which then adopts the shared canonical worktree and replays older
+// preserved state. Unlike a duplicate row, that is not something a later boot
+// corrects — the older state has already been written into the worktree the
+// survivor owns. So the whole project's election is abandoned instead.
+func TestRestoreAll_AbortsElectionWhenAMarkerCannotBeRead(t *testing.T) {
+	m, st := restoreAllHarness(t)
+	savedOrchestrator(st, "mer-1", "mer", time.Now().Add(-2*time.Hour))
+	savedOrchestrator(st, "mer-2", "mer", time.Now().Add(-time.Hour))
+	// The NEWEST candidate's marker is unreadable — the dangerous direction.
+	st.worktreeListErr["mer-2"] = errors.New("database is locked")
+
+	if err := m.RestoreAll(context.Background()); err != nil {
+		t.Fatalf("RestoreAll: %v", err)
+	}
+
+	if live := activeIDs(st, domain.KindOrchestrator); len(live) != 0 {
+		t.Fatalf("restored %v from incomplete evidence: the newest candidate's marker was unreadable, "+
+			"so an older orchestrator would have adopted the canonical worktree", live)
+	}
+	// And nothing was neutralized: the next boot must decide from a full read.
+	if rows := st.worktrees["mer-1"]; len(rows) == 0 {
+		t.Error("an abandoned election still neutralized a marker; the next boot has lost a candidate")
+	}
+}
+
+// TestRestoreAll_UnreadableMarkerOnAnOlderCandidateAlsoAborts: the rule is
+// about evidence, not about which row happened to fail. A read failure anywhere
+// in the candidate set means the set is unknown.
+func TestRestoreAll_UnreadableMarkerOnAnOlderCandidateAlsoAborts(t *testing.T) {
+	m, st := restoreAllHarness(t)
+	savedOrchestrator(st, "mer-1", "mer", time.Now().Add(-2*time.Hour))
+	savedOrchestrator(st, "mer-2", "mer", time.Now().Add(-time.Hour))
+	st.worktreeListErr["mer-1"] = errors.New("database is locked")
+
+	if err := m.RestoreAll(context.Background()); err != nil {
+		t.Fatalf("RestoreAll: %v", err)
+	}
+	if live := activeIDs(st, domain.KindOrchestrator); len(live) != 0 {
+		t.Fatalf("restored %v while a candidate's marker was unreadable", live)
+	}
+}
+
+// TestRestoreAll_FailedLoserNeutralizationIsBootFatal is the durability rule.
+//
+// A surviving loser marker is not inert and does not stay a loser: once the
+// winner is killed — or loses its own marker — that stale row becomes the only
+// restorable orchestrator and a later boot resurrects the session this election
+// superseded. So neutralization is a precondition of restoring the winner, and
+// its failure is boot-fatal rather than logged.
+func TestRestoreAll_FailedLoserNeutralizationIsBootFatal(t *testing.T) {
+	m, st := restoreAllHarness(t)
+	savedOrchestrator(st, "mer-1", "mer", time.Now().Add(-2*time.Hour))
+	savedOrchestrator(st, "mer-2", "mer", time.Now().Add(-time.Hour))
+	st.worktreeDeleteErr["mer-1"] = errors.New("disk full") // the loser
+
+	err := m.RestoreAll(context.Background())
+	if !errors.Is(err, ErrRestoreMarkerUnresolved) {
+		t.Fatalf("RestoreAll = %v, want ErrRestoreMarkerUnresolved", err)
+	}
+	// Boot must refuse to serve, not merely log.
+	if !errors.Is(err, ErrBootUnsafe) {
+		t.Fatalf("err = %v, want it marked ErrBootUnsafe so the daemon gate catches it", err)
+	}
+	// The winner must NOT have been restored: doing so alongside a live loser
+	// marker is exactly the resurrection this guards.
+	if live := activeIDs(st, domain.KindOrchestrator); len(live) != 0 {
+		t.Fatalf("restored %v while a loser marker survived", live)
+	}
+}
+
+// TestRestoreAll_FailedNeutralizationUnderALiveOwnerIsAlsoFatal covers the
+// other neutralization site: candidates displaced by an already-live owner.
+func TestRestoreAll_FailedNeutralizationUnderALiveOwnerIsAlsoFatal(t *testing.T) {
+	m, st := restoreAllHarness(t)
+	savedOrchestrator(st, "mer-1", "mer", time.Now().Add(-time.Hour))
+	st.sessions["mer-2"] = domain.SessionRecord{
+		ID: "mer-2", ProjectID: "mer", Kind: domain.KindOrchestrator, Harness: domain.HarnessCodex,
+		IsTerminated: false, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer/orchestrator", RuntimeHandleID: "tmux-mer-2"},
+	}
+	st.worktreeDeleteErr["mer-1"] = errors.New("disk full")
+
+	if err := m.RestoreAll(context.Background()); !errors.Is(err, ErrBootUnsafe) {
+		t.Fatalf("RestoreAll = %v, want ErrBootUnsafe: the displaced candidate's marker survived", err)
+	}
+}
+
+// TestRestoreAll_ElectsFromTheUnderGateRead: the pre-gate snapshot may name a
+// project whose rows have since changed. Election and relaunch must use the
+// records read UNDER the gate, so a row terminated-and-retired (or newly
+// active) in between is honoured rather than acted on from a stale copy.
+func TestRestoreAll_ElectsFromTheUnderGateRead(t *testing.T) {
+	m, st := restoreAllHarness(t)
+	savedOrchestrator(st, "mer-1", "mer", time.Now().Add(-time.Hour))
+
+	// The pre-gate snapshot sees mer-1 as the only candidate. Between that read
+	// and the gate, a newer orchestrator lands and wins.
+	snapshot, err := st.ListAllSessions(context.Background())
+	if err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	savedOrchestrator(st, "mer-9", "mer", time.Now())
+
+	if errs := m.restoreProjectOrchestrators(context.Background(), snapshot); len(errs) != 0 {
+		t.Fatalf("restoreProjectOrchestrators: %v", errs)
+	}
+
+	live := activeIDs(st, domain.KindOrchestrator)
+	if len(live) != 1 || live[0] != "mer-9" {
+		t.Fatalf("live = %v, want mer-9: the election used the stale pre-gate snapshot", live)
+	}
+	if rows := st.worktrees["mer-1"]; len(rows) != 0 {
+		t.Errorf("the loser discovered only under the gate kept its marker")
+	}
+}
+
 // TestRestoreAll_OrchestratorRestoreTakesTheProjectGate proves the restore runs
 // UNDER the ownership gate rather than beside it. Holding the gate must block
 // the restore; releasing it must let the restore complete.
@@ -271,7 +392,7 @@ func TestRestoreAll_ConcurrentProjectsDoNotSerialize(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := m.restoreOneOrchestrator(context.Background(), "other", []domain.SessionRecord{st.sessions["other-1"]}); err != nil {
+		if err := m.restoreOneOrchestrator(context.Background(), "other"); err != nil {
 			t.Errorf("restore other: %v", err)
 		}
 	}()

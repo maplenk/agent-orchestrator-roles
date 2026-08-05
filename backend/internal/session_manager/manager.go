@@ -955,6 +955,21 @@ func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.Sessi
 	return nil
 }
 
+// ErrBootUnsafe marks a reconciliation outcome the daemon must NOT serve on.
+//
+// It exists so the boot gate keys on the property rather than on a growing list
+// of specific failures: anything that wraps this is fatal at startup by
+// construction, and a new condition becomes fail-closed by wrapping it rather
+// than by remembering to edit daemon.go. The bar for wrapping it is narrow —
+// state AO cannot describe or cannot correct, where continuing would let a real
+// process or a durable row diverge from what the database says.
+var ErrBootUnsafe = errors.New("session: unsafe to serve")
+
+// ErrRestoreMarkerUnresolved means a shutdown-saved marker that MUST be removed
+// could not be. It is boot-fatal because the row it leaves behind is not inert:
+// see neutralizeRestoreMarkers.
+var ErrRestoreMarkerUnresolved = fmt.Errorf("%w: restore marker not neutralized", ErrBootUnsafe)
+
 // ErrLaunchCleanupUnresolved means a failed launch could not be rolled back to
 // a state AO can describe. It is deliberately distinct from the launch failure
 // itself: a launch failing is ordinary, and the compensating writes are what
@@ -969,7 +984,7 @@ func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.Sessi
 // terminated-session reap pass runs BEFORE RestoreAll (see Reconcile), so a
 // relaunch that leaves an unconfirmed runtime is not swept until the next
 // restart.
-var ErrLaunchCleanupUnresolved = errors.New("session: launch cleanup unresolved")
+var ErrLaunchCleanupUnresolved = fmt.Errorf("%w: launch cleanup unresolved", ErrBootUnsafe)
 
 // reapFailedLaunchRuntime tears down the runtime of a launch that could not be
 // adopted, and reports whether its death is CONFIRMED.
@@ -2238,22 +2253,28 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 // removed; the preserved ref itself is never deleted, so the stranded work
 // stays recoverable by hand.
 func (m *Manager) restoreProjectOrchestrators(ctx context.Context, recs []domain.SessionRecord) []error {
-	candidates := map[domain.ProjectID][]domain.SessionRecord{}
+	// This pre-gate snapshot decides WHICH PROJECTS to look at, and nothing
+	// else. Every record the election and the relaunch use is re-read under the
+	// project's own gate; a stale row here can only cost a redundant gated
+	// lookup, never a decision.
+	seen := map[domain.ProjectID]struct{}{}
+	projects := make([]domain.ProjectID, 0, 4)
 	for _, rec := range recs {
-		if rec.Kind == domain.KindOrchestrator && rec.IsTerminated {
-			candidates[rec.ProjectID] = append(candidates[rec.ProjectID], rec)
+		if rec.Kind != domain.KindOrchestrator || !rec.IsTerminated {
+			continue
 		}
+		if _, dup := seen[rec.ProjectID]; dup {
+			continue
+		}
+		seen[rec.ProjectID] = struct{}{}
+		projects = append(projects, rec.ProjectID)
 	}
-	projects := make([]domain.ProjectID, 0, len(candidates))
-	for projectID := range candidates {
-		projects = append(projects, projectID)
-	}
-	// Map order is randomized; sort so a multi-project boot is reproducible.
+	// Sort so a multi-project boot is reproducible regardless of list order.
 	sort.Slice(projects, func(i, j int) bool { return projects[i] < projects[j] })
 
 	var unresolved []error
 	for _, projectID := range projects {
-		if err := m.restoreOneOrchestrator(ctx, projectID, candidates[projectID]); err != nil {
+		if err := m.restoreOneOrchestrator(ctx, projectID); err != nil {
 			unresolved = append(unresolved, err)
 		}
 	}
@@ -2264,7 +2285,7 @@ func (m *Manager) restoreProjectOrchestrators(ctx context.Context, recs []domain
 // survivor decision and the restore itself. Splitting them would reintroduce
 // the race the gate exists to close: the "is anyone active?" answer must still
 // be true when the row flips.
-func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.ProjectID, group []domain.SessionRecord) error {
+func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.ProjectID) error {
 	release, err := m.acquireProjectOwnership(ctx, projectID)
 	if err != nil {
 		m.logger.Error("restore-all: orchestrator ownership gate unavailable",
@@ -2273,26 +2294,47 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 	}
 	defer release()
 
-	// Re-read under the gate. The caller's snapshot predates it, and Reconcile's
-	// earlier passes may have adopted or terminated an orchestrator since.
+	// Re-read under the gate, and derive EVERYTHING from this read. The caller's
+	// snapshot only identified which projects to look at; using its records to
+	// elect or to relaunch would decide from rows a competing gated operation
+	// may already have terminated, retired, or reparented.
 	live, err := m.store.ListSessions(ctx, projectID)
 	if err != nil {
 		m.logger.Error("restore-all: list project sessions failed", "projectID", projectID, "error", err)
 		return nil
 	}
 	activeOwner := domain.SessionID("")
+	candidates := make([]domain.SessionRecord, 0, len(live))
 	for _, rec := range live {
-		if rec.Kind == domain.KindOrchestrator && !rec.IsTerminated {
-			activeOwner = rec.ID
-			break
+		if rec.Kind != domain.KindOrchestrator {
+			continue
 		}
+		if rec.IsTerminated {
+			candidates = append(candidates, rec)
+			continue
+		}
+		activeOwner = rec.ID
 	}
 
 	// Only candidates that still carry a restorable marker can win, or the
-	// survivor election could pick a row with nothing to restore from.
-	restorable := make([]domain.SessionRecord, 0, len(group))
-	for _, rec := range group {
-		if rows, ok := m.restorableMarkers(ctx, rec.ID); ok && len(rows) > 0 {
+	// election could pick a row with nothing to restore from.
+	//
+	// A marker LOOKUP FAILURE is not "no marker". Treating them alike lets a
+	// failed read on the newest candidate silently promote an older one, which
+	// then adopts the shared canonical worktree and replays older preserved
+	// state — a wrong winner chosen from incomplete evidence, and unlike a
+	// duplicate it is not something a later boot corrects. Abort the whole
+	// project's election instead: nothing is neutralized, nothing is restored,
+	// and the next boot decides again from a complete read.
+	restorable := make([]domain.SessionRecord, 0, len(candidates))
+	for _, rec := range candidates {
+		rows, err := m.restorableMarkers(ctx, rec.ID)
+		if err != nil {
+			m.logger.Error("restore-all: abandoning orchestrator election on an unreadable marker",
+				"projectID", projectID, "sessionID", rec.ID, "error", err)
+			return nil
+		}
+		if len(rows) > 0 {
 			restorable = append(restorable, rec)
 		}
 	}
@@ -2304,52 +2346,68 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 		// The slot is taken. Every candidate is a loser.
 		m.logger.Warn("restore-all: project already has a live orchestrator; dropping saved restores",
 			"projectID", projectID, "owner", activeOwner, "dropped", len(restorable))
-		for _, rec := range restorable {
-			m.neutralizeRestoreMarker(ctx, rec.ID, "a live orchestrator already owns the project")
-		}
-		return nil
+		return m.neutralizeRestoreMarkers(ctx, restorable, "a live orchestrator already owns the project")
 	}
 
 	// Same rule as newestOrchestratorRecord and migration 0046: newest
 	// CreatedAt, then UpdatedAt, then lexically greatest id. The database and
 	// this loop must never disagree about who owns a project.
 	survivor := newestOrchestratorRecord(restorable)
+	losers := make([]domain.SessionRecord, 0, len(restorable))
 	for _, rec := range restorable {
 		if rec.ID != survivor.ID {
-			m.neutralizeRestoreMarker(ctx, rec.ID, "lost the orchestrator survivor election")
+			losers = append(losers, rec)
 		}
+	}
+	// Neutralize BEFORE restoring, and only restore if it stuck.
+	if err := m.neutralizeRestoreMarkers(ctx, losers, "lost the orchestrator survivor election"); err != nil {
+		return err
 	}
 	return m.restoreSavedSession(ctx, survivor)
 }
 
-// neutralizeRestoreMarker drops a session's shutdown-saved marker so boot stops
-// retrying it. Best-effort: a marker that survives costs another skipped
-// attempt next boot, not a duplicate orchestrator, because the decision above
-// re-runs from scratch every time.
-func (m *Manager) neutralizeRestoreMarker(ctx context.Context, id domain.SessionID, why string) {
-	m.logger.Warn("restore-all: neutralizing orchestrator restore marker", "sessionID", id, "reason", why)
-	if err := m.store.DeleteSessionWorktrees(ctx, id); err != nil {
-		m.logger.Warn("restore-all: neutralize restore marker failed", "sessionID", id, "error", err)
+// neutralizeRestoreMarkers drops losing candidates' shutdown-saved markers, and
+// is a DURABLE PRECONDITION of restoring the winner rather than best-effort.
+//
+// A surviving loser marker is not inert. It stays eligible, and it does not
+// stay a loser: the moment the current owner is killed — or otherwise loses its
+// own marker — that stale row becomes the only restorable orchestrator for the
+// project and a later boot resurrects the very session this election
+// superseded. So a failure here is boot-fatal (ErrBootUnsafe) rather than
+// logged: the daemon's reconcile gate is otherwise non-fatal, and continuing
+// would leave a durable row that AO will later act on as if it were current.
+func (m *Manager) neutralizeRestoreMarkers(ctx context.Context, losers []domain.SessionRecord, why string) error {
+	var failed []error
+	for _, rec := range losers {
+		m.logger.Warn("restore-all: neutralizing orchestrator restore marker",
+			"sessionID", rec.ID, "reason", why)
+		if err := m.store.DeleteSessionWorktrees(ctx, rec.ID); err != nil {
+			m.logger.Error("restore-all: neutralize restore marker failed", "sessionID", rec.ID, "error", err)
+			failed = append(failed, fmt.Errorf("%w: session %s (%s): %w",
+				ErrRestoreMarkerUnresolved, rec.ID, why, err))
+		}
 	}
+	return errors.Join(failed...)
 }
 
-// restorableMarkers reports the session's shutdown-saved marker rows, if any.
-// ok=false means the lookup failed or the session was killed before shutdown
-// and is deliberately left terminated.
-func (m *Manager) restorableMarkers(ctx context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, bool) {
+// restorableMarkers reports the session's shutdown-saved marker rows. An empty
+// slice with a nil error means the session was killed before shutdown and is
+// deliberately left terminated; a non-nil error means the lookup itself failed
+// and the caller has NO evidence either way. The two are kept distinct because
+// callers that elect between sessions must not read a failure as an absence.
+func (m *Manager) restorableMarkers(ctx context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, error) {
 	rows, err := m.store.ListSessionWorktrees(ctx, id)
 	if err != nil {
-		m.logger.Error("restore-all: list worktrees failed", "sessionID", id, "error", err)
-		return nil, false
+		return nil, fmt.Errorf("list worktrees for %s: %w", id, err)
 	}
 	if len(rows) == 0 {
-		return nil, false
+		return nil, nil
 	}
 	rows = restorableWorktreeRows(rows)
 	if len(rows) == 0 {
-		return nil, false
+		return nil, nil
 	}
-	return rows, true
+	return rows, nil
 }
 
 // restoreSavedSession restores one shutdown-saved session: ensure the worktree,
@@ -2359,8 +2417,14 @@ func (m *Manager) restorableMarkers(ctx context.Context, id domain.SessionID) ([
 // can. The ONE exception is ErrLaunchCleanupUnresolved, which is returned so
 // the caller can refuse to serve; see RestoreAll.
 func (m *Manager) restoreSavedSession(ctx context.Context, rec domain.SessionRecord) error {
-	rows, ok := m.restorableMarkers(ctx, rec.ID)
-	if !ok {
+	rows, err := m.restorableMarkers(ctx, rec.ID)
+	if err != nil {
+		// Single-session path: no election is riding on this, so an unreadable
+		// marker only costs this one restore and the next boot retries it.
+		m.logger.Error("restore-all: list worktrees failed", "sessionID", rec.ID, "error", err)
+		return nil
+	}
+	if len(rows) == 0 {
 		return nil
 	}
 

@@ -288,12 +288,17 @@ func Run() error {
 	// sessions.
 	//
 	// Mostly best-effort — a per-session failure is logged and boot continues —
-	// with ONE fatal condition. ErrLaunchCleanupUnresolved means a relaunch left
-	// a runtime executing that nothing is scheduled to sweep: Reconcile's own
-	// terminated-session reap pass has already run by then, and post_stop
-	// recovery keeps its session active, so neither is revisited before the next
-	// restart. Serving in that state is the same hazard the reap queue exists to
-	// prevent, so it gets the same answer.
+	// except for anything marked ErrBootUnsafe, which aborts.
+	//
+	// The gate keys on that shared marker rather than on a list of specific
+	// failures, so a new fail-closed condition becomes fatal by wrapping it
+	// instead of by remembering to edit this file. Today it covers a relaunch
+	// that left a runtime nothing is scheduled to sweep (Reconcile's own reap
+	// pass has already run, and post_stop recovery keeps its session active, so
+	// neither is revisited before the next restart) and a losing orchestrator
+	// restore marker that could not be removed (it stays eligible, and a later
+	// boot would resurrect the session this one superseded). Both are states AO
+	// cannot correct by continuing.
 	//
 	// This sits HERE, before the API server is even constructed, for that fatal
 	// case to mean anything: it previously ran after browserruntime.Listen/Serve
@@ -301,7 +306,7 @@ func Run() error {
 	// surfaces first. Everything client-facing — preview poller, browser runtime,
 	// mobile LAN, supervisor, srv.Run — now follows it.
 	if reconcileErr := sessMgr.Reconcile(ctx); reconcileErr != nil {
-		if errors.Is(reconcileErr, sessionmanager.ErrLaunchCleanupUnresolved) {
+		if errors.Is(reconcileErr, sessionmanager.ErrBootUnsafe) {
 			stop()
 			lcStack.Stop()
 			if cdcErr := cdcPipe.Stop(); cdcErr != nil {

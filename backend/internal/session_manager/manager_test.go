@@ -60,6 +60,11 @@ type fakeStore struct {
 	appendLedgerErr error
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
+	// worktreeListErr / worktreeDeleteErr fail the marker read or delete for
+	// specific sessions only, so an election can be attacked one candidate at a
+	// time rather than by breaking the whole store.
+	worktreeListErr   map[domain.SessionID]error
+	worktreeDeleteErr map[domain.SessionID]error
 	// sharedLog, when non-nil, receives an ordered call entry for each
 	// UpsertSessionWorktree invocation so ordering tests can compare across fakes.
 	sharedLog *[]string
@@ -73,6 +78,9 @@ func newFakeStore() *fakeStore {
 		workspaceRepo: map[string][]domain.WorkspaceRepoRecord{},
 		artifacts:     map[string]fakeTemplateArtifact{},
 		worktrees:     map[domain.SessionID][]domain.SessionWorktreeRecord{},
+
+		worktreeListErr:   map[domain.SessionID]error{},
+		worktreeDeleteErr: map[domain.SessionID]error{},
 	}
 }
 func (f *fakeStore) AppendLifecycleLedger(_ context.Context, rec domain.LifecycleLedgerRecord) error {
@@ -255,11 +263,19 @@ func (f *fakeStore) UpsertSessionWorktree(_ context.Context, row domain.SessionW
 	return nil
 }
 func (f *fakeStore) ListSessionWorktrees(_ context.Context, id domain.SessionID) ([]domain.SessionWorktreeRecord, error) {
+	// Per-session injection: a marker read can fail for ONE candidate while its
+	// rivals read fine, which is the shape that misdecides an election.
+	if err, ok := f.worktreeListErr[id]; ok {
+		return nil, err
+	}
 	return f.worktrees[id], nil
 }
 func (f *fakeStore) DeleteSessionWorktrees(_ context.Context, id domain.SessionID) error {
 	if f.sharedLog != nil {
 		*f.sharedLog = append(*f.sharedLog, "DeleteSessionWorktrees:"+string(id))
+	}
+	if err, ok := f.worktreeDeleteErr[id]; ok {
+		return err
 	}
 	delete(f.worktrees, id)
 	return nil

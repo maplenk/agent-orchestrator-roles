@@ -215,9 +215,14 @@ func TestBootOrder_SessionReconcileGateAlsoPrecedesEverySurface(t *testing.T) {
 }
 
 // TestBootOrder_UnresolvedCleanupAbortsBoot pins that the fatal condition is
-// actually wired, and that it is SELECTIVE: only ErrLaunchCleanupUnresolved
-// aborts. Every other reconcile failure stays logged, or an unrelated store
-// hiccup would stop the daemon starting at all.
+// actually wired, and that it is SELECTIVE: only ErrBootUnsafe aborts. Every
+// other reconcile failure stays logged, or an unrelated store hiccup would stop
+// the daemon starting at all.
+//
+// The guard must name ErrBootUnsafe specifically, not one of the sentinels that
+// wrap it. Keying on a leaf (ErrLaunchCleanupUnresolved, say) silently drops
+// every sibling condition — which is exactly how the restore-marker case would
+// have gone unnoticed.
 func TestBootOrder_UnresolvedCleanupAbortsBoot(t *testing.T) {
 	fset, run := parseRunFunc(t)
 
@@ -248,7 +253,7 @@ func TestBootOrder_UnresolvedCleanupAbortsBoot(t *testing.T) {
 			name := renderCallee(node.Fun)
 			if name == "errors.Is" {
 				for _, arg := range node.Args {
-					if strings.Contains(renderCallee(arg), "ErrLaunchCleanupUnresolved") {
+					if strings.Contains(renderCallee(arg), "ErrBootUnsafe") {
 						guarded = true
 					}
 				}
@@ -262,7 +267,7 @@ func TestBootOrder_UnresolvedCleanupAbortsBoot(t *testing.T) {
 		return true
 	})
 	if !guarded {
-		t.Errorf("the reconcile-failure branch at %s does not test for ErrLaunchCleanupUnresolved: "+
+		t.Errorf("the reconcile-failure branch at %s does not test for ErrBootUnsafe: "+
 			"boot cannot tell an outstanding runtime from an ordinary failure", fset.Position(branch.Pos()))
 	}
 	if returns == 0 {
