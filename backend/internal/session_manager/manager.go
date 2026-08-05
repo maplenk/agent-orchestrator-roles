@@ -2106,8 +2106,8 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 // logged and never aborts the pass. Both loss points feed the same return —
 // post_stop recovery below, whose session stays ACTIVE and is therefore
 // invisible to every later pass, and RestoreAll's terminated-session restores.
-// Making that return FATAL at the daemon is the remaining half, tracked as
-// 2B-0b.
+// The daemon treats that return as FATAL, ahead of every client-facing surface
+// (daemon.go, pinned by boot_order_test.go).
 func (m *Manager) Reconcile(ctx context.Context) error {
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
@@ -2181,8 +2181,8 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // wrong in a way the others are not — Reconcile's terminated-session reap pass
 // runs BEFORE this loop, so a runtime that outlived a failed restore is
 // executing in the session's workspace with nothing scheduled to sweep it until
-// the next boot. Returning it is what lets boot refuse to serve; making that
-// refusal fatal is the remaining half, tracked as 2B-0b.
+// the next boot. Returning it is what lets boot refuse to serve, which the
+// daemon now does before exposing any client-facing surface.
 //
 // Phase 2B gap (tracked as 2B-0b in docs/roles/PHASE2B_PLAN.md): unlike
 // RestoreWithMode, this loop restores workspaces directly and does NOT take the

@@ -27,9 +27,11 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Target-authoritative switch prompt | **Done** @ `a3bc32be` (live footer `Harness: codex`) |
 | Concurrent daemon ownership lease | **Done** — `datadirlock` on `AO_DATA_DIR` before store/reconcile |
 | `switch_supported` production | **true** for Claude/Codex (promoted after 2A close-out accept) |
-| Phase 2B / 3A / 3B | **Not started** |
+| Phase 2B-0a/0b (ownership + uniqueness) | **Landed** — project gate, migration 0046, fail-closed boot chain, constraint mapping, launch-cleanup hardening. **Remainder:** gated `RestoreAll`, survivor selection, marker neutralization, resolver collapse |
+| Phase 2B-1 onward (orchestrator switch/fresh) | **Not started** — worker-only guards still stand; `ObservedOrchestratorV1` designed, not built |
+| Phase 3A / 3B | **Not started** |
 
-**Next eng (critical path):** **Phase 2B** (orchestrator ownership transfer), or Phase 1-F / Claude RO per product priority.
+**Next eng (critical path):** finish **2B-0b** (gated `RestoreAll` + survivor selection + marker neutralization), then **2B-1** (orchestrator in-place fresh conversation) — the first product-visible 2B behaviour. Phase 1-F / Claude RO remains parallel, and blocks 2B-3 (strict cross-harness orchestrator switch).
 
 ---
 
@@ -141,7 +143,8 @@ Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 
 ### Phase 2B — Orchestrator ownership transfer (~6–11 working days)
 
-**Plan:** `PHASE2B_PLAN.md` (design landed; implementation not started).
+**Plan:** `PHASE2B_PLAN.md` (**2B-0a landed; 2B-0b substantially landed**, remainder
+below; 2B-1 onward not started).
 Scope decided: **in-place switch now, successor-session handoff deferred**;
 **fence only, no new durable inbox** (upstream shipped and reverted durable
 orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
@@ -149,7 +152,7 @@ orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
 | Slice | Detail |
 |-------|--------|
 | 2B-0a Project ownership gate | **Landed.** Manager-owned, project-keyed exclusion; `EnsureOrchestrator` is the single gated ownership command. All public orchestrator mutations self-acquire (`Spawn`, `Retire`, `Restore`, `Kill`, `Resume`, `Rollback`, `Cleanup`). Also fixed the canonical-workspace alias: a retired row kept naming the path its successor owned, so `Kill`/`Cleanup` on the predecessor destroyed the live orchestrator's worktree. Service delegates and keeps auth/telemetry/presentation outside the gate. **`RestoreAll` still open — carried into 2B-0b** |
-| 2B-0b Coordinator uniqueness | Migration 0046 partial unique index + reconciliation (deterministic survivor, marker neutralization, probe-authoritative reap); one resolver, not two (`activeOrchestratorSessionID` vs `newestSession` disagree today) |
+| 2B-0b Coordinator uniqueness | **Substantially landed.** Migration 0046 partial unique index + reconciliation, capturing each loser's execution identity into `orchestrator_reap_queue` before clearing it; fail-closed boot reaper draining that queue ahead of every surface; unique-constraint errors mapped to `ErrActiveOrchestratorExists` (409) instead of an opaque 500; `MarkSpawned` launch-cleanup window hardened so a failed launch leaves neither an untracked runtime nor a phantom-live row, with `ErrLaunchCleanupUnresolved` propagated through restore *and* post_stop recovery to a fatal boot gate. **Remaining:** gated `RestoreAll`, deterministic survivor selection, restore-marker neutralization, and collapsing the two resolvers into one (`activeOrchestratorSessionID` vs `newestOrchestratorRecord`) |
 | 2B-1 In-place orchestrator fresh conversation | Parameterize `KindWorker` guards; boot recovery; `ObservedOrchestratorV1` handoff |
 | 2B-2 Replacement durable recoverability | Persist replacement intent before retirement; a zero-owner interval is auto-recovered, never terminal |
 | 2B-3 Cross-harness orchestrator switch | Non-strict only — **strict is blocked on 1-B (Claude RO)**, since a strict orchestrator must be `workspaceWrites:false` and only Codex enforces RO |
@@ -217,7 +220,8 @@ cross-harness orchestrator switch on strict projects (2B-3).
 ### Sequencing sketch
 
 ```text
-Now ──► Phase 2B orch transfer
+2B-0a/0b ownership + uniqueness ──► LANDED (remainder: gated RestoreAll)
+Now ──► 2B-1 orch in-place fresh ──► 2B-2 recoverability ──► 2B-3 cross-harness
      ──► 3A pause ──► 3B continue/failover  (then promote limit_detection)
      ──► Integration
      ║
@@ -291,5 +295,5 @@ Still open:
 ## 7. Immediate next action
 
 1. ~~Accept 2A close-out + promote `SwitchSupported` for Claude/Codex~~ — **done**.
-2. Start **Phase 2B** (orch ownership transfer), or prioritize **Phase 1-F / Claude RO**.
+2. ~~Start **Phase 2B** (orch ownership transfer)~~ — **2B-0a/0b landed**. Next: finish 2B-0b (gated `RestoreAll`, deterministic survivor selection, restore-marker neutralization, resolver collapse), then 2B-1 (orchestrator in-place fresh conversation). **Phase 1-F / Claude RO** stays parallel and gates 2B-3.
 3. Keep `limit_detection_supported` false until Phase 3 structured-limit evidence.

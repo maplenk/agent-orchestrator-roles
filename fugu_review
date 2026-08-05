@@ -1,0 +1,191 @@
+# Fugu review — orchestrator role changes since 31ca4e27499dd75c543ae96d5b7bad9d1d7395d9
+
+## Scope
+
+- Repository: `/Users/tagtaste/Documents/QBApps/agent-orchestrator-roles`
+- Branch: `roles/multi-sub-v1`
+- HEAD reviewed: `f091af2e81955ffc4cd031de814e11ce161f5b47`
+- Base: `31ca4e27499dd75c543ae96d5b7bad9d1d7395d9`
+- Working tree when reviewed: clean
+- Change volume: 43 commits, 125 files, about 14,972 insertions / 524 deletions
+
+## High-level verdict
+
+The changes since `31ca4e27` substantially implement the master plan through Phase 2A and the first coordinator-safety portions of Phase 2B. The code now has role-map enforcement, session-scoped spawn credentials, read-only capability gating, durable handoff/ledger/switch state, worker switch/fresh conversation, service/API/CLI/frontend surfaces for switch/fresh, an exclusive data-dir daemon lease, and a manager/database-backed orchestrator ownership safety layer.
+
+The work is not complete for the full Target B plan. Phase 3A/3B limits, durable pause, manual continue, runtime failover bounds, and full orchestrator switch/fresh protocol remain open. Claude read-only enforcement also remains deliberately open, which blocks strict-project cross-harness orchestrator switch.
+
+## Plan drift / master-plan amendments observed
+
+The master plan itself changed in ways that match discovered capability constraints:
+
+- Strict orchestrator changed from `claude-code` to `codex`, because only Codex currently advertises `read_only_enforced=true`.
+- Implementor changed to `claude-code`, with Codex as the switch/failover rung.
+- Pi/grok failover ladders were removed from the pasteable example because only Claude Code and Codex currently advertise `switch_supported=true`.
+- Failover validation now requires `switch_supported` on both:
+  - the primary binding of any role that has a ladder, because it is the switch source; and
+  - every ladder rung, because it is a switch target.
+- `limits` remains described as Phase 3 design intent but is explicitly not accepted by `domain.RoleMap` yet.
+
+This drift is appropriate and documented, but it means old example maps with `_comment`, `limits`, Pi/Grok ladder rungs, or strict Claude read-only orchestrators are no longer valid.
+
+## Phase/status review
+
+### Phase 0 / foundation
+
+Implemented or strengthened:
+
+- Fork/baseline and migration ownership docs exist.
+- Capability registry is now executable code, not just documentation: `backend/internal/roles/capabilities/capabilities.go`.
+- `switch_supported=true` is promoted only for `claude-code`, `codex`, and fake test harness.
+- `read_only_enforced=true` is promoted only for Codex and fake test harness.
+- `limit_detection_supported` is still false for all production harnesses.
+
+Assessment: good. The registry is fail-closed for unknown harnesses and is used by config-save/launch/restore paths.
+
+### Phase 1 / role map, spawn --role, canSpawn, template authority
+
+Implemented:
+
+- `RoleMap`, `RoleBinding`, `RoleExecutionPolicy`, `FailoverConfig` exist in `backend/internal/domain/rolemap.go`.
+- Strict delegation validates orchestrator `canSpawn=true` and `workspaceWrites=false`.
+- Role resolver applies host-authoritative harness/model/template/policy in `backend/internal/session_manager/role_resolve.go`.
+- Role spawn fails closed for empty/missing role prompts and unsupported read-only harnesses.
+- Template authority is host-approved profile roots only; project worktree `.ao/roles` is not used as system authority.
+- Session-scoped spawn credentials are random tokens with only hashes stored, in `backend/internal/service/spawncred/authority.go`.
+- Spawn auth rejects invalid/terminated/canSpawn=false sessions and requires operator token for operator path.
+- CLI/API role-map round-trip and strict example validation tests exist.
+
+Assessment: mostly complete for foundation. Remaining intentional gap is full strict operational dogfood / Claude RO.
+
+### Phase 2A / worker switch + fresh conversation
+
+Implemented:
+
+- `SemanticHandoffV1` and `ObservedWorkspaceV1` exist.
+- Handoff compiler exists and observed data overrides semantic claims.
+- Lifecycle ledger migration/store exists.
+- `switch_pending_json` migration exists.
+- Manager `SwitchWorker`, `FreshConversation`, and recovery exist in `backend/internal/session_manager/switch.go`.
+- Saga follows the expected shape:
+  - request ledger;
+  - observe source while live;
+  - persist pending fence before destroy;
+  - probe-driven source stop;
+  - confirmed-alive rollback for pre-stop usability;
+  - post-stop retained handoff/recovery;
+  - target ack before promoting current session identity.
+- Input gates were added across sessionguard, terminal, and host-owned delivery paths.
+- Service/API/CLI/frontend schemas and calls for switch/fresh are wired.
+- Switch auth is role-pinned, project-scoped, canSpawn-gated, and model-exact.
+- Production `switch_supported` was promoted for Claude/Codex only after dogfood close-out.
+
+Assessment: strong. This appears aligned with MASTER_PLAN DoD items 4, 5, 6, 10, 11 for worker switch/fresh.
+
+### Phase 2B / orchestrator ownership transfer
+
+Implemented so far:
+
+- Phase 2B design doc landed.
+- Canonical orchestrator branch/retire notice corrected.
+- Manager-owned project-keyed orchestrator ownership gate exists in `backend/internal/session_manager/orchestrator_ownership.go`.
+- `EnsureOrchestrator` centralizes active-owner lookup, optional retirement, and successor spawn under the project gate.
+- Public orchestrator mutation paths were routed to self-acquire the gate, according to docs/tests.
+- Canonical workspace alias bug was addressed: retired orchestrator rows no longer keep path claims that can later destroy the successor workspace.
+- Migration `0046_one_active_orchestrator.sql` reconciles duplicate active orchestrators and adds a partial unique index on active orchestrator per project.
+- Migration preserves loser execution identity in `orchestrator_reap_queue` before clearing handles/claims.
+- Fail-closed boot reaper drains the queue before ordinary reconcile/listeners/API surfaces in `backend/internal/session_manager/orchestrator_reap.go` and `backend/internal/daemon/daemon.go`.
+- Boot now fails closed on unresolved reaper obligations and on `ErrLaunchCleanupUnresolved` from reconcile before client-facing surfaces are exposed.
+- Constraint errors are mapped to active-orchestrator conflict rather than opaque 500s.
+- MarkSpawned/launch cleanup windows were hardened, including unresolved cleanup propagation through restore and post_stop recovery paths.
+
+Assessment: Phase 2B-0a and much/all of 2B-0b are implemented beyond what `REMAINING_PLAN.md` currently says. However, the actual orchestrator in-place fresh conversation/switch protocol is not yet implemented: the worker-only guards still exist in switch service/manager paths, and `ObservedOrchestratorV1` is not present yet.
+
+## Verification run
+
+Commands run:
+
+- `go build ./...` from `backend`: passed.
+- Focused backend packages for roles/session/service/httpd/cli/storage/daemon/etc.: passed.
+- `go vet` on relevant backend packages: passed.
+- `frontend npm run typecheck`: passed.
+- `backend/internal/httpd/...` OpenAPI/spec tests: passed.
+- `npm run lint`: failed during `go test ./...` before golangci-lint due to unrelated/environment-sensitive adapter tests:
+  - `backend/internal/adapters/agent/fake`: wall-clock speedup assertion exceeded threshold.
+  - `backend/internal/adapters/agent/kilocode`: auth status test hit context deadline.
+  - `backend/internal/adapters/agent/opencode`: auth status test hit context deadline.
+
+Notes:
+
+- Earlier full `go test ./...` also showed a tmux integration pane lookup failure, but a subsequent full lint run had tmux pass.
+- No code changes in this range touched fake/opencode/kilocode adapter packages, so those failures appear pre-existing/environmental rather than caused by this roles/orchestrator work.
+
+## Definition-of-done mapping
+
+### Satisfied or substantially satisfied
+
+1. Strict project cannot create roleless worker / cannot override resolved harness/model on ordinary role path.
+2. `canSpawn:false` sessions cannot spawn via daemon-authenticated path.
+3. Restore uses pinned template artifact for role-pinned sessions.
+4. Pre-stop worker switch failure leaves source usable.
+5. Post-stop worker switch failure retains handoff and permits retry.
+6. One generation owns worker input at switch boundary.
+9. Unsupported capabilities reject config/launch/restore rather than silently degrading, including failover source + rung switch validation.
+10. Lifecycle ledger records switch/fresh conversation. Pause/failover ledger is not implemented yet because Phase 3 is open.
+11. ObservedWorkspace verified facts are AO-derived; agent claims stay semantic/untrusted.
+12. Failover default is manual in schema.
+13. Read-only roles require `read_only_enforced`; Codex passes, Claude/Pi fail closed.
+
+### Not yet satisfied for full Target B
+
+7. Limit detection to durable pause with zero auto-send/restart is not implemented.
+8. Runtime failover preserving `role_id` and enforcing incident bound is not implemented.
+10. Lifecycle ledger for pause/resume/failover is not implemented.
+13. Claude read-only enforcement remains open by design; strict cross-harness orchestrator switch is blocked until that changes.
+- Orchestrator switch/fresh protocol itself is not yet implemented, despite ownership/uniqueness groundwork.
+- `ObservedOrchestratorV1` is designed but not implemented.
+- Durable replacement recoverability for zero-orchestrator interval remains listed as open.
+
+## Findings / risks
+
+### 1. Status docs are stale relative to landed 2B work
+
+`docs/roles/REMAINING_PLAN.md` still says Phase 2B/3A/3B are “Not started” near the top, and says Phase 2B design landed but implementation not started. That is no longer true: 2B-0a and 2B-0b ownership/uniqueness/reaper work has landed. Update the status table and checklist to avoid misleading the next agent.
+
+### 2. `PHASE2B_PLAN.md` status header is stale
+
+The header says “design, not started,” but the document later marks 2B-0a landed and contains detailed 2B-0b landed/fixed language. Update the header and slice table to reflect actual status.
+
+### 3. A comment in `Manager.Reconcile` is stale
+
+`backend/internal/session_manager/manager.go` around the Reconcile comment still says making `ErrLaunchCleanupUnresolved` fatal at the daemon is “remaining half, tracked as 2B-0b.” The daemon gate now exists and is wired before client-facing surfaces. This is a documentation/comment cleanup, not a functional issue.
+
+### 4. Full repo lint is not currently green in this environment
+
+`npm run lint` fails because `go test ./...` hits environment/timing-sensitive adapter tests. The roles-related focused suite is green, but CI/release confidence still needs either a stable environment or fixes/skips for those flaky tests.
+
+### 5. Orchestrator switch is still not delivered
+
+The ownership gate and uniqueness/reap work are necessary and valuable, but the product-visible Phase 2B behavior is still not there. Current switch service still rejects non-worker sessions. Next work should implement orchestrator in-place fresh conversation first, with `ObservedOrchestratorV1`, recovery, ledger kind, and tests.
+
+### 6. Strict cross-harness orchestrator switching is intentionally blocked
+
+Under strict delegation, orchestrator must be read-only and only Codex has `read_only_enforced=true`. Therefore strict Codex→Claude orchestrator switch is invalid until Claude RO is implemented or policy changes.
+
+### 7. Phase 3 remains entirely open
+
+Limit detection, durable pause/resume, manual continue, failover cursor/bounds, and automatic opt-in failover are not present. The current schema has failover ladders and mode, but not runtime incident progression.
+
+## Recommended next steps
+
+1. Update `REMAINING_PLAN.md` and `PHASE2B_PLAN.md` to mark 2B-0a/0b actual status and remove stale “not started” language.
+2. Clean the stale `Reconcile` comment.
+3. Decide whether to stabilize the three failing full-suite adapter tests before further large work, since `npm run lint` currently cannot complete in this environment.
+4. Implement 2B-1: orchestrator in-place fresh conversation.
+   - Parameterize worker-only guards.
+   - Add `ObservedOrchestratorV1` and compiler path.
+   - Add ledger kind/recovery tests.
+   - Ensure spawn credential rotates on relaunch.
+5. Implement 2B-2 durable replacement recoverability.
+6. Defer strict cross-harness orchestrator switch until Claude RO is real, or explicitly keep it non-strict only.
+7. Start Phase 3A only after 2B close-out: structured limit detection → durable pause → zero automatic send/restart.

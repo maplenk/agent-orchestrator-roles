@@ -1,6 +1,12 @@
 # Phase 2B — Orchestrator ownership transfer
 
-**Status:** design, not started. Written after Phase 2A close-out (`5e8476d5`).
+**Status:** **2B-0a and 2B-0b landed** (ownership gate, migration 0046 uniqueness +
+reap queue, fail-closed boot chain, constraint mapping, launch-cleanup hardening) —
+see the slice table in §7. **2B-0b remainder:** gated `RestoreAll`, deterministic
+survivor selection, restore-marker neutralization. **2B-1 onward not started**, so
+the product-visible orchestrator switch/fresh protocol does not exist yet: the
+worker-only guards still stand and `ObservedOrchestratorV1` is designed, not built.
+Written after Phase 2A close-out (`5e8476d5`).
 **Canonical design:** `MASTER_PLAN.md` §5.4. **Execution status:** `REMAINING_PLAN.md`.
 **Prereq reading:** `AGENT_HANDOFF.md` §5 (2A hard lessons — all still binding).
 
