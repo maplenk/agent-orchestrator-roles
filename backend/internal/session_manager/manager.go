@@ -672,21 +672,21 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		metadata.DiffBaseSHA, metadata.DiffBaseRef = resolveSpawnDiffBase(ctx, ws.Path, project.Config.WithDefaults().DefaultBranch)
 	}
 	if err := m.lcm.MarkSpawned(ctx, id, metadata); err != nil {
-		runtimeDestroyed := m.reapFailedLaunchRuntime(ctx, "spawn", id, handle, launchID)
+		runtimeDestroyed, cleanupErr := m.reapFailedLaunchRuntime(ctx, "spawn", id, handle, launchID)
 		m.rollbackPreparedSpawnWorkspace(ctx, rec, ws, workspaceProject, runtimeDestroyed)
-		m.markSpawnFailedTerminated(ctx, id)
-		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: completed: %w", id, err)
+		cleanupErr = errors.Join(cleanupErr, m.markSpawnFailedTerminated(ctx, id))
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: completed: %w", id, errors.Join(err, cleanupErr))
 	}
 	if delivery == ports.PromptDeliveryAfterStart && prompt != "" {
 		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, id, prompt); err != nil {
-			runtimeDestroyed := m.reapFailedLaunchRuntime(ctx, "spawn", id, handle, launchID)
+			runtimeDestroyed, cleanupErr := m.reapFailedLaunchRuntime(ctx, "spawn", id, handle, launchID)
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspace(ctx, rec, ws, workspaceProject, runtimeDestroyed)
 			if runtimeDestroyed && workspaceDestroyed {
-				m.markSpawnFailedTerminatedWithoutWorkspace(ctx, id)
+				cleanupErr = errors.Join(cleanupErr, m.markSpawnFailedTerminatedWithoutWorkspace(ctx, id))
 			} else {
-				m.markSpawnFailedTerminated(ctx, id)
+				cleanupErr = errors.Join(cleanupErr, m.markSpawnFailedTerminated(ctx, id))
 			}
-			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: deliver prompt: %w", id, err)
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: deliver prompt: %w", id, errors.Join(err, cleanupErr))
 		}
 	}
 	rec, err = m.getRecord(ctx, id)
@@ -941,10 +941,35 @@ func sessionPrefix(project domain.ProjectRecord) string {
 // A phantom half-spawned row is worse than a terminal one; we only delete the
 // row when nothing observable has landed yet (seed state) via rollbackSpawn or
 // rollbackSpawnSeedRow.
-func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.SessionID) {
-	_ = m.lcm.MarkTerminated(ctx, id)
+// markSpawnFailedTerminated parks a failed spawn terminated. Post-runtime
+// callers must surface its error: an active row that could not be terminated
+// holds the project's orchestrator slot (migration 0046) with nothing behind
+// it. Pre-runtime seed rollbacks fail the whole spawn anyway and ignore it.
+func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.SessionID) error {
 	m.cleanupSystemPromptDir(id)
+	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
+		m.logger.Error("failed spawn: could not mark session terminated", "sessionID", id, "error", err)
+		return fmt.Errorf("%w: session %s could not be terminated after a failed spawn: %w",
+			ErrLaunchCleanupUnresolved, id, err)
+	}
+	return nil
 }
+
+// ErrLaunchCleanupUnresolved means a failed launch could not be rolled back to
+// a state AO can describe. It is deliberately distinct from the launch failure
+// itself: a launch failing is ordinary, and the compensating writes are what
+// keep it ordinary. When THOSE fail, one of two invariants is broken —
+//
+//   - a runtime survived teardown and no row names it, so nothing (reconcile,
+//     Kill, the boot reaper) can ever find it again; or
+//   - a session that must not stay active could not be terminated, so it holds
+//     the project's orchestrator slot with nothing behind it.
+//
+// Callers must surface it. Boot in particular must not serve on it: the
+// terminated-session reap pass runs BEFORE RestoreAll (see Reconcile), so a
+// relaunch that leaves an unconfirmed runtime is not swept until the next
+// restart.
+var ErrLaunchCleanupUnresolved = errors.New("session: launch cleanup unresolved")
 
 // reapFailedLaunchRuntime tears down the runtime of a launch that could not be
 // adopted, and reports whether its death is CONFIRMED.
@@ -963,34 +988,47 @@ func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.Sessi
 // write that deliberately leaves is_terminated alone, which matters because the
 // motivating failure is migration 0046's index rejecting the activation, and
 // that write would fail again.
-func (m *Manager) reapFailedLaunchRuntime(ctx context.Context, operation string, id domain.SessionID, handle ports.RuntimeHandle, launchID string) (confirmedDead bool) {
+// A runtime whose death is NOT confirmed leaves the caller with an obligation
+// either way, so the error return distinguishes the two outcomes that matter:
+// nil means the survivor was recorded and is reachable; ErrLaunchCleanupUnresolved
+// means it was not, and nothing can find it. The compensating write can fail for
+// the very condition that rejected MarkSpawned, so treating it as best-effort
+// would let the caller report a leak as handled.
+func (m *Manager) reapFailedLaunchRuntime(ctx context.Context, operation string, id domain.SessionID, handle ports.RuntimeHandle, launchID string) (confirmedDead bool, err error) {
 	dead, probeErr := m.destroyRuntimeProbed(ctx, handle.ID)
 	if dead {
-		return true
+		return true, nil
 	}
-	m.logger.Error("runtime survived a launch that could not be adopted; recording its identity so it stays reapable",
+	if adoptErr := m.adoptOrphanedLaunchRuntime(ctx, id, handle, launchID); adoptErr != nil {
+		m.logger.Error("runtime survived a launch that could not be adopted, AND could not be recorded: it is now untracked",
+			"operation", operation, "sessionID", id, "handleID", handle.ID, "error", adoptErr)
+		return false, fmt.Errorf("%w: runtime %q survived %s of %s and could not be recorded: %w",
+			ErrLaunchCleanupUnresolved, handle.ID, operation, id, adoptErr)
+	}
+	m.logger.Error("runtime survived a launch that could not be adopted; recorded its identity so it stays reapable",
 		"operation", operation, "sessionID", id, "handleID", handle.ID, "error", probeErr)
-	m.adoptOrphanedLaunchRuntime(ctx, id, handle, launchID)
-	return false
+	return false, nil
 }
 
 // adoptOrphanedLaunchRuntime records the execution identity of a runtime that
 // outlived a failed adoption, WITHOUT touching is_terminated. It is the
-// difference between a process AO can still find and one it cannot.
-func (m *Manager) adoptOrphanedLaunchRuntime(ctx context.Context, id domain.SessionID, handle ports.RuntimeHandle, launchID string) {
+// difference between a process AO can still find and one it cannot, so its
+// failure is returned rather than logged.
+func (m *Manager) adoptOrphanedLaunchRuntime(ctx context.Context, id domain.SessionID, handle ports.RuntimeHandle, launchID string) error {
 	rec, ok, err := m.store.GetSession(ctx, id)
-	if err != nil || !ok {
-		m.logger.Error("cannot record surviving runtime: session unreadable; the runtime is now untracked",
-			"sessionID", id, "handleID", handle.ID, "error", err)
-		return
+	if err != nil {
+		return fmt.Errorf("read session %s: %w", id, err)
+	}
+	if !ok {
+		return fmt.Errorf("session %s no longer exists", id)
 	}
 	rec.Metadata.RuntimeHandleID = handle.ID
 	rec.Metadata.RuntimeLaunchID = launchID
 	rec.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, rec); err != nil {
-		m.logger.Error("cannot record surviving runtime; it is now untracked",
-			"sessionID", id, "handleID", handle.ID, "error", err)
+		return fmt.Errorf("record runtime identity for %s: %w", id, err)
 	}
+	return nil
 }
 
 // clearStaleRuntimeIdentity strips RuntimeHandleID/RuntimeLaunchID from a row
@@ -1021,17 +1059,26 @@ func (m *Manager) clearStaleRuntimeIdentity(ctx context.Context, id domain.Sessi
 // runtime row had become observable, but clears launch handles for resources
 // that were destroyed during rollback. This keeps later restore/cleanup paths
 // from treating a removed worktree as reusable state.
-func (m *Manager) markSpawnFailedTerminatedWithoutWorkspace(ctx context.Context, id domain.SessionID) {
-	m.markSpawnFailedTerminated(ctx, id)
+func (m *Manager) markSpawnFailedTerminatedWithoutWorkspace(ctx context.Context, id domain.SessionID) error {
+	if err := m.markSpawnFailedTerminated(ctx, id); err != nil {
+		// Do NOT strip the handles below: on a row that is still active that
+		// would hide it from runtime reconciliation while it holds the slot.
+		return err
+	}
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil || !ok {
-		return
+		return nil
 	}
 	rec.Metadata.Branch = ""
 	rec.Metadata.WorkspacePath = ""
 	rec.Metadata.RuntimeHandleID = ""
 	rec.Metadata.AgentSessionID = ""
-	_ = m.store.UpdateSession(ctx, rec)
+	// Best-effort: the row is already terminated, so a stale path here costs a
+	// redundant lookup rather than breaking an invariant.
+	if err := m.store.UpdateSession(ctx, rec); err != nil {
+		m.logger.Warn("failed spawn: could not clear handles for destroyed resources", "sessionID", id, "error", err)
+	}
+	return nil
 }
 
 // rollbackSpawnSeedRow best-effort removes the row of a spawn that failed
@@ -1742,8 +1789,11 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		Prompt:            rec.Metadata.Prompt,
 	}
 	if err := m.lcm.MarkSpawned(ctx, rec.ID, metadata); err != nil {
-		m.parkFailedRelaunch(ctx, operation, rec.ID, handle, launchID, o.KeepSessionOnLaunchFailure)
-		return RestoreResult{}, fmt.Errorf("%s %s: completed: %w", operation, rec.ID, err)
+		cleanupErr := m.parkFailedRelaunch(ctx, operation, rec.ID, handle, launchID, o.KeepSessionOnLaunchFailure)
+		// Joined, not replaced: the caller needs the launch failure (which may be
+		// ErrActiveOrchestratorExists) AND the fact that rollback left something
+		// AO cannot describe.
+		return RestoreResult{}, fmt.Errorf("%s %s: completed: %w", operation, rec.ID, errors.Join(err, cleanupErr))
 	}
 	if delivery == ports.PromptDeliveryAfterStart && rec.Metadata.Prompt != "" {
 		launchCfg := ports.LaunchConfig{
@@ -1761,8 +1811,8 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 			// Always terminates, switch included: the launch WAS adopted here, so
 			// the row already names the runtime and there is no post-stop state to
 			// preserve. Matches what this branch has always done.
-			m.parkFailedRelaunch(ctx, operation, rec.ID, handle, launchID, false)
-			return RestoreResult{}, fmt.Errorf("%s %s: deliver prompt: %w", operation, rec.ID, err)
+			cleanupErr := m.parkFailedRelaunch(ctx, operation, rec.ID, handle, launchID, false)
+			return RestoreResult{}, fmt.Errorf("%s %s: deliver prompt: %w", operation, rec.ID, errors.Join(err, cleanupErr))
 		}
 	}
 	updated, err := m.getRecord(ctx, rec.ID)
@@ -1797,19 +1847,32 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 // keepSession is the one exception, and it belongs to the switch saga alone:
 // see relaunchOpts.KeepSessionOnLaunchFailure. Reaping the runtime is not
 // optional even then — only the row's terminal state is.
-func (m *Manager) parkFailedRelaunch(ctx context.Context, operation string, id domain.SessionID, handle ports.RuntimeHandle, launchID string, keepSession bool) {
-	confirmedDead := m.reapFailedLaunchRuntime(ctx, operation, id, handle, launchID)
+//
+// Returns ErrLaunchCleanupUnresolved when a compensating write failed, which
+// the caller must join into the error it surfaces. The ORDER below is the
+// contract: identity is cleared only after termination has actually persisted.
+// Clearing it on a row that is still active would leave an orchestrator holding
+// the project's only slot with an empty handle — occupying it while runtime
+// reconciliation, which works from recorded handles, skips it entirely.
+func (m *Manager) parkFailedRelaunch(ctx context.Context, operation string, id domain.SessionID, handle ports.RuntimeHandle, launchID string, keepSession bool) error {
+	confirmedDead, cleanupErr := m.reapFailedLaunchRuntime(ctx, operation, id, handle, launchID)
 	m.cleanupSystemPromptDir(id)
 	if keepSession {
-		return
+		return cleanupErr
 	}
 	if err := m.lcm.MarkTerminated(ctx, id); err != nil {
-		m.logger.Warn("failed relaunch: could not mark session terminated",
+		m.logger.Error("failed relaunch: could not mark session terminated; leaving runtime identity in place",
 			"operation", operation, "sessionID", id, "error", err)
+		return errors.Join(cleanupErr, fmt.Errorf("%w: session %s could not be terminated after a failed %s: %w",
+			ErrLaunchCleanupUnresolved, id, operation, err))
 	}
 	if confirmedDead {
+		// Best-effort by contrast with the two writes above, and safely so: a
+		// terminated row naming a dead handle just costs one redundant probe,
+		// whereas both failures above break an invariant.
 		m.clearStaleRuntimeIdentity(ctx, id)
 	}
+	return cleanupErr
 }
 
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {

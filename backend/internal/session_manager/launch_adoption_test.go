@@ -3,6 +3,7 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -182,6 +183,91 @@ func TestSwitchWorker_LaunchFailureKeepsSessionRecoverable(t *testing.T) {
 	// The target runtime is still reaped — only the row's state is the saga's.
 	if rt.destroyed == 0 {
 		t.Error("the target runtime was left running")
+	}
+}
+
+// The tests above inject only the INITIAL MarkSpawned failure, so the rollback
+// runs against a healthy store. The three below attack the rollback itself:
+// the compensating writes can fail for the very condition that rejected
+// MarkSpawned, and treating them as best-effort lets the caller report a
+// broken invariant as handled.
+
+// TestResumeAgent_FailedAdoptionReportsUnresolvedCleanup: the runtime survived
+// AND recording it failed. Nothing names the process — reconcile, Kill and the
+// boot reaper all work from the recorded handle — so the caller must be told,
+// not handed an ordinary launch failure.
+func TestResumeAgent_FailedAdoptionReportsUnresolvedCleanup(t *testing.T) {
+	rt := &stubbornRuntime{
+		fakeRuntime: &fakeRuntime{aliveByHandle: map[string]bool{"h1": true}},
+		stubbornID:  "h1",
+	}
+	m, st, _ := resumeHarness(t, domain.KindOrchestrator, rt)
+	m.lcm.(*fakeLCM).markSpawnedErr = domain.ErrActiveOrchestratorExists
+	// Fail the compensating write, not the launch: the next UpdateSession after
+	// the ones relaunch already performs is the adoption.
+	st.updateErr = errors.New("database is locked")
+	st.updateFailAfter = st.updateCount + 2
+
+	_, err := m.ResumeAgentWithMode(context.Background(), "mer-1")
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("err = %v, want ErrLaunchCleanupUnresolved: a surviving runtime that no row names "+
+			"must not be reported as a plain launch failure", err)
+	}
+	// The original cause must survive alongside it.
+	if !errors.Is(err, domain.ErrActiveOrchestratorExists) {
+		t.Errorf("err = %v, want the launch failure preserved too", err)
+	}
+	if !strings.Contains(err.Error(), "h1") {
+		t.Errorf("err = %v, want the untracked handle named", err)
+	}
+	_ = st
+}
+
+// TestResumeAgent_FailedTerminationKeepsRuntimeIdentity is the second-write
+// case. Clearing the identity after a FAILED termination would leave
+// is_terminated=false with an empty handle: an orchestrator permanently
+// occupying the project's only active slot while runtime reconciliation, which
+// probes recorded handles, skips it entirely. Ordering is the fix, and the
+// caller must hear about it.
+func TestResumeAgent_FailedTerminationKeepsRuntimeIdentity(t *testing.T) {
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	m, st, _ := resumeHarness(t, domain.KindOrchestrator, rt)
+	lcm := m.lcm.(*fakeLCM)
+	lcm.markSpawnedErr = domain.ErrActiveOrchestratorExists
+	lcm.markTerminatedErr = errors.New("database is locked")
+
+	_, err := m.ResumeAgentWithMode(context.Background(), "mer-1")
+	if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("err = %v, want ErrLaunchCleanupUnresolved for a session that could not be terminated", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.IsTerminated {
+		t.Fatal("fixture did not reproduce the failure: the row was terminated anyway")
+	}
+	if got.Metadata.RuntimeHandleID == "" {
+		t.Error("identity was cleared on a row that is STILL ACTIVE: it now holds the orchestrator " +
+			"slot with no handle for reconciliation to probe")
+	}
+}
+
+// TestResumeAgent_SuccessfulTerminationStillClearsIdentity is the control:
+// ordering the clear after the terminate must not stop it happening on the
+// path where the terminate actually persisted.
+func TestResumeAgent_SuccessfulTerminationStillClearsIdentity(t *testing.T) {
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}}
+	m, st, _ := resumeHarness(t, domain.KindOrchestrator, rt)
+	m.lcm.(*fakeLCM).markSpawnedErr = domain.ErrActiveOrchestratorExists
+
+	_, err := m.ResumeAgentWithMode(context.Background(), "mer-1")
+	if !errors.Is(err, domain.ErrActiveOrchestratorExists) {
+		t.Fatalf("err = %v", err)
+	}
+	if errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatalf("a clean rollback must not report unresolved cleanup: %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if !got.IsTerminated || got.Metadata.RuntimeHandleID != "" {
+		t.Fatalf("clean rollback = terminated:%v meta:%+v", got.IsTerminated, got.Metadata)
 	}
 }
 

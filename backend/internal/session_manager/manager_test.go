@@ -268,6 +268,11 @@ type fakeLCM struct {
 	// adoption leaves the row exactly as it was — still terminated on the
 	// restore path, still ACTIVE with the previous handle on the resume path.
 	markSpawnedErr error
+	// markTerminatedErr fails the COMPENSATING write, which is a different
+	// adversary from markSpawnedErr: it fires after the caller has already
+	// decided to unwind, and is the store condition that rejected MarkSpawned
+	// persisting.
+	markTerminatedErr error
 }
 
 func (l *fakeLCM) PrepareLaunch(id domain.SessionID, launchID string) error {
@@ -322,6 +327,13 @@ func (l *fakeLCM) MarkTerminated(_ context.Context, id domain.SessionID) error {
 		l.terminated = map[domain.SessionID]int{}
 	}
 	l.terminated[id]++
+	// Returns BEFORE mutating: the real MarkTerminated writes through the store,
+	// so a failure leaves is_terminated exactly as it was. Mutating first would
+	// make the second-write failure untestable — the row would look terminated
+	// no matter what the caller did with the error.
+	if l.markTerminatedErr != nil {
+		return l.markTerminatedErr
+	}
 	rec := l.store.sessions[id]
 	rec.IsTerminated = true
 	rec.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: time.Now()}

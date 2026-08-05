@@ -61,13 +61,37 @@ func (s *Store) UpdateSession(ctx context.Context, rec domain.SessionRecord) err
 // isActiveOrchestratorConflict reports whether err is migration 0046's
 // one-active-orchestrator index rejecting a write.
 //
-// SQLite names the COLUMN, not the index — "UNIQUE constraint failed:
+// SQLite names the COLUMNS, not the index — "UNIQUE constraint failed:
 // sessions.project_id (2067)" — so the index name is not available to match on.
-// idx_sessions_one_active_orchestrator is the only unique index on sessions
-// (0013/0014/0020/0023 all index review_run), which makes the column
-// unambiguous; adding another would require narrowing this.
+// The match must be on the EXACT column list: sessions has carried
+// UNIQUE(project_id, num) since migration 0001, and that distinct collision
+// reports "sessions.project_id, sessions.num", which a substring test would
+// misread as an orchestrator conflict.
 func isActiveOrchestratorConflict(err error) bool {
-	return isSQLiteUnique(err) && strings.Contains(err.Error(), "sessions.project_id")
+	return uniqueConstraintColumns(err) == "sessions.project_id"
+}
+
+// uniqueConstraintColumns returns the exact column list SQLite reported for a
+// UNIQUE violation, or "" when err is not one (or is not parseable). Returning
+// "" for an unrecognized shape fails toward NOT classifying, which surfaces an
+// unmapped error rather than a confidently wrong one.
+func uniqueConstraintColumns(err error) string {
+	if !isSQLiteUnique(err) {
+		return ""
+	}
+	const marker = "UNIQUE constraint failed: "
+	msg := err.Error()
+	i := strings.Index(msg, marker)
+	if i < 0 {
+		return ""
+	}
+	cols := msg[i+len(marker):]
+	// The driver appends the result code as " (2067)". A column list cannot
+	// contain " (", so trimming from the last one is unambiguous.
+	if j := strings.LastIndex(cols, " ("); j >= 0 {
+		cols = cols[:j]
+	}
+	return strings.TrimSpace(cols)
 }
 
 // RenameSession updates only the user-facing display name for an existing
