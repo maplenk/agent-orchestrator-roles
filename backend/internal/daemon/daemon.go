@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/modelcatalog"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/runtimeselect"
 	"github.com/aoagents/agent-orchestrator/backend/internal/browserruntime"
 	"github.com/aoagents/agent-orchestrator/backend/internal/config"
@@ -26,6 +27,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers"
 	"github.com/aoagents/agent-orchestrator/backend/internal/mobilebridge"
 	"github.com/aoagents/agent-orchestrator/backend/internal/notify"
+	usagepipeline "github.com/aoagents/agent-orchestrator/backend/internal/observe/usage"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/preview"
 	"github.com/aoagents/agent-orchestrator/backend/internal/previewserver"
@@ -36,8 +38,10 @@ import (
 	devimportsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/devimport"
 	importsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/importer"
 	notificationsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/notification"
+	prsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/pr"
 	projectsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/project"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
+	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/skillassets"
 	"github.com/aoagents/agent-orchestrator/backend/internal/storage/sqlite"
@@ -211,7 +215,6 @@ func Run() error {
 	// sessionLifecycle requires AllowTerminalInput (compile-time); wire directly.
 	termMgr.SetInputGate(sessMgr)
 	lcStack.LCM.SetCompletionTerminator(sessMgr)
-	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, log)
 	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink})
 	if err := seedScratchProjectOnBoot(ctx, cfg, projectSvc); err != nil {
 		stop()
@@ -223,7 +226,7 @@ func Run() error {
 	}
 	lcStack.trackerDone = startTrackerIntake(ctx, store, sessionSvc, log)
 
-	agentSvc := agentsvc.New()
+	agentSvc := agentsvc.NewWithDeps(agentsvc.Deps{Cache: store, Discoverer: modelcatalog.Discoverer{}, Projects: store})
 	go func() {
 		if _, err := agentSvc.Refresh(ctx); err != nil {
 			log.Warn("initial agent catalog refresh failed", "err", err)
@@ -262,7 +265,7 @@ func Run() error {
 	// continues, which is the wrong contract here. A queue entry means a
 	// superseded orchestrator's process may still be live inside the canonical
 	// workspace its successor now owns, and doing ANY reconciliation or serving
-	// in that state is exactly what migration 0046's constraint exists to
+	// in that state is exactly what migration 0057's constraint exists to
 	// prevent. A missing queue table is likewise fatal rather than read as
 	// "nothing is owed".
 	//
@@ -321,7 +324,7 @@ func Run() error {
 	}
 
 	// Re-drive replacements interrupted mid retire→spawn, so a project is never
-	// stuck with zero orchestrators (migration 0047).
+	// stuck with zero orchestrators (migration 0058).
 	//
 	// Runs AFTER Reconcile deliberately: that pass adopts crash-surviving
 	// runtimes, so an orchestrator that is actually alive is recognised as the
@@ -332,6 +335,46 @@ func Run() error {
 	// trying again on the next boot.
 	if recoverErr := sessMgr.RecoverOrchestratorReplacements(ctx); recoverErr != nil {
 		log.Error("recover orchestrator replacements on boot failed", "err", recoverErr)
+	}
+
+	var (
+		usageCollector *usagesvc.Collector
+		usagePipeline  *usagepipeline.Pipeline
+	)
+	if roots, rootsErr := usagesvc.DefaultSourceRoots(ctx); rootsErr != nil {
+		log.Warn("usage collection disabled", "err", rootsErr)
+	} else {
+		usageCollector = usagesvc.NewCollector(store, roots, func(reconcile bool) {
+			if usagePipeline == nil {
+				return
+			}
+			if reconcile {
+				usagePipeline.NotifySourcesChanged()
+			} else {
+				usagePipeline.NotifyInventoryChanged()
+			}
+		})
+		ingestor := usagepipeline.NewIngestor(store, usagepipeline.IngestorConfig{})
+		usagePipeline = usagepipeline.NewPipeline(store, ingestor, []string{
+			roots.ClaudeProjects,
+			roots.CodexSessions,
+			roots.CodexArchived,
+		}, usagepipeline.CoordinatorConfig{
+			Logger:     log,
+			Initialize: usageCollector.BackfillActive,
+			Reconcile: func(reconcileCtx context.Context) error {
+				return usageCollector.ReconcileSources(reconcileCtx, 0)
+			},
+			ReconcilePath: usageCollector.ReconcilePath,
+		})
+		lcStack.LCM.SetUsageFinalizer(usageCollector)
+	}
+	lcStack.scmDone = startSCMObserver(ctx, store, lcStack.LCM, log)
+	var prActions prsvc.ActionManager
+	if mergeProvider, mergeErr := newGitHubSCMProvider(log); mergeErr != nil {
+		logSCMProviderDisabled(log, mergeErr)
+	} else {
+		prActions = prsvc.NewActionService(prsvc.ActionDeps{Store: store, Merger: mergeProvider, Reader: mergeProvider})
 	}
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
@@ -363,6 +406,7 @@ func Run() error {
 		Projects:           projectSvc,
 		Agents:             agentSvc,
 		Sessions:           sessionSvc,
+		PRs:                prActions,
 		Reviews:            reviewSvc,
 		Notifications:      notifier,
 		NotificationStream: notificationHub,
@@ -372,6 +416,8 @@ func Run() error {
 		CDC:                store,
 		Events:             cdcPipe.Broadcaster,
 		Activity:           lcStack.LCM,
+		UsageHooks:         usageCollector,
+		UsageSummary:       usagesvc.NewSummaryReader(store),
 		Telemetry:          telemetrySink,
 		Mobile:             mc,
 		DevImport: devimportsvc.New(devimportsvc.Deps{
@@ -410,10 +456,11 @@ func Run() error {
 			}
 		}()
 	}
+	var usageDone <-chan struct{}
 
 	// Late-bind: the LAN listener shares the exact loopback router instance so
 	// the LAN surface and loopback surface never drift apart.
-	lan := httpd.NewMobileLAN(srv.Handler(), mobilebridge.DefaultPort, log)
+	lan := httpd.NewMobileLAN(srv.Handler(), mobilebridge.DefaultPort, log, telemetrySink)
 	bs.LAN = lan
 
 	// Restore Connect Mobile across a daemon restart: if the bridge was left
@@ -422,6 +469,17 @@ func Run() error {
 	// Best-effort: never blocks boot.
 	if err := restoreMobileOnBoot(mobilebridge.Path(cfg.DataDir), lan); err != nil {
 		log.Warn("restore mobile bridge on boot failed", "err", err)
+	}
+
+	// Upstream calls sessMgr.Reconcile and lcStack.ReconcileRuntime HERE,
+	// best-effort, just before srv.Run. Both already ran far earlier on this
+	// branch, ahead of every client-facing surface, because Reconcile is only
+	// MOSTLY best-effort: ErrBootUnsafe must abort instead of being logged, and
+	// a gate that runs after a listener is live cannot prevent serving
+	// (boot_order_test.go pins that). Re-adding them here would re-run restore
+	// after the gate has already passed, so only the usage pipeline starts.
+	if usagePipeline != nil {
+		usageDone = usagePipeline.Start(ctx)
 	}
 
 	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
@@ -456,6 +514,9 @@ func Run() error {
 	stop()
 	managedPreview.Close()
 	<-previewDone
+	if usageDone != nil {
+		<-usageDone
+	}
 	lcStack.Stop()
 	lanStopCtx, lanCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer lanCancel()

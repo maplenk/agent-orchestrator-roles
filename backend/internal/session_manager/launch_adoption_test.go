@@ -15,7 +15,7 @@ import (
 // below cover the window where the runtime already exists but that write has
 // failed — the one place AO can hold a process no row names.
 //
-// The motivating failure is migration 0046's one-active-orchestrator index
+// The motivating failure is migration 0057's one-active-orchestrator index
 // rejecting the activation, which is why domain.ErrActiveOrchestratorExists is
 // the injected error throughout; the cleanup contract is the same for any
 // MarkSpawned failure.
@@ -63,7 +63,7 @@ func resumeHarness(t *testing.T, kind domain.SessionKind, rt runtimeController) 
 // so it stayed ACTIVE while still naming the OLD RuntimeHandleID that destroy
 // had just killed: a session that reads as live with no process behind it. For
 // an orchestrator that row also holds the project's single active slot under
-// migration 0046, so no replacement could be spawned — the project wedged with
+// migration 0057, so no replacement could be spawned — the project wedged with
 // no way out.
 func TestResumeAgent_ConstraintLossLeavesNoPhantomLiveOrchestrator(t *testing.T) {
 	// The runtime is confirmed dead once destroyed (absent from aliveByHandle).

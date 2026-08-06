@@ -19,7 +19,7 @@ func storePause(incident string) *domain.SessionPause {
 	}
 }
 
-// Against the REAL store, not the manager's in-memory fake. Migration 0049 adds
+// Against the REAL store, not the manager's in-memory fake. Migration 0060 adds
 // a column, and a column the queries do not carry reads back empty — which for
 // this pin means "not paused", i.e. the feature silently does nothing while
 // every unit test passes. That is precisely how 2B-1 shipped broken.

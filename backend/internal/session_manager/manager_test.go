@@ -31,7 +31,7 @@ type fakeTemplateArtifact struct {
 }
 
 type fakeStore struct {
-	// orchestrator reap queue (migration 0046)
+	// orchestrator reap queue (migration 0057)
 	reapQueue      []domain.OrchestratorReapEntry
 	reapQueueErr   error
 	reapDeleteErr  error
@@ -74,7 +74,7 @@ type fakeStore struct {
 	// time rather than by breaking the whole store.
 	worktreeListErr   map[domain.SessionID]error
 	worktreeDeleteErr map[domain.SessionID]error
-	// intents mirrors orchestrator_replacement_intent (migration 0047).
+	// intents mirrors orchestrator_replacement_intent (migration 0058).
 	intents         map[domain.ProjectID]domain.OrchestratorReplacementIntent
 	intentPutErr    error
 	intentListErr   error
@@ -182,7 +182,7 @@ func (f *fakeStore) UpdateSession(_ context.Context, rec domain.SessionRecord) e
 	return nil
 }
 
-// --- durable pause pin (migration 0049), column-owned ---
+// --- durable pause pin (migration 0060), column-owned ---
 
 func (f *fakeStore) SetSessionPauseIfAbsent(_ context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error) {
 	if f.beforePauseCAS != nil {
@@ -224,7 +224,7 @@ func (f *fakeStore) ClearSessionPauseIfIncident(_ context.Context, id domain.Ses
 	return true, nil
 }
 
-// --- orchestrator replacement intent (migration 0047) ---
+// --- orchestrator replacement intent (migration 0058) ---
 
 func (f *fakeStore) PutOrchestratorReplacementIntent(_ context.Context, in domain.OrchestratorReplacementIntent) error {
 	if f.intentPutErr != nil {
@@ -275,7 +275,7 @@ func (f *fakeStore) RecordOrchestratorReplacementAttempt(_ context.Context, p do
 	return nil
 }
 
-// --- orchestrator reap queue (migration 0046) ---
+// --- orchestrator reap queue (migration 0057) ---
 
 func (f *fakeStore) ListOrchestratorReapQueue(context.Context) ([]domain.OrchestratorReapEntry, error) {
 	if f.reapQueueErr != nil {
@@ -1173,6 +1173,18 @@ func TestSpawn_ResolvesProjectConfig(t *testing.T) {
 	}
 	if rt.lastCfg.Env[EnvSessionID] == "" {
 		t.Fatal("runtime env missing AO_SESSION_ID")
+	}
+
+	agent.lastConfig = ports.AgentConfig{}
+	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{
+		ProjectID:   "mer",
+		Kind:        domain.KindWorker,
+		AgentConfig: ports.AgentConfig{Model: "request-model"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if agent.lastConfig.Model != "request-model" {
+		t.Fatalf("launch model = %q, want request model override", agent.lastConfig.Model)
 	}
 
 	// A project with no stored config yields a zero AgentConfig (adapter defaults)

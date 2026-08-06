@@ -22,6 +22,8 @@ type Store interface {
 	RenameSession(ctx context.Context, id domain.SessionID, displayName string, updatedAt time.Time) (bool, error)
 	SetSessionPreviewURL(ctx context.Context, id domain.SessionID, previewURL string, updatedAt time.Time) (bool, error)
 	SetSessionTerminateOnPRMerge(ctx context.Context, id domain.SessionID, terminate bool, updatedAt time.Time) (bool, error)
+	SetSessionPinned(ctx context.Context, id domain.SessionID, isPinned bool, pinnedAt *time.Time, updatedAt time.Time) (bool, error)
+	SetSessionReviewerHarness(ctx context.Context, id domain.SessionID, harness domain.ReviewerHarness, updatedAt time.Time) (bool, error)
 	GetDisplayPRFactsForSession(ctx context.Context, id domain.SessionID) (domain.PRFacts, bool, error)
 	ListPRFactsForSession(ctx context.Context, id domain.SessionID) ([]domain.PRFacts, error)
 	ListPRsBySession(ctx context.Context, sessionID domain.SessionID) ([]domain.PullRequest, error)
@@ -53,6 +55,9 @@ type commander interface {
 	// the manager's project ownership gate. The service must not reimplement
 	// this sequence: holding ownership across retire→spawn is the whole point.
 	EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig, clean bool) (sessionmanager.EnsureOrchestratorResult, error)
+	// ProjectOrchestrator resolves the project's owner under the ownership
+	// gate. Delegation uses it instead of re-deriving ownership here.
+	ProjectOrchestrator(ctx context.Context, projectID domain.ProjectID) (domain.SessionRecord, bool, error)
 	Send(ctx context.Context, id domain.SessionID, message string) error
 	Cleanup(ctx context.Context, project domain.ProjectID) (sessionmanager.CleanupResult, error)
 	RollbackSpawn(ctx context.Context, id domain.SessionID) (deleted, killed bool, err error)
@@ -521,6 +526,48 @@ func (s *Service) SetTerminateOnPRMerge(ctx context.Context, id domain.SessionID
 	return s.Get(ctx, id)
 }
 
+// Pin marks a session as pinned and returns the refreshed read model.
+func (s *Service) Pin(ctx context.Context, id domain.SessionID) (domain.Session, error) {
+	now := s.now()
+	updated, err := s.store.SetSessionPinned(ctx, id, true, &now, now)
+	if err != nil {
+		return domain.Session{}, fmt.Errorf("pin %s: %w", id, err)
+	}
+	if !updated {
+		return domain.Session{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return s.Get(ctx, id)
+}
+
+// Unpin marks a session as unpinned and returns the refreshed read model.
+func (s *Service) Unpin(ctx context.Context, id domain.SessionID) (domain.Session, error) {
+	now := s.now()
+	updated, err := s.store.SetSessionPinned(ctx, id, false, nil, now)
+	if err != nil {
+		return domain.Session{}, fmt.Errorf("unpin %s: %w", id, err)
+	}
+	if !updated {
+		return domain.Session{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return s.Get(ctx, id)
+}
+
+// SetReviewerHarness persists the reviewer selected for this session. Empty
+// clears the preference and restores the project-level fallback.
+func (s *Service) SetReviewerHarness(ctx context.Context, id domain.SessionID, harness domain.ReviewerHarness) (domain.Session, error) {
+	if harness != "" && !harness.IsKnown() {
+		return domain.Session{}, apierr.Invalid("UNKNOWN_REVIEWER_HARNESS", "Unknown reviewer harness", nil)
+	}
+	updated, err := s.store.SetSessionReviewerHarness(ctx, id, harness, time.Now().UTC())
+	if err != nil {
+		return domain.Session{}, fmt.Errorf("set reviewer harness %s: %w", id, err)
+	}
+	if !updated {
+		return domain.Session{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
+	}
+	return s.Get(ctx, id)
+}
+
 // Cleanup delegates terminal workspace cleanup to the internal manager and
 // reports both reclaimed and preserved (skipped) workspaces.
 func (s *Service) Cleanup(ctx context.Context, project domain.ProjectID) (CleanupOutcome, error) {
@@ -630,7 +677,7 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrNotRestorable):
 		return apierr.Conflict("SESSION_NOT_RESTORABLE", "Session is not restorable", nil)
 	case errors.Is(err, domain.ErrActiveOrchestratorExists):
-		// Migration 0046's index rejected the write. Without this it is an
+		// Migration 0057's index rejected the write. Without this it is an
 		// opaque 500 for a condition the caller can act on.
 		return apierr.Conflict("ACTIVE_ORCHESTRATOR_EXISTS",
 			"This project already has an active orchestrator; retire it before starting another", nil)

@@ -42,7 +42,15 @@ const config: ForgeConfig = {
 		icon: "assets/icon",
 		// "profiles" is staged by the prePackage hook below. Without it a clean
 		// install ships no role templates and strict role-pinned launches fail.
-		extraResource: ["daemon", "profiles", "assets/icon.png", "assets/icon.ico", "app-update.yml"],
+		extraResource: [
+			"daemon",
+			"profiles",
+			"assets/icon.png",
+			"assets/icon.ico",
+			"assets/trayIconTemplate.png",
+			"assets/trayIconTemplate@2x.png",
+			"app-update.yml",
+		],
 		// Notarization. Two paths:
 		//  - CI: an App Store Connect API key. APPLE_API_KEY is a PATH to the .p8
 		//    (the workflow decodes APPLE_API_KEY_BASE64 to a temp file), plus the

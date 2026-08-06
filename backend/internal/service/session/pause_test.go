@@ -148,3 +148,42 @@ func TestToAPIError_PauseFamily(t *testing.T) {
 		})
 	}
 }
+
+// The manager's typed sentinels must reach the client as their mapped codes
+// THROUGH the service, not just through toAPIError in isolation.
+//
+// Dogfood found this: a stale-incident resume correctly refused to lift the pin
+// but answered 500 INTERNAL_ERROR, because the service returned the manager's
+// error unmapped. The existing tests could not catch it — one exercised
+// toAPIError with no service, the other exercised the service with a fake that
+// never errored. Neither joined the two.
+func TestPauseResume_ManagerSentinelsSurfaceMappedThroughTheService(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"mismatch", sessionmanager.ErrIncidentMismatch, "PAUSE_INCIDENT_MISMATCH"},
+		{"not paused", sessionmanager.ErrNotPaused, "SESSION_NOT_PAUSED"},
+		{"already paused", sessionmanager.ErrAlreadyPaused, "SESSION_ALREADY_PAUSED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Wrapped exactly as the manager wraps it.
+			m := &recordingPauseManager{err: fmt.Errorf("resume mer-1: %w", tc.err)}
+
+			_, err := pauseService(m).ResumeSession(context.Background(), "mer-1", "inc-1")
+			var apiErr *apierr.Error
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("resume surfaced %v as an unmapped error; the client sees a 500", err)
+			}
+			if apiErr.Code != tc.code {
+				t.Fatalf("resume code = %q, want %q", apiErr.Code, tc.code)
+			}
+
+			_, err = pauseService(m).PauseSession(context.Background(), "mer-1", "inc-1", "")
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("pause surfaced %v as an unmapped error", err)
+			}
+		})
+	}
+}

@@ -10,7 +10,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// Migration 0046's partial unique index is the database backstop for "one
+// Migration 0057's partial unique index is the database backstop for "one
 // active orchestrator per project". SQLite reports it as a bare
 // "UNIQUE constraint failed: sessions.project_id (2067)" — no index name, no
 // typed shape — which reaches the API as an opaque 500 unless it is mapped.

@@ -205,3 +205,34 @@ func orchestratorRecordNewer(a, b domain.SessionRecord) bool {
 	}
 	return a.ID > b.ID
 }
+
+// ProjectOrchestrator returns the project's current owner, resolved under the
+// project ownership gate by the ONE rule every other path uses
+// (newestOrchestratorRecord). ok=false means the project has none.
+//
+// Exported because delegation has to address the orchestrator, and must not
+// re-derive ownership to do it. A second resolver in the service layer is
+// exactly the defect 2B-0a removed: the manager's took the first active row in
+// list order while the service took the newest by CreatedAt, and they disagreed
+// precisely during a transfer window — the moment it matters. Migration 0057
+// now makes two active orchestrators unrepresentable, but that is a reason to
+// have one resolver, not a licence to add another.
+//
+// The gate is released before the caller sends anything, so no pane write is
+// ever made while holding it.
+func (m *Manager) ProjectOrchestrator(ctx context.Context, projectID domain.ProjectID) (domain.SessionRecord, bool, error) {
+	release, err := m.acquireProjectOwnership(ctx, projectID)
+	if err != nil {
+		return domain.SessionRecord{}, false, err
+	}
+	defer release()
+
+	recs, err := m.activeOrchestratorRecords(ctx, projectID)
+	if err != nil {
+		return domain.SessionRecord{}, false, fmt.Errorf("project orchestrator %s: %w", projectID, err)
+	}
+	if len(recs) == 0 {
+		return domain.SessionRecord{}, false, nil
+	}
+	return newestOrchestratorRecord(recs), true, nil
+}

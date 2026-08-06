@@ -52,7 +52,11 @@ func (s *Service) PauseSession(ctx context.Context, sessionID domain.SessionID, 
 		DetectedBy: domain.PauseDetectionOperator,
 	})
 	if err != nil {
-		return domain.SessionRecord{}, err
+		// Through toAPIError, or the manager's typed sentinels reach the client
+		// as an opaque 500. Found by dogfood: a stale-incident resume returned
+		// INTERNAL_ERROR while correctly refusing to lift the pin, so the
+		// behaviour was right and the answer was useless.
+		return domain.SessionRecord{}, toAPIError(err)
 	}
 	return rec, nil
 }
@@ -73,7 +77,11 @@ func (s *Service) ResumeSession(ctx context.Context, sessionID domain.SessionID,
 	if !ok {
 		return domain.SessionRecord{}, fmt.Errorf("%w", ErrSwitchNotWired)
 	}
-	return pc.ResumeSession(ctx, sessionID, incident)
+	rec, err := pc.ResumeSession(ctx, sessionID, incident)
+	if err != nil {
+		return domain.SessionRecord{}, toAPIError(err)
+	}
+	return rec, nil
 }
 
 // validIncident bounds the client-supplied id at the API boundary so a bad one

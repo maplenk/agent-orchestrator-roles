@@ -244,7 +244,7 @@ type Store interface {
 	// incident, so a stale resume cannot lift a newer pause.
 	ClearSessionPauseIfIncident(ctx context.Context, id domain.SessionID, incidentID string, updatedAt time.Time) (bool, error)
 	// ListOrchestratorReapQueue returns outstanding obligations to confirm the
-	// death of superseded orchestrators (migration 0046). A missing table must
+	// death of superseded orchestrators (migration 0057). A missing table must
 	// surface as an error, never as an empty queue.
 	ListOrchestratorReapQueue(ctx context.Context) ([]domain.OrchestratorReapEntry, error)
 	// DeleteOrchestratorReapEntry discharges one obligation. Only ever called
@@ -623,8 +623,17 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
 	}
-	// Merge host-resolved role model/permissions over legacy project AgentConfig.
-	agentConfig := mergeAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
+	// Composed, and the ORDER is the invariant: project base, then upstream's
+	// per-spawn override, then the host-resolved role LAST. A role pin is
+	// host-authoritative — resolve already refuses a caller-supplied harness or
+	// model alongside a role (ErrHarnessOverrideForbidden) — so letting the
+	// override land after the role would invert that gate for anything resolve
+	// did not reject outright.
+	agentConfig := mergeAgentConfig(
+		applySpawnAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), cfg.AgentConfig),
+		roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
+	// spawnToken is ours: the session-scoped spawn capability injected as
+	// AO_SPAWN_CAPABILITY. Upstream's signature has no such parameter.
 	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env, spawnToken)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
@@ -949,10 +958,26 @@ func effectiveAgentConfig(kind domain.SessionKind, cfg domain.ProjectConfig) por
 	if override.Model != "" {
 		merged.Model = override.Model
 	}
+	if override.Mode != "" {
+		merged.Mode = override.Mode
+	}
 	if override.Permissions != "" {
 		merged.Permissions = override.Permissions
 	}
 	return merged
+}
+
+func applySpawnAgentConfig(base, override ports.AgentConfig) ports.AgentConfig {
+	if override.Model != "" {
+		base.Model = override.Model
+	}
+	if override.Mode != "" {
+		base.Mode = override.Mode
+	}
+	if override.Permissions != "" {
+		base.Permissions = override.Permissions
+	}
+	return base
 }
 
 func roleOverride(kind domain.SessionKind, cfg domain.ProjectConfig) domain.RoleOverride {
@@ -980,7 +1005,7 @@ func sessionPrefix(project domain.ProjectRecord) string {
 // rollbackSpawnSeedRow.
 // markSpawnFailedTerminated parks a failed spawn terminated. Post-runtime
 // callers must surface its error: an active row that could not be terminated
-// holds the project's orchestrator slot (migration 0046) with nothing behind
+// holds the project's orchestrator slot (migration 0057) with nothing behind
 // it. Pre-runtime seed rollbacks fail the whole spawn anyway and ignore it.
 func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.SessionID) error {
 	m.cleanupSystemPromptDir(id)
@@ -1056,7 +1081,7 @@ var ErrPausedLivenessUnresolved = fmt.Errorf("%w: paused session liveness not re
 // value (destroyRuntimeProbed, switch.go). And a runtime that is NOT confirmed
 // dead has its identity written to the row anyway, so it stays reapable — a
 // write that deliberately leaves is_terminated alone, which matters because the
-// motivating failure is migration 0046's index rejecting the activation, and
+// motivating failure is migration 0057's index rejecting the activation, and
 // that write would fail again.
 // UNCONFIRMED DEATH IS ALWAYS AN ERROR, recorded or not. Recording the survivor
 // makes it reapable *eventually*; it does not make it gone. The distinction that
@@ -1519,7 +1544,7 @@ func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id dom
 //
 // The reverse order looks tidier and is worse. Releasing the claim first leaves
 // an ACTIVE orchestrator with no workspace: it still occupies the project's
-// single active slot under migration 0046, so no successor can be created,
+// single active slot under migration 0057, so no successor can be created,
 // while EnsureOrchestrator's idempotent path happily returns it and hands the
 // caller a coordinator that owns nothing. That state is both more damaging and
 // less obviously wrong than a stale path on a dead row.
@@ -1996,7 +2021,13 @@ func (m *Manager) parkFailedRelaunch(ctx context.Context, operation string, id d
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
+		if !errors.Is(err, ports.ErrRuntimeUnavailable) {
+			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
+		}
+		// The runtime infrastructure itself is gone (e.g. the tmux server was
+		// killed). Restore/restart is exactly the recovery path for that
+		// outage, so proceed as "no existing runtime" and create a fresh one.
+		alive = false
 	}
 	if alive {
 		if restarter, ok := m.runtime.(ports.RuntimeRestarter); ok {
@@ -2151,7 +2182,15 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	probedDead := false
 	if handle.ID != "" {
 		alive, err := m.runtime.IsAlive(ctx, handle)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, ports.ErrRuntimeUnavailable):
+			// Boot-time pass with no reachable tmux server (normal after a
+			// machine reboot). The runtime is gone either way; fall through to
+			// save-and-teardown, which keeps the restore marker rather than
+			// silently archiving the session.
+			alive = false
+		default:
 			// A failed probe is not proof of death: leave the session as-is.
 			return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
 		}
@@ -2201,6 +2240,9 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 	}
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
+		if errors.Is(err, ports.ErrRuntimeUnavailable) {
+			return nil // no server means no leaked session to reap
+		}
 		return fmt.Errorf("reconcile reap %s: probe: %w", rec.ID, err)
 	}
 	if !alive {
@@ -2344,7 +2386,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // project ownership gate, so it can resurrect more than one orchestrator per
 // project. Gating alone would not fix that — the loop also needs deterministic
 // survivor selection and restore-marker neutralization, which land together
-// with migration 0046. It runs at boot before the daemon serves, so it does not
+// with migration 0057. It runs at boot before the daemon serves, so it does not
 // currently race API-driven restores.
 func (m *Manager) RestoreAll(ctx context.Context) error {
 	recs, err := m.store.ListAllSessions(ctx)
@@ -2371,7 +2413,7 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 // restoreProjectOrchestrators restores at most ONE orchestrator per project,
 // under that project's ownership gate.
 //
-// This is the half of boot restore that migration 0046 could not cover. The
+// This is the half of boot restore that migration 0057 could not cover. The
 // migration reconciles rows that were already duplicated; this prevents the
 // loop from *creating* duplicates in the first place, which it previously could
 // in two distinct ways:
@@ -2508,7 +2550,7 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 		return m.neutralizeRestoreMarkers(ctx, restorable, "a live orchestrator already owns the project")
 	}
 
-	// Same rule as newestOrchestratorRecord and migration 0046: newest
+	// Same rule as newestOrchestratorRecord and migration 0057: newest
 	// CreatedAt, then UpdatedAt, then lexically greatest id. The database and
 	// this loop must never disagree about who owns a project.
 	survivor := newestOrchestratorRecord(restorable)
@@ -3711,11 +3753,11 @@ func (m *Manager) workspaceProjectPrompt(ctx context.Context, kind domain.Sessio
 // a worker's system prompt names as its coordinator.
 //
 // It applies newestOrchestratorRecord — the SAME rule as EnsureOrchestrator and
-// migration 0046 — rather than taking the first match in ListSessions order.
+// migration 0057 — rather than taking the first match in ListSessions order.
 // That order is insertion order, so the old first-match returned the OLDEST
 // active orchestrator while ownership resolved to the newest: with two rows
 // briefly active, every worker spawned in that window was told to report to the
-// one being superseded. Migration 0046's index now makes two active rows
+// one being superseded. Migration 0057's index now makes two active rows
 // unreachable, but a second resolver that disagrees by construction is a trap
 // waiting for the next path that predates the index, so there is exactly one.
 func (m *Manager) activeOrchestratorSessionID(ctx context.Context, project domain.ProjectID) (domain.SessionID, bool, error) {

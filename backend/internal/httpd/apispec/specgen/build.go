@@ -67,6 +67,8 @@ func Build() ([]byte, error) {
 			"Code-review runs and findings"),
 		*(&openapi31.Tag{Name: "notifications"}).WithDescription(
 			"Durable dashboard notifications"),
+		*(&openapi31.Tag{Name: "usage"}).WithDescription(
+			"Token usage telemetry for AO sessions"),
 		*(&openapi31.Tag{Name: "push"}).WithDescription(
 			"Mobile push-device registration for OS push notifications"),
 		*(&openapi31.Tag{Name: "events"}).WithDescription(
@@ -94,9 +96,14 @@ func Build() ([]byte, error) {
 		}
 		if op.reqBody != nil {
 			// AddReqStructure leaves requestBody.required absent, which
-			// OpenAPI reads as optional. These bodies are mandatory, so force
-			// it — otherwise validators/generators treat the body as skippable.
-			oc.AddReqStructure(op.reqBody, openapi.WithCustomize(markRequestBodyRequired))
+			// OpenAPI reads as optional. Most of these bodies are mandatory, so
+			// force it — otherwise validators/generators treat the body as
+			// skippable. Ops that genuinely accept an empty body opt out.
+			if op.optionalReqBody {
+				oc.AddReqStructure(op.reqBody)
+			} else {
+				oc.AddReqStructure(op.reqBody, openapi.WithCustomize(markRequestBodyRequired))
+			}
 		}
 		for _, resp := range op.resps {
 			opts := []openapi.ContentOption{openapi.WithHTTPStatus(resp.status)}
@@ -134,55 +141,58 @@ var schemaNames = map[string]string{
 	// httpd/envelope
 	"EnvelopeAPIError": "APIError",
 	// domain
-	"DomainProjectID":           "ProjectID",
-	"DomainSessionID":           "SessionID",
-	"DomainIssueID":             "IssueID",
-	"DomainSession":             "Session",
-	"DomainProjectConfig":       "ProjectConfig",
-	"DomainTrackerIntakeConfig": "TrackerIntakeConfig",
-	"DomainContainerReapConfig": "ContainerReapConfig",
-	"DomainAgentConfig":         "AgentConfig",
-	"DomainRoleOverride":        "RoleOverride",
+	"DomainProjectID":                 "ProjectID",
+	"DomainSessionID":                 "SessionID",
+	"DomainIssueID":                   "IssueID",
+	"DomainSession":                   "Session",
+	"DomainProjectConfig":             "ProjectConfig",
+	"DomainTrackerIntakeConfig":       "TrackerIntakeConfig",
+	"ControllersTriggerReviewRequest": "TriggerReviewRequest",
+	"DomainContainerReapConfig":       "ContainerReapConfig",
+	"DomainAgentConfig":               "AgentConfig",
+	"DomainRoleOverride":              "RoleOverride",
 	// httpd/controllers (wire envelopes)
-	"ControllersListProjectsResponse":             "ListProjectsResponse",
-	"ControllersProjectResponse":                  "ProjectResponse",
-	"ControllersAgentIDParam":                     "AgentIDParam",
-	"ControllersGetProjectResponse":               "ProjectGetResponse",
-	"ControllersProjectOrDegraded":                "ProjectOrDegraded",
-	"ControllersListSessionsQuery":                "ListSessionsQuery",
-	"ControllersCleanupSessionsQuery":             "CleanupSessionsQuery",
-	"ControllersListSessionsResponse":             "ListSessionsResponse",
-	"ControllersSpawnSessionRequest":              "SpawnSessionRequest",
-	"ControllersSpawnSessionResponse":             "SpawnSessionResponse",
-	"ControllersSessionResponse":                  "SessionResponse",
-	"ControllersSessionPreviewResponse":           "SessionPreviewResponse",
-	"ControllersSetSessionPreviewRequest":         "SetSessionPreviewRequest",
-	"ControllersStartPreviewServerRequest":        "StartPreviewServerRequest",
-	"ControllersPreviewServerStatusResponse":      "PreviewServerStatusResponse",
-	"ControllersBrowserStatusQuery":               "BrowserStatusQuery",
-	"ControllersBrowserStatusResponse":            "BrowserStatusResponse",
-	"ControllersBrowserCommandRequest":            "BrowserCommandRequest",
-	"ControllersBrowserCommandResponse":           "BrowserCommandResponse",
-	"ControllersSetSessionMergePolicyRequest":     "SetSessionMergePolicyRequest",
-	"ControllersSetSessionMergePolicyResponse":    "SetSessionMergePolicyResponse",
-	"ControllersRenameSessionRequest":             "RenameSessionRequest",
-	"ControllersRenameSessionResponse":            "RenameSessionResponse",
-	"ControllersRestoreSessionResponse":           "RestoreSessionResponse",
-	"ControllersResumeAgentResponse":              "ResumeAgentResponse",
-	"ControllersCleanupSessionsResponse":          "CleanupSessionsResponse",
-	"ControllersCleanupSkippedSession":            "CleanupSkippedSession",
-	"ControllersWorkspaceFileQuery":               "WorkspaceFileQuery",
-	"ControllersListWorkspaceFilesResponse":       "ListWorkspaceFilesResponse",
-	"ControllersWorkspaceFileSummary":             "WorkspaceFileSummary",
-	"ControllersWorkspaceFileResponse":            "WorkspaceFileResponse",
-	"ControllersKillSessionResponse":              "KillSessionResponse",
-	"ControllersRollbackSessionResponse":          "RollbackSessionResponse",
-	"ControllersSendSessionMessageRequest":        "SendSessionMessageRequest",
-	"ControllersSendSessionMessageResponse":       "SendSessionMessageResponse",
-	"ControllersSwitchWorkerRequest":              "SwitchWorkerRequest",
-	"ControllersSwitchWorkerResponse":             "SwitchWorkerResponse",
-	"ControllersFreshConversationRequest":         "FreshConversationRequest",
-	"ControllersClaimPRResponse":                  "ClaimPRResponse",
+	"ControllersListProjectsResponse":          "ListProjectsResponse",
+	"ControllersProjectResponse":               "ProjectResponse",
+	"ControllersAgentIDParam":                  "AgentIDParam",
+	"ControllersGetProjectResponse":            "ProjectGetResponse",
+	"ControllersProjectOrDegraded":             "ProjectOrDegraded",
+	"ControllersListSessionsQuery":             "ListSessionsQuery",
+	"ControllersCleanupSessionsQuery":          "CleanupSessionsQuery",
+	"ControllersListSessionsResponse":          "ListSessionsResponse",
+	"ControllersSpawnSessionRequest":           "SpawnSessionRequest",
+	"ControllersSpawnSessionResponse":          "SpawnSessionResponse",
+	"ControllersSessionResponse":               "SessionResponse",
+	"ControllersSessionPreviewResponse":        "SessionPreviewResponse",
+	"ControllersSetSessionPreviewRequest":      "SetSessionPreviewRequest",
+	"ControllersStartPreviewServerRequest":     "StartPreviewServerRequest",
+	"ControllersPreviewServerStatusResponse":   "PreviewServerStatusResponse",
+	"ControllersBrowserStatusQuery":            "BrowserStatusQuery",
+	"ControllersBrowserStatusResponse":         "BrowserStatusResponse",
+	"ControllersBrowserCommandRequest":         "BrowserCommandRequest",
+	"ControllersBrowserCommandResponse":        "BrowserCommandResponse",
+	"ControllersSetSessionMergePolicyRequest":  "SetSessionMergePolicyRequest",
+	"ControllersSetSessionMergePolicyResponse": "SetSessionMergePolicyResponse",
+	"ControllersRenameSessionRequest":          "RenameSessionRequest",
+	"ControllersSetSessionReviewerRequest":     "SetSessionReviewerRequest",
+	"ControllersRenameSessionResponse":         "RenameSessionResponse",
+	"ControllersRestoreSessionResponse":        "RestoreSessionResponse",
+	"ControllersResumeAgentResponse":           "ResumeAgentResponse",
+	"ControllersCleanupSessionsResponse":       "CleanupSessionsResponse",
+	"ControllersCleanupSkippedSession":         "CleanupSkippedSession",
+	"ControllersWorkspaceFileQuery":            "WorkspaceFileQuery",
+	"ControllersListWorkspaceFilesResponse":    "ListWorkspaceFilesResponse",
+	"ControllersWorkspaceFileSummary":          "WorkspaceFileSummary",
+	"ControllersWorkspaceFileResponse":         "WorkspaceFileResponse",
+	"ControllersKillSessionResponse":           "KillSessionResponse",
+	"ControllersRollbackSessionResponse":       "RollbackSessionResponse",
+	"ControllersSendSessionMessageRequest":     "SendSessionMessageRequest",
+	"ControllersSendSessionMessageResponse":    "SendSessionMessageResponse",
+	"ControllersSwitchWorkerRequest":           "SwitchWorkerRequest",
+	"ControllersSwitchWorkerResponse":          "SwitchWorkerResponse",
+	"ControllersFreshConversationRequest":      "FreshConversationRequest",
+	"ControllersDelegateTaskRequest":           "DelegateTaskRequest",
+	"ControllersDelegateTaskResponse":          "DelegateTaskResponse", "ControllersClaimPRResponse": "ClaimPRResponse",
 	"ControllersClaimPRRequest":                   "ClaimPRRequest",
 	"ControllersSessionPRFacts":                   "SessionPRFacts",
 	"ControllersSessionPRSummary":                 "SessionPRSummary",
@@ -203,6 +213,8 @@ var schemaNames = map[string]string{
 	"AgentInventory":                              "ListAgentsResponse",
 	"AgentInfo":                                   "AgentInfo",
 	"AgentProbeResult":                            "ProbeAgentResponse",
+	"PortsAgentModelCatalog":                      "AgentModelsResponse",
+	"PortsAgentModelInfo":                         "AgentModelInfo",
 	"ControllersListNotificationsQuery":           "ListNotificationsQuery",
 	"ControllersNotificationStreamQuery":          "NotificationStreamQuery",
 	"ControllersNotificationIDParam":              "NotificationIDParam",
@@ -213,6 +225,14 @@ var schemaNames = map[string]string{
 	"ControllersNotificationEnvelope":             "NotificationEnvelope",
 	"ControllersMarkAllNotificationsReadRequest":  "MarkAllNotificationsReadRequest",
 	"ControllersMarkAllNotificationsReadResponse": "MarkAllNotificationsReadResponse",
+	"ControllersUsageHookMetadata":                "UsageHookMetadata",
+	"ControllersListUsageSessionsQuery":           "ListUsageSessionsQuery",
+	"ControllersCompactSessionUsageResponse":      "CompactSessionUsageResponse",
+	"ControllersListCompactSessionUsageResponse":  "ListCompactSessionUsageResponse",
+	"ControllersUsageTotalsResponse":              "UsageTotalsResponse",
+	"ControllersUsageModelResponse":               "UsageModelResponse",
+	"ControllersUsageHarnessResponse":             "UsageHarnessResponse",
+	"ControllersSessionUsageResponse":             "SessionUsageResponse",
 	// httpd/controllers — standalone shell terminal wire envelopes
 	"ControllersShellTerminalHandleIDParam": "ShellTerminalHandleIDParam",
 	"ControllersOpenShellTerminalRequest":   "OpenShellTerminalRequest",
@@ -221,6 +241,7 @@ var schemaNames = map[string]string{
 	"ControllersListShellTerminalsResponse": "ListShellTerminalsResponse",
 	"ControllersShellTerminalEnvelope":      "ShellTerminalEnvelope",
 	// httpd/controllers — PR wire envelopes
+	"ControllersMergePRRequest":          "MergePRRequest",
 	"ControllersMergePRResponse":         "MergePRResponse",
 	"ControllersResolveCommentsRequest":  "ResolveCommentsRequest",
 	"ControllersResolveCommentsResponse": "ResolveCommentsResponse",
@@ -332,8 +353,11 @@ type operation struct {
 	tag                       string
 	pathParams                []any // path/query param containers (e.g. ProjectIDParam)
 	reqBody                   any   // JSON request body struct, nil when the op takes none
-	resps                     []respUnit
-	contentTypes              map[int]string // optional non-JSON response content types by status
+	// optionalReqBody declares the body without marking it required, for the
+	// handlers that accept an empty body as a meaningful default.
+	optionalReqBody bool
+	resps           []respUnit
+	contentTypes    map[int]string // optional non-JSON response content types by status
 }
 
 func operations() []operation {
@@ -344,6 +368,7 @@ func operations() []operation {
 	ops = append(ops, prOperations()...)
 	ops = append(ops, reviewOperations()...)
 	ops = append(ops, notificationOperations()...)
+	ops = append(ops, usageOperations()...)
 	ops = append(ops, pushOperations()...)
 	ops = append(ops, importOperations()...)
 	ops = append(ops, devOperations()...)
@@ -381,6 +406,32 @@ func browserOperations() []operation {
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusUnprocessableEntity, envelope.APIError{}},
 				{http.StatusServiceUnavailable, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+	}
+}
+
+func usageOperations() []operation {
+	return []operation{
+		{
+			method: http.MethodGet, path: "/api/v1/usage/sessions", id: "listCompactSessionUsage", tag: "usage",
+			summary:    "List compact token usage for session cards",
+			pathParams: []any{controllers.ListUsageSessionsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ListCompactSessionUsageResponse{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/usage/sessions/{sessionId}", id: "getSessionUsage", tag: "usage",
+			summary:    "Get detailed token usage for one session",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SessionUsageResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
@@ -467,6 +518,30 @@ func agentOperations() []operation {
 			resps: []respUnit{
 				{http.StatusOK, controllers.ProbeAgentResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodGet, path: "/api/v1/agents/{agent}/models", id: "getAgentModels", tag: "agents",
+			summary:    "Return the cached model picker for one agent, discovering it on first use",
+			pathParams: []any{controllers.AgentIDParam{}, controllers.AgentModelsQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.AgentModelsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/agents/{agent}/models/refresh", id: "refreshAgentModels", tag: "agents",
+			summary:    "Refresh and cache the model picker for one agent",
+			pathParams: []any{controllers.AgentIDParam{}, controllers.AgentModelsRefreshQuery{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.AgentModelsResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
 				{http.StatusNotImplemented, envelope.APIError{}},
 			},
@@ -660,6 +735,9 @@ func reviewOperations() []operation {
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/reviews/trigger", id: "triggerReview", tag: "reviews",
 			summary:    "Trigger a code review of a worker's PR",
 			pathParams: []any{controllers.SessionIDParam{}},
+			// Optional: an empty body runs under the project's configured reviewer.
+			reqBody:         controllers.TriggerReviewRequest{},
+			optionalReqBody: true,
 			resps: []respUnit{
 				{http.StatusOK, controllers.TriggerReviewResponse{}},
 				{http.StatusCreated, controllers.TriggerReviewResponse{}},
@@ -829,6 +907,28 @@ func sessionOperations() []operation {
 				{http.StatusOK, controllers.SessionResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/pin", id: "pinSession", tag: "sessions",
+			summary:    "Pin a session",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SessionResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodDelete, path: "/api/v1/sessions/{sessionId}/pin", id: "unpinSession", tag: "sessions",
+			summary:    "Unpin a session",
+			pathParams: []any{controllers.SessionIDParam{}},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SessionResponse{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
 			},
 		},
 		{
@@ -1010,6 +1110,20 @@ func sessionOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPut, path: "/api/v1/sessions/{sessionId}/reviewer", id: "setSessionReviewer", tag: "sessions",
+			summary:    "Set the reviewer harness for a session",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.SetSessionReviewerRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.SessionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusUnprocessableEntity, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/sessions/cleanup", id: "cleanupSessions", tag: "sessions",
 			summary:    "Clean up terminated session workspaces",
 			pathParams: []any{controllers.CleanupSessionsQuery{}},
@@ -1171,6 +1285,19 @@ func sessionOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/orchestrators/delegate", id: "delegateTask", tag: "sessions",
+			summary: "Start a worker task and ask the orchestrator to title it",
+			reqBody: controllers.DelegateTaskRequest{},
+			resps: []respUnit{
+				{http.StatusAccepted, controllers.DelegateTaskResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+				{http.StatusNotImplemented, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodGet, path: "/api/v1/orchestrators/{id}", id: "getOrchestrator", tag: "sessions",
 			summary:    "Fetch one orchestrator session",
 			pathParams: []any{controllers.OrchestratorIDParam{}},
@@ -1193,7 +1320,9 @@ func prOperations() []operation {
 			method: http.MethodPost, path: "/api/v1/prs/{id}/merge", id: "mergePR", tag: "prs",
 			summary:    "Squash-merge a pull request",
 			pathParams: []any{controllers.PRIDParam{}},
+			reqBody:    controllers.MergePRRequest{},
 			resps: []respUnit{
+				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusOK, controllers.MergePRResponse{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},

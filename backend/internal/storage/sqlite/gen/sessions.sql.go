@@ -14,7 +14,7 @@ import (
 )
 
 const getSession = `-- name: GetSession :one
-SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.reviewer_harness, sessions.is_pinned, sessions.pinned_at, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions WHERE id = ?
 `
 
@@ -52,6 +52,9 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.Session.TerminateOnPRMerge,
 		&i.Session.DiffBaseSha,
 		&i.Session.DiffBaseRef,
+		&i.Session.ReviewerHarness,
+		&i.Session.IsPinned,
+		&i.Session.PinnedAt,
 		&i.Session.RoleID,
 		&i.Session.RoleMapSchemaVersion,
 		&i.Session.RoleMapSha256,
@@ -69,7 +72,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 }
 
 const getSessionByPendingSourceHandle = `-- name: GetSessionByPendingSourceHandle :one
-SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.reviewer_harness, sessions.is_pinned, sessions.pinned_at, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions
 WHERE switch_pending_json != ''
   AND json_extract(switch_pending_json, '$.sourceRuntimeHandleId') = ?
@@ -112,6 +115,9 @@ func (q *Queries) GetSessionByPendingSourceHandle(ctx context.Context, switchPen
 		&i.Session.TerminateOnPRMerge,
 		&i.Session.DiffBaseSha,
 		&i.Session.DiffBaseRef,
+		&i.Session.ReviewerHarness,
+		&i.Session.IsPinned,
+		&i.Session.PinnedAt,
 		&i.Session.RoleID,
 		&i.Session.RoleMapSchemaVersion,
 		&i.Session.RoleMapSha256,
@@ -129,7 +135,7 @@ func (q *Queries) GetSessionByPendingSourceHandle(ctx context.Context, switchPen
 }
 
 const getSessionByRuntimeHandleID = `-- name: GetSessionByRuntimeHandleID :one
-SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.reviewer_harness, sessions.is_pinned, sessions.pinned_at, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions WHERE runtime_handle_id = ? LIMIT 1
 `
 
@@ -168,6 +174,9 @@ func (q *Queries) GetSessionByRuntimeHandleID(ctx context.Context, runtimeHandle
 		&i.Session.TerminateOnPRMerge,
 		&i.Session.DiffBaseSha,
 		&i.Session.DiffBaseRef,
+		&i.Session.ReviewerHarness,
+		&i.Session.IsPinned,
+		&i.Session.PinnedAt,
 		&i.Session.RoleID,
 		&i.Session.RoleMapSchemaVersion,
 		&i.Session.RoleMapSha256,
@@ -186,7 +195,7 @@ func (q *Queries) GetSessionByRuntimeHandleID(ctx context.Context, runtimeHandle
 
 const insertSession = `-- name: InsertSession :exec
 INSERT INTO sessions (
-    id, project_id, num, issue_id, kind, harness,
+    id, project_id, num, issue_id, kind, harness, reviewer_harness,
     role_id, role_map_schema_version, role_map_sha256, role_config_revision,
     template_artifact_id, template_sha256, resolved_model,
     resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash, display_name,
@@ -194,8 +203,8 @@ INSERT INTO sessions (
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
     runtime_launch_id, agent_session_id, prompt, switch_pending_json, pause_json,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation,
-    created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    created_at, updated_at, is_pinned, pinned_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertSessionParams struct {
@@ -205,6 +214,7 @@ type InsertSessionParams struct {
 	IssueID                 domain.IssueID
 	Kind                    domain.SessionKind
 	Harness                 domain.AgentHarness
+	ReviewerHarness         domain.ReviewerHarness
 	RoleID                  string
 	RoleMapSchemaVersion    int64
 	RoleMapSha256           string
@@ -237,6 +247,8 @@ type InsertSessionParams struct {
 	CleanupGeneration       int64
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
+	IsPinned                bool
+	PinnedAt                sql.NullTime
 }
 
 func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) error {
@@ -247,6 +259,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.IssueID,
 		arg.Kind,
 		arg.Harness,
+		arg.ReviewerHarness,
 		arg.RoleID,
 		arg.RoleMapSchemaVersion,
 		arg.RoleMapSha256,
@@ -279,12 +292,14 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.CleanupGeneration,
 		arg.CreatedAt,
 		arg.UpdatedAt,
+		arg.IsPinned,
+		arg.PinnedAt,
 	)
 	return err
 }
 
 const listAllSessions = `-- name: ListAllSessions :many
-SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.reviewer_harness, sessions.is_pinned, sessions.pinned_at, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions ORDER BY project_id, num
 `
 
@@ -328,6 +343,9 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.Session.TerminateOnPRMerge,
 			&i.Session.DiffBaseSha,
 			&i.Session.DiffBaseRef,
+			&i.Session.ReviewerHarness,
+			&i.Session.IsPinned,
+			&i.Session.PinnedAt,
 			&i.Session.RoleID,
 			&i.Session.RoleMapSchemaVersion,
 			&i.Session.RoleMapSha256,
@@ -355,7 +373,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 }
 
 const listSessionsByProject = `-- name: ListSessionsByProject :many
-SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.reviewer_harness, sessions.is_pinned, sessions.pinned_at, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions WHERE project_id = ? ORDER BY num
 `
 
@@ -399,6 +417,9 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 			&i.Session.TerminateOnPRMerge,
 			&i.Session.DiffBaseSha,
 			&i.Session.DiffBaseRef,
+			&i.Session.ReviewerHarness,
+			&i.Session.IsPinned,
+			&i.Session.PinnedAt,
 			&i.Session.RoleID,
 			&i.Session.RoleMapSchemaVersion,
 			&i.Session.RoleMapSha256,
@@ -478,6 +499,30 @@ func (q *Queries) SessionIsSeed(ctx context.Context, id domain.SessionID) (bool,
 	return is_seed, err
 }
 
+const setSessionPinned = `-- name: SetSessionPinned :execrows
+UPDATE sessions SET is_pinned = ?, pinned_at = ?, updated_at = ? WHERE id = ?
+`
+
+type SetSessionPinnedParams struct {
+	IsPinned  bool
+	PinnedAt  sql.NullTime
+	UpdatedAt time.Time
+	ID        domain.SessionID
+}
+
+func (q *Queries) SetSessionPinned(ctx context.Context, arg SetSessionPinnedParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionPinned,
+		arg.IsPinned,
+		arg.PinnedAt,
+		arg.UpdatedAt,
+		arg.ID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setSessionPreviewURL = `-- name: SetSessionPreviewURL :execrows
 UPDATE sessions SET preview_url = ?, preview_revision = preview_revision + 1, updated_at = ? WHERE id = ?
 `
@@ -493,6 +538,24 @@ type SetSessionPreviewURLParams struct {
 // trigger and the desktop browser panel re-navigates / refreshes.
 func (q *Queries) SetSessionPreviewURL(ctx context.Context, arg SetSessionPreviewURLParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, setSessionPreviewURL, arg.PreviewURL, arg.UpdatedAt, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const setSessionReviewerHarness = `-- name: SetSessionReviewerHarness :execrows
+UPDATE sessions SET reviewer_harness = ?, updated_at = ? WHERE id = ?
+`
+
+type SetSessionReviewerHarnessParams struct {
+	ReviewerHarness domain.ReviewerHarness
+	UpdatedAt       time.Time
+	ID              domain.SessionID
+}
+
+func (q *Queries) SetSessionReviewerHarness(ctx context.Context, arg SetSessionReviewerHarnessParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, setSessionReviewerHarness, arg.ReviewerHarness, arg.UpdatedAt, arg.ID)
 	if err != nil {
 		return 0, err
 	}
@@ -519,7 +582,7 @@ func (q *Queries) SetSessionTerminateOnPRMerge(ctx context.Context, arg SetSessi
 
 const updateSession = `-- name: UpdateSession :exec
 UPDATE sessions SET
-    issue_id = ?, kind = ?, harness = ?,
+    issue_id = ?, kind = ?, harness = ?, reviewer_harness = ?,
     role_id = ?, role_map_schema_version = ?, role_map_sha256 = ?, role_config_revision = ?,
     template_artifact_id = ?, template_sha256 = ?, resolved_model = ?,
     resolved_workspace_writes = ?, resolved_can_spawn = ?, spawn_capability_hash = ?, display_name = ?,
@@ -527,7 +590,7 @@ UPDATE sessions SET
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
     runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
-    cleanup_generation = ?, updated_at = ?
+    cleanup_generation = ?, updated_at = ?, is_pinned = ?, pinned_at = ?
 WHERE id = ?
 `
 
@@ -535,6 +598,7 @@ type UpdateSessionParams struct {
 	IssueID                 domain.IssueID
 	Kind                    domain.SessionKind
 	Harness                 domain.AgentHarness
+	ReviewerHarness         domain.ReviewerHarness
 	RoleID                  string
 	RoleMapSchemaVersion    int64
 	RoleMapSha256           string
@@ -565,6 +629,8 @@ type UpdateSessionParams struct {
 	TerminateOnPRMerge      bool
 	CleanupGeneration       int64
 	UpdatedAt               time.Time
+	IsPinned                bool
+	PinnedAt                sql.NullTime
 	ID                      domain.SessionID
 }
 
@@ -573,6 +639,7 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.IssueID,
 		arg.Kind,
 		arg.Harness,
+		arg.ReviewerHarness,
 		arg.RoleID,
 		arg.RoleMapSchemaVersion,
 		arg.RoleMapSha256,
@@ -603,6 +670,8 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.TerminateOnPRMerge,
 		arg.CleanupGeneration,
 		arg.UpdatedAt,
+		arg.IsPinned,
+		arg.PinnedAt,
 		arg.ID,
 	)
 	return err

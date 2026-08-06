@@ -270,6 +270,22 @@ func (f *fakeSessionService) ResumeSession(_ context.Context, id domain.SessionI
 	return domain.SessionRecord{ID: id}, nil
 }
 
+func (f *fakeSessionService) DelegateTask(_ context.Context, in sessionsvc.DelegateTaskInput) (sessionsvc.DelegateTaskOutcome, error) {
+	return sessionsvc.DelegateTaskOutcome{}, nil
+}
+
+func (f *fakeSessionService) SetReviewerHarness(_ context.Context, id domain.SessionID, _ domain.ReviewerHarness) (domain.Session, error) {
+	return domain.Session{SessionRecord: domain.SessionRecord{ID: id}}, nil
+}
+
+func (f *fakeSessionService) Pin(_ context.Context, id domain.SessionID) (domain.Session, error) {
+	return domain.Session{SessionRecord: domain.SessionRecord{ID: id}}, nil
+}
+
+func (f *fakeSessionService) Unpin(_ context.Context, id domain.SessionID) (domain.Session, error) {
+	return domain.Session{SessionRecord: domain.SessionRecord{ID: id}}, nil
+}
+
 func (f *fakeSessionService) ListPRs(_ context.Context, id domain.SessionID) ([]domain.PRFacts, error) {
 	if f.listPRErr != nil {
 		return nil, f.listPRErr

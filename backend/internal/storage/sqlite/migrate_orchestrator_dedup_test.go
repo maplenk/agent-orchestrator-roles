@@ -8,7 +8,7 @@ import (
 )
 
 // seedOrchestrator inserts a session row directly, bypassing the store so the
-// pre-0046 duplicate state can be reproduced.
+// pre-0057 duplicate state can be reproduced.
 func seedSession(t *testing.T, db *sql.DB, id, project string, num int, kind string, terminated bool, createdAt, workspace string) {
 	t.Helper()
 	term := 0
@@ -30,22 +30,23 @@ func seedSession(t *testing.T, db *sql.DB, id, project string, num int, kind str
 	}
 }
 
-// TestMigration0046ReconcilesDuplicateOrchestrators is the data-safety guard for
+// TestMigration0057ReconcilesDuplicateOrchestrators is the data-safety guard for
 // the one-active-orchestrator constraint. A pre-2B daemon could already hold two
 // active orchestrators per project (Restore and boot RestoreAll take no
 // ownership gate), and CREATE UNIQUE INDEX fails outright on that data —
 // wedging startup permanently, because goose records its version inside the
 // transaction it rolls back and sqlite.Open's error aborts daemon.Run. The
 // migration must therefore reconcile first, in the same transaction.
-func TestMigration0046ReconcilesDuplicateOrchestrators(t *testing.T) {
+func TestMigration0057ReconcilesDuplicateOrchestrators(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "ao.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	// Stop just before 0046: duplicates are still representable.
-	upTo(t, db, 45)
+	// Stop just before 0057 (the one-active-orchestrator migration): duplicates
+	// are still representable.
+	upTo(t, db, 56)
 
 	if _, err := db.Exec(`INSERT INTO projects (id, path, registered_at) VALUES ('mer','/repo/mer','2026-01-01'), ('other','/repo/other','2026-01-01')`); err != nil {
 		t.Fatalf("seed projects: %v", err)
@@ -72,7 +73,7 @@ func TestMigration0046ReconcilesDuplicateOrchestrators(t *testing.T) {
 		}
 	}
 
-	upTo(t, db, 46)
+	upTo(t, db, 57)
 
 	// 1. Exactly one active orchestrator survives per project, and it is the
 	//    deterministic newest — matching newestOrchestratorRecord in Go.
@@ -186,23 +187,23 @@ func TestMigration0046ReconcilesDuplicateOrchestrators(t *testing.T) {
 	}
 }
 
-// TestMigration0046IsANoOpWithoutDuplicates keeps the reconciliation from
+// TestMigration0057IsANoOpWithoutDuplicates keeps the reconciliation from
 // touching a healthy database.
-func TestMigration0046IsANoOpWithoutDuplicates(t *testing.T) {
+func TestMigration0057IsANoOpWithoutDuplicates(t *testing.T) {
 	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "ao.db")+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	upTo(t, db, 45)
+	upTo(t, db, 56)
 	if _, err := db.Exec(`INSERT INTO projects (id, path, registered_at) VALUES ('mer','/repo/mer','2026-01-01')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
 	seedSession(t, db, "mer-1", "mer", 1, "orchestrator", false, "2026-01-01", "/ws/mer/orchestrator")
 	seedSession(t, db, "mer-2", "mer", 2, "worker", false, "2026-01-02", "/ws/mer/mer-2")
 
-	upTo(t, db, 46)
+	upTo(t, db, 57)
 
 	for _, id := range []string{"mer-1", "mer-2"} {
 		var terminated bool
@@ -226,7 +227,7 @@ func TestMigration0046IsANoOpWithoutDuplicates(t *testing.T) {
 	}
 }
 
-// TestMigration0046QueueSurvivesSessionDeletion pins the deletion semantics
+// TestMigration0057QueueSurvivesSessionDeletion pins the deletion semantics
 // under foreign keys, which production enables (sqlite.Open sets
 // _pragma=foreign_keys(1)).
 //
@@ -235,7 +236,7 @@ func TestMigration0046IsANoOpWithoutDuplicates(t *testing.T) {
 // handle needed to carry it out — vanish silently, which is the exact opposite
 // of delete-on-authoritative-reap. The session must be undeletable until the
 // reaper has confirmed death and removed the queue row itself.
-func TestMigration0046QueueSurvivesSessionDeletion(t *testing.T) {
+func TestMigration0057QueueSurvivesSessionDeletion(t *testing.T) {
 	db, err := sql.Open("sqlite",
 		"file:"+filepath.Join(t.TempDir(), "ao.db")+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
@@ -243,7 +244,7 @@ func TestMigration0046QueueSurvivesSessionDeletion(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 
-	upTo(t, db, 45)
+	upTo(t, db, 56)
 	if _, err := db.Exec(`INSERT INTO projects (id, path, registered_at) VALUES ('mer','/repo/mer','2026-01-01')`); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
@@ -251,7 +252,7 @@ func TestMigration0046QueueSurvivesSessionDeletion(t *testing.T) {
 	seedSession(t, db, "mer-1", "mer", 1, "orchestrator", false, "2026-01-01", canonical)
 	seedSession(t, db, "mer-2", "mer", 2, "orchestrator", false, "2026-01-02", canonical) // survivor
 
-	upTo(t, db, 46)
+	upTo(t, db, 57)
 
 	// Guard the premise: foreign keys really are on for this connection.
 	var fk int

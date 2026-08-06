@@ -12,7 +12,7 @@ import (
 )
 
 // Boot restore is the last ungated path that can create a second active
-// orchestrator for a project. Migration 0046 reconciles rows that are ALREADY
+// orchestrator for a project. Migration 0057 reconciles rows that are ALREADY
 // duplicated; these tests cover the loop that could produce them — and the
 // order matters, because workspace.Restore adopts the shared canonical worktree
 // before any row flips, so the damage lands before the unique index is reached.
@@ -68,7 +68,7 @@ func activeIDs(st *fakeStore, kind domain.SessionKind) []domain.SessionID {
 // TestRestoreAll_RestoresOnlyTheSurvivingOrchestrator is the core regression.
 // Two terminated orchestrators both carrying markers would each have been
 // restored, giving one project two live orchestrators sharing one worktree —
-// the exact state migration 0046 exists to clean up after.
+// the exact state migration 0057 exists to clean up after.
 func TestRestoreAll_RestoresOnlyTheSurvivingOrchestrator(t *testing.T) {
 	m, st := restoreAllHarness(t)
 	older := time.Now().Add(-2 * time.Hour)
@@ -84,7 +84,7 @@ func TestRestoreAll_RestoresOnlyTheSurvivingOrchestrator(t *testing.T) {
 	if len(live) != 1 {
 		t.Fatalf("live orchestrators = %v, want exactly 1: two would share the canonical worktree", live)
 	}
-	// Same rule as newestOrchestratorRecord and migration 0046: newest wins.
+	// Same rule as newestOrchestratorRecord and migration 0057: newest wins.
 	if live[0] != "mer-2" {
 		t.Errorf("survivor = %s, want mer-2 (newest CreatedAt)", live[0])
 	}

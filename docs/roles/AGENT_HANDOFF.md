@@ -105,11 +105,11 @@ backend/internal/
   datadirlock/            # exclusive AO_DATA_DIR lease (Unix flock / Win LockFileEx)
   daemon/daemon.go        # Acquire lease BEFORE sqlite open / reconcile
   storage/sqlite/migrations/
-    0042_session_role_fields.sql
-    0043_session_spawn_capability_hash.sql
-    0044_lifecycle_ledger.sql
-    0045_session_switch_pending.sql
-    # next free: 0046+
+    0053_session_role_fields.sql
+    0054_session_spawn_capability_hash.sql
+    0055_lifecycle_ledger.sql
+    0056_session_switch_pending.sql
+    # next free: 0061+  (fork migrations renumbered to 0053-0060; upstream reached 0052)
 ```
 
 Go module path remains `github.com/aoagents/agent-orchestrator/...` (fork does not re-module for product name).
@@ -145,8 +145,8 @@ Source: `backend/internal/roles/capabilities/capabilities.go`
 - RoleMap / RoleBinding / RoleExecutionPolicy / FailoverConfig in domain
 - ProjectConfig.roleMap validate + CLI/API round-trip
 - Host-authoritative `ao spawn --role`; strict reject roleless workers / free-form harness with role
-- Template loader + path containment; CAS template artifacts (0042)
-- Session-scoped spawn capability token (0043); canSpawn false → 403
+- Template loader + path containment; CAS template artifacts (0053)
+- Session-scoped spawn capability token (0054); canSpawn false → 403
 - Operator transport: desktop headers, LAN authctx, CLI rules; `AO_MANAGED_SESSION` (not bare `AO_DATA_DIR` spoof)
 - Codex `read_only_enforced`; Claude intentionally false
 - Capability registry for spawn/RO (switch later promoted)
@@ -157,8 +157,8 @@ Source: `backend/internal/roles/capabilities/capabilities.go`
 |-------|--------|----------|
 | Manager saga | Done | `session_manager/switch.go` |
 | SemanticHandoffV1 + ObservedWorkspaceV1 + compiler | Done | `domain/handoff.go`, `handoff/compile.go` |
-| Lifecycle ledger 0044 | Done | phases: requested → pre_stop → post_stop → target_ack (+ failed) |
-| SwitchPending 0045 | Done | promote durable harness only after `target_ack` |
+| Lifecycle ledger 0055 | Done | phases: requested → pre_stop → post_stop → target_ack (+ failed) |
+| SwitchPending 0056 | Done | promote durable harness only after `target_ack` |
 | Generation ownership | Done | ledger gen == `RuntimeLaunchID` via `ForceLaunchID` |
 | Input fences | Done | sessionguard + terminal `InputGate`; handle-indexed lookups |
 | Recover incomplete post_stop | Done | boot reconcile path |
@@ -200,7 +200,7 @@ These were real P1s that landed fixes. Treat as permanent design constraints.
 
 - **Single** `ForceLaunchID` through supervise/relaunch; ledger generation **must equal** `RuntimeLaunchID`.
 - Do **not** promote durable session harness/model before durable **`target_ack`**.
-- Pending: `switch_pending_json` (0045) holds target + payload until ack.
+- Pending: `switch_pending_json` (0056) holds target + payload until ack.
 - Stable ledger IDs: `{sessionID}:{generationID}:{phase}` with skip-if-exists.
 
 ### 5.2 Pre-stop vs post-stop
@@ -425,7 +425,7 @@ Suggested first steps for 2B:
 1. **Branch:** work on `roles/multi-sub-v1`; push to `origin` after accepted lands (human often expects push).
 2. **Commits:** conventional-ish prefixes used historically: `feat:`, `fix:`, `docs:`. Prefer **small, reviewable** CLs over mega-commits.
 3. **Docs sync:** update `REMAINING_PLAN.md` (snapshot, tables, next action, checklist) on every phase/slice land.
-4. **Migrations:** never edit merged SQL; next numbers **0046+**. Avoid colliding with upstream migration IDs (`upstream` remote).
+4. **Migrations:** never edit merged SQL; next number **0061+**. The fork's 0042-0049 were renumbered to **0053-0060** because upstream had taken 0042/0043/0044/0047 and reached 0052 — check `git ls-tree upstream/main .../migrations/` before picking one.
 5. **Capability promote:** separate CL; dogfood first.
 6. **Review severity:** human/Codex P1s block; P2 often block; P3 doc cleanup can ride with next related land (as with promotion).
 7. **Tests before claim:** run focused packages, not only compile:
@@ -499,7 +499,7 @@ High-level protocol used successfully:
 | Switch targets | `backend/internal/domain/switch_targets.go` |
 | Handoff types | `backend/internal/domain/handoff.go` |
 | Lifecycle phases | `backend/internal/domain/lifecycle_ledger.go` |
-| Migrations | `backend/internal/storage/sqlite/migrations/0042–0045_*.sql` |
+| Migrations | `backend/internal/storage/sqlite/migrations/0053–0060_*.sql` |
 
 ---
 
