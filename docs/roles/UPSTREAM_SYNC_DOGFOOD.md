@@ -223,20 +223,57 @@ reap_queue=0  replacement_intents=0  pending=0  paused=0  failed_phases=0
 preserved ~/.ao/dev/data/ao.db: md5 unchanged
 ```
 
-## Still not covered — one blocker remains open
+## Terminal/tmux input suppression during a held switch — live over `/mux`
 
-**Terminal/tmux keystroke suppression during a held switch was NOT exercised
-live.** `AllowTerminalInput` is the gate (wired at `daemon.go` via
-`termMgr.SetInputGate`), and it resolves a terminal three ways — session id,
-live runtime handle, and `json_extract` on the pending pin's
-`sourceRuntimeHandleId`, which is the case that matters after the source is
-destroyed. But terminal input arrives over a **websocket**, not an HTTP route,
-so exercising it end-to-end needs a websocket client this run did not build.
-The gate has unit coverage; what is missing is a live keystroke against a
-daemon holding a real pending pin.
+The load-bearing case is the **third** lookup in `AllowTerminalInput`: after the
+source runtime is destroyed the session's ordinary `runtime_handle_id` is empty,
+and the only way back to it is `json_extract(switch_pending_json,
+'$.sourceRuntimeHandleId')`. So the setup records a **real** tmux pane there and
+nowhere else:
 
-This is the one remaining blocker on the complete gate. It should be closed
-before `roles/upstream-sync` merges back.
+```
+db: runtime_handle_id=(empty)   pending.sourceRuntimeHandleId=gatepane
+```
 
-Also unexercised, and deliberately so: live structured limit detection (3A-2b,
-unbuilt).
+A disposable `ws` client attached to `ws://127.0.0.1:3011/mux`, opened the
+terminal, and sent a command whose effect would be observable on disk
+(`echo <marker> > /tmp/ws_gate_touch.txt`).
+
+**Pending held:**
+
+```json
+{"phase":"PENDING_HELD","frames":[
+  {"type":"resize","id":"gatepane"},
+  {"type":"opened","id":"gatepane"},
+  {"type":"error","id":"gatepane","error":"input blocked: switch in progress"}]}
+```
+
+Viewing was allowed and only the `data` frame was rejected, which is the
+intended split. Nothing leaked:
+
+```
+filesystem side effect:            absent (file never created)
+marker in pane buffer:             0
+marker in 200 lines of scrollback: 0
+```
+
+**Control — pending cleared, same WebSocket path, same marker:**
+
+```json
+{"phase":"PENDING_CLEARED","frames":[
+  {"type":"resize","id":"gatepane"},
+  {"type":"opened","id":"gatepane"}]}
+filesystem side effect: PRESENT — GATEMARKER-…
+```
+
+No `error` frame, and the keystrokes reached the pane. Noted for precision: the
+control also restored `runtime_handle_id`, so it resolves by the ordinary
+handle. That is deliberate — the *blocked* phase is the one that had to resolve
+through the pending JSON alone, and it did.
+
+Test pane and artifacts removed afterwards.
+
+## Still unexercised, deliberately
+
+Live structured limit detection — 3A-2b, unbuilt. `limit_detection_supported`
+remains false for every harness.
