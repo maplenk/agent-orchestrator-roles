@@ -31,11 +31,14 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 2B-1 (orchestrator in-place fresh) | **Landed + live-dogfooded** (`PHASE2B1_LIVE_DOGFOOD.md`) — first *product-visible* 2B behaviour. `FreshOrchestratorConversation` gates the project **before** the switch fence, keeps session id/worktree/branch, and compiles `ObservedOrchestratorV1` (the project's live+terminated worker fleet, read from AO's session table) into the handoff. Cross-harness explicitly refused (2B-3) |
 | Phase 2B-2 (replacement recoverability) | **Landed** — migration 0047 persists replacement intent **before** retirement, so a zero-owner interval is never terminal; boot recovery re-drives stranded projects under the project gate. `finalizeRetirement` reordered so a crash leaves the recoverable residue, and both residues are repaired at boot |
 | Phase 2B-3 (cross-harness orchestrator switch) | **BLOCKED / DEFERRED on 1-F (Claude RO)** — not merely unstarted. A strict orchestrator must be `workspaceWrites:false`, which requires `read_only_enforced`, which only Codex advertises. Until Claude RO lands this slice cannot be built for strict projects, and it is deliberately refused for non-strict ones too rather than ship a capability strict projects can never have. **Phase 2B is therefore NOT complete** |
-| Phase 3A / 3B | **Not started** |
-| **CI merge gate — `golangci-lint`** | **NOT clean: 40 findings.** `.github/workflows/go.yml` blocks on the full ruleset at zero findings ("any new issue fails CI rather than being grandfathered"), so the branch is unmergeable until this is cleared. **Pre-existing, not 2B debt** — measured 42 at `f091af2e` versus 40 at `e38ae32d`, i.e. the 2B delta *removed* two. Concentrated in fork-only files (`session_manager/switch.go` 12, `manager.go` 4, `roles/*` 7, `domain/rolemap.go` 2). Mostly mechanical: errorlint 18, goimports 9, dupl 5 |
+| Phase 3A-1 (durable pause primitive) | **Landed** @ `506467f5` — migration 0049 pins `domain.SessionPause`; `Validate` ties `usage_limit` to a structured envelope (§7 rule 1, enforced on encode *and* decode); `sessionguard` fences every AO-initiated pane write at the single choke point (§7 rule 2). **No scheduler, no timer, no auto-resume**; `RetryAfter` is recorded but never scheduled against. Pause/resume ledger kinds recorded. **No operator surface yet** — nothing calls `PauseSession` |
+| Phase 3A-2 (structured limit detection + surface) | **Next** — per-harness structured envelopes, service/API/CLI, and only then the registry promotion |
+| Phase 3B | **Not started** |
+| **CI merge gate — `gofmt`** | **CLEARED** @ `57067f4c`. `go.yml`'s build-test job runs `gofmt -l .` and fails on any output; nine files had never been gofmt'd (struct-tag alignment only), so that step failed *before* the tests ran. Fixed mechanically; also removed all 9 goimports lint findings |
+| **CI merge gate — `golangci-lint`** | **NOT clean: 31 findings** (was 40 before the gofmt pass). `go.yml` blocks on the full ruleset at zero findings ("any new issue fails CI rather than being grandfathered"), so the branch is unmergeable until this is cleared. **Pre-existing, not roles-slice debt** — measured 42 at `f091af2e` versus 40 at `e38ae32d`; both the 2B delta and 3A-1 *reduced* the count and added none. Concentrated in fork-only files (`session_manager/switch.go` 12, `manager.go` 4, `roles/*` 4, `role_resolve*.go` 3). Remainder is not mechanical: errorlint 18, dupl 5, errcheck 2, revive 2, wastedassign 2, nilerr 1, staticcheck 1 |
 | **CI merge gate — tests** | `npm run lint` runs `go test ./...` first, which has intermittently failed before reaching lint on adapter auth tests (`fake`, `kilocode`, `opencode` — context deadlines). **Flaky, not consistently failing**: those three packages passed cleanly on a targeted re-run, so treat them as timing-sensitive under full-suite load, not broken. Frontend `vitest` has 6 **reproducible** pre-existing failures (5 in `src/landing/scripts/generate-markdown-twins.test.mjs`, 1 in `src/renderer/lib/api-client.test.ts`), confirmed on a stashed tree — unrelated to the roles work, and blocking |
 
-**Next eng (critical path):** **Phase 3A** (structured limit detection → durable pause → zero automatic send/restart). **2B-3** (cross-harness orchestrator switch) stays blocked on **Phase 1-F / Claude RO**, which remains parallel; 2B-1 deliberately refuses cross-harness today.
+**Next eng (critical path):** **Phase 3A-2** — structured limit *detection* per harness plus the operator surface, on top of the 3A-1 pause primitive. **2B-3** (cross-harness orchestrator switch) stays blocked on **Phase 1-F / Claude RO**, which remains parallel; 2B-1 deliberately refuses cross-harness today.
 
 ---
 
@@ -172,12 +175,20 @@ cross-harness orchestrator switch on strict projects (2B-3).
 
 ### Phase 3A — Limits + durable pause (~4–6 working days)
 
-| Task | Detail |
-|------|--------|
-| Structured/reviewed limit envelopes only | Never free-text “I hit a limit” |
-| Durable pause | Zero automatic send/restart |
-| Ledger events | pause / resume |
-| Registry | Promote `limit_detection_supported` only after structured-limit tests |
+| Task | Detail | Status |
+|------|--------|--------|
+| Structured/reviewed limit envelopes only | Never free-text “I hit a limit” | **Rule enforced** (3A-1): closed reason set, `usage_limit` requires `detectedBy=structured_envelope` + a non-empty envelope, checked on encode and decode. **Producing** the envelopes per harness is 3A-2 |
+| Durable pause | Zero automatic send/restart | **Done** (3A-1): migration 0049 pin, fenced in `sessionguard` by write origin. No scheduler/timer/auto-resume exists; `RetryAfter` is advisory only |
+| Ledger events | pause / resume | **Done** (3A-1): idempotent per incident, written *before* the pin |
+| Operator/service surface | pause + resume through service/API/CLI | **3A-2** — the manager methods have no caller yet |
+| Registry | Promote `limit_detection_supported` only after structured-limit tests | **Not started; stays false** |
+
+**3A-1 design decisions worth keeping:** the fence keys on write *origin*, not
+method, because the send-confirm Enter re-send borrows `Deliver`'s activity
+policy while being AO-initiated. AO-initiated writes are refused; the **user's**
+sends are not (they can type into the pane anyway, so fencing adds friction, not
+safety), and **host-owned launch injection is not** (a 3B failover must be able
+to deliver its prompt, or pause blocks its own remedy).
 
 ---
 
