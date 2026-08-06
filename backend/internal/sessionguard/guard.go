@@ -57,6 +57,10 @@ const (
 	// SuppressedSwitchPending means a worker switch/fresh has stopped the source
 	// and not yet durable target_ack; no generation owns input for pane writes.
 	SuppressedSwitchPending
+	// SuppressedPaused means the session is durably paused (Phase 3A). It
+	// suppresses AO-INITIATED writes only: a paused session is one AO must stop
+	// acting on by itself, not one the user is locked out of.
+	SuppressedPaused
 )
 
 // String names the outcome for logs.
@@ -76,10 +80,37 @@ func (o Outcome) String() string {
 		return "suppressed_busy"
 	case SuppressedSwitchPending:
 		return "suppressed_switch_pending"
+	case SuppressedPaused:
+		return "suppressed_paused"
 	default:
 		return "suppressed_unknown"
 	}
 }
+
+// writeOrigin says WHO initiated a pane write. It is deliberately independent
+// of the activity policy, because two different fences read it:
+//
+//   - the switch fence, which host-owned launch injection must cross so a
+//     pending target receives its first prompt before durable target_ack; and
+//   - the pause fence, which stops AO acting on its own initiative.
+//
+// Origin cannot be inferred from the method: the send-confirm Enter re-send
+// uses Deliver's activity policy (an idle prompt is exactly where its Enter
+// belongs) but is AO-initiated, so it is automatic for pause purposes.
+type writeOrigin int
+
+const (
+	// originUser is a write a human asked for.
+	originUser writeOrigin = iota
+	// originAuto is a write AO decided to make on its own — lifecycle nudges,
+	// coordination messages, and the send-confirm Enter re-send.
+	originAuto
+	// originHost is AO-owned launch injection (the after-start handoff prompt).
+	// It crosses the switch fence, and it crosses the pause fence too: a Phase
+	// 3B failover target must be able to receive its prompt, and refusing here
+	// would make pause block its own remedy.
+	originHost
+)
 
 // Guard is the guarded pane-write primitive shared by the session manager and
 // lifecycle. It takes no locks of its own, so callers may hold theirs across a
@@ -123,7 +154,18 @@ func (g *Guard) Send(ctx context.Context, id domain.SessionID, msg string) error
 // sitting at an idle prompt is exactly where a user message (or the Enter that
 // submits its unsent draft) belongs.
 func (g *Guard) Deliver(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
-	return g.send(ctx, id, msg, false, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, originUser, func(rec domain.SessionRecord) (Outcome, bool) {
+		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
+	})
+}
+
+// DeliverAuto is Deliver's policy under AO's own initiative: same activity
+// rules (an idle prompt is a legitimate target), but subject to the pause
+// fence. The send-confirm Enter re-send uses it — AO, not the user, decides to
+// press Enter again, and "durable pause, zero automatic send" has to cover a
+// re-send just as much as a nudge.
+func (g *Guard) DeliverAuto(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
+	return g.send(ctx, id, msg, originAuto, func(rec domain.SessionRecord) (Outcome, bool) {
 		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
 	})
 }
@@ -133,7 +175,7 @@ func (g *Guard) Deliver(ctx context.Context, id domain.SessionID, msg string) (O
 // SwitchPending is set so the target can receive its first host prompt before
 // durable target_ack promotes ownership for user input.
 func (g *Guard) DeliverHost(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
-	return g.send(ctx, id, msg, true, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, originHost, func(rec domain.SessionRecord) (Outcome, bool) {
 		return SuppressedAwaitingUser, rec.Activity.State == domain.ActivityBlocked
 	})
 }
@@ -143,7 +185,7 @@ func (g *Guard) DeliverHost(ctx context.Context, id domain.SessionID, msg string
 // decision or waiting at the prompt — because an automated paste+Enter there
 // either answers a dialog or submits text the user never saw.
 func (g *Guard) Nudge(ctx context.Context, id domain.SessionID, msg string) (Outcome, error) {
-	return g.send(ctx, id, msg, false, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, originAuto, func(rec domain.SessionRecord) (Outcome, bool) {
 		return SuppressedAwaitingUser, rec.Activity.State.NeedsInput()
 	})
 }
@@ -156,7 +198,7 @@ func (g *Guard) Nudge(ctx context.Context, id domain.SessionID, msg string) (Out
 // predicate is treated as "cannot steer", so an unknown harness never takes an
 // unsolicited write during a live turn.
 func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg string, steersActiveTurn func(domain.AgentHarness) bool) (Outcome, error) {
-	return g.send(ctx, id, msg, false, func(rec domain.SessionRecord) (Outcome, bool) {
+	return g.send(ctx, id, msg, originAuto, func(rec domain.SessionRecord) (Outcome, bool) {
 		if rec.Activity.State.NeedsInput() {
 			return SuppressedAwaitingUser, true
 		}
@@ -173,7 +215,7 @@ func (g *Guard) NudgeCoordination(ctx context.Context, id domain.SessionID, msg 
 // appear mid-paste — but the just-in-time read is the strongest guarantee
 // available without scraping the terminal. Fail closed: a store error
 // suppresses the write rather than pressing Enter on an unknown state.
-func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, hostOwned bool, refuse func(domain.SessionRecord) (Outcome, bool)) (Outcome, error) {
+func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, origin writeOrigin, refuse func(domain.SessionRecord) (Outcome, bool)) (Outcome, error) {
 	rec, ok, err := g.store.GetSession(ctx, id)
 	if err != nil {
 		return SuppressedUnknown, fmt.Errorf("guard %s: read session: %w", id, err)
@@ -188,7 +230,18 @@ func (g *Guard) send(ctx context.Context, id domain.SessionID, msg string, hostO
 	}
 	// User/lifecycle input is gated until durable target_ack; host-owned after-start
 	// injection may proceed so the pending target receives its first prompt.
-	if !hostOwned && rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
+	// Durable pause (Phase 3A). Checked BEFORE the exited/activity policies on
+	// purpose: a session that hit a usage limit very often has an exited or
+	// blocked agent too, and reporting "agent_exited" for a paused session would
+	// hide the reason a human has to act on. Only AO-initiated writes are
+	// refused — see writeOrigin.
+	if origin == originAuto && rec.Metadata.Pause != nil {
+		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "paused",
+			"pauseReason", string(rec.Metadata.Pause.Reason),
+			"incident", rec.Metadata.Pause.IncidentID)
+		return SuppressedPaused, nil
+	}
+	if origin != originHost && rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
 		g.logger.Info("sessionguard: write suppressed", "sessionID", id, "reason", "switch_pending",
 			"generation", rec.Metadata.SwitchPending.GenerationID)
 		return SuppressedSwitchPending, nil

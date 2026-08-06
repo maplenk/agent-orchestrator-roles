@@ -28,7 +28,11 @@ func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (do
 		return domain.SessionRecord{}, fmt.Errorf("next session num for %s: %w", rec.ProjectID, err)
 	}
 	rec.ID = domain.SessionID(fmt.Sprintf("%s-%d", rec.ProjectID, num))
-	if err := s.qw.InsertSession(ctx, recordToInsert(rec, num)); err != nil {
+	params, err := recordToInsert(rec, num)
+	if err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("insert session %s: %w", rec.ID, err)
+	}
+	if err := s.qw.InsertSession(ctx, params); err != nil {
 		if isActiveOrchestratorConflict(err) {
 			return domain.SessionRecord{}, fmt.Errorf("insert session for project %s: %w",
 				rec.ProjectID, domain.ErrActiveOrchestratorExists)
@@ -49,7 +53,11 @@ func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (do
 func (s *Store) UpdateSession(ctx context.Context, rec domain.SessionRecord) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	if err := s.qw.UpdateSession(ctx, recordToUpdate(rec)); err != nil {
+	params, err := recordToUpdate(rec)
+	if err != nil {
+		return fmt.Errorf("update session %s: %w", rec.ID, err)
+	}
+	if err := s.qw.UpdateSession(ctx, params); err != nil {
 		if isActiveOrchestratorConflict(err) {
 			return fmt.Errorf("update session %s: %w", rec.ID, domain.ErrActiveOrchestratorExists)
 		}
@@ -319,6 +327,7 @@ func sessionFromGetRow(row gen.GetSessionRow) gen.Session {
 		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
 		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
 		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		PauseJson: row.PauseJson,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
 		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
 		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
@@ -339,6 +348,7 @@ func sessionFromRuntimeHandleRow(row gen.GetSessionByRuntimeHandleIDRow) gen.Ses
 		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
 		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
 		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		PauseJson: row.PauseJson,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
 		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
 		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
@@ -359,6 +369,7 @@ func sessionFromPendingSourceHandleRow(row gen.GetSessionByPendingSourceHandleRo
 		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
 		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
 		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		PauseJson: row.PauseJson,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
 		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
 		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
@@ -379,6 +390,7 @@ func sessionFromProjectListRow(row gen.ListSessionsByProjectRow) gen.Session {
 		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
 		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
 		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		PauseJson: row.PauseJson,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
 		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
 		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
@@ -399,6 +411,7 @@ func sessionFromAllListRow(row gen.ListAllSessionsRow) gen.Session {
 		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
 		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
 		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
+		PauseJson: row.PauseJson,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
 		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
 		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
@@ -418,6 +431,10 @@ func rowToRecord(row gen.Session) (domain.SessionRecord, error) {
 	// role_id) would make restore treat corrupt rows as legacy.
 	role := roleFromSessionRow(row)
 	pending, err := decodeSwitchPending(row.SwitchPendingJson)
+	if err != nil {
+		return domain.SessionRecord{}, err
+	}
+	pause, err := decodePause(row.PauseJson)
 	if err != nil {
 		return domain.SessionRecord{}, err
 	}
@@ -450,6 +467,7 @@ func rowToRecord(row gen.Session) (domain.SessionRecord, error) {
 			PreviewRevision:     row.PreviewRevision,
 			Role:                role,
 			SwitchPending:       pending,
+			Pause:               pause,
 			SpawnCapabilityHash: row.SpawnCapabilityHash,
 		},
 		CleanupGeneration: row.CleanupGeneration,
@@ -467,6 +485,43 @@ func encodeSwitchPending(p *domain.SwitchPending) string {
 		return ""
 	}
 	return string(b)
+}
+
+// encodePause serialises the durable pause pin. Unlike encodeSwitchPending it
+// cannot swallow a marshal failure: dropping the pin silently would un-pause a
+// session, re-opening every automatic write path this pin exists to close. A
+// pause that cannot be encoded is a programming error, so it is reported.
+func encodePause(p *domain.SessionPause) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	if err := p.Validate(); err != nil {
+		return "", fmt.Errorf("encode pause: %w", err)
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("encode pause: %w", err)
+	}
+	return string(b), nil
+}
+
+// decodePause returns (nil, nil) for empty, a pause pointer for valid JSON, or
+// an error for malformed durable state. Corrupt JSON must NOT read as "not
+// paused": that is the one failure mode that turns unreadable state back into
+// automatic sends. Callers fail closed on the error instead.
+func decodePause(raw string) (*domain.SessionPause, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" || raw == "null" {
+		return nil, nil
+	}
+	var p domain.SessionPause
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		return nil, fmt.Errorf("corrupt pause_json: %w", err)
+	}
+	if err := p.Validate(); err != nil {
+		return nil, fmt.Errorf("corrupt pause_json: %w", err)
+	}
+	return &p, nil
 }
 
 // decodeSwitchPending returns (nil, nil) for empty, a pending pointer for valid
@@ -487,7 +542,11 @@ func decodeSwitchPending(raw string) (*domain.SwitchPending, error) {
 	return &p, nil
 }
 
-func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams {
+func recordToInsert(rec domain.SessionRecord, num int64) (gen.InsertSessionParams, error) {
+	pause, err := encodePause(rec.Metadata.Pause)
+	if err != nil {
+		return gen.InsertSessionParams{}, err
+	}
 	activity := normalActivity(rec.Activity, rec.CreatedAt)
 	role := rec.Metadata.Role
 	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
@@ -523,16 +582,21 @@ func recordToInsert(rec domain.SessionRecord, num int64) gen.InsertSessionParams
 		AgentSessionID:          rec.Metadata.AgentSessionID,
 		Prompt:                  rec.Metadata.Prompt,
 		SwitchPendingJson:       encodeSwitchPending(rec.Metadata.SwitchPending),
+		PauseJson:               pause,
 		PreviewURL:              rec.Metadata.PreviewURL,
 		PreviewRevision:         rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge:      rec.TerminateOnPRMerge,
 		CleanupGeneration:       rec.CleanupGeneration,
 		CreatedAt:               rec.CreatedAt,
 		UpdatedAt:               rec.UpdatedAt,
-	}
+	}, nil
 }
 
-func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
+func recordToUpdate(rec domain.SessionRecord) (gen.UpdateSessionParams, error) {
+	pause, err := encodePause(rec.Metadata.Pause)
+	if err != nil {
+		return gen.UpdateSessionParams{}, err
+	}
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
 	role := rec.Metadata.Role
 	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
@@ -566,12 +630,13 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		AgentSessionID:          rec.Metadata.AgentSessionID,
 		Prompt:                  rec.Metadata.Prompt,
 		SwitchPendingJson:       encodeSwitchPending(rec.Metadata.SwitchPending),
+		PauseJson:               pause,
 		PreviewURL:              rec.Metadata.PreviewURL,
 		PreviewRevision:         rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge:      rec.TerminateOnPRMerge,
 		CleanupGeneration:       rec.CleanupGeneration,
 		UpdatedAt:               rec.UpdatedAt,
-	}
+	}, nil
 }
 
 // roleFromSessionRow maps sessions role columns to domain.SessionRoleBinding.

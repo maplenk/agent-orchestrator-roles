@@ -59,6 +59,9 @@ type fakeStore struct {
 	// failLedgerPhase, when non-empty, makes AppendLifecycleLedger fail for that phase.
 	failLedgerPhase domain.LifecycleLedgerPhase
 	appendLedgerErr error
+	// ledgerAlwaysErr fails every append regardless of phase. Pause/resume rows
+	// carry no phase, so failLedgerPhase alone cannot reach them.
+	ledgerAlwaysErr bool
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
 	// worktreeListErr / worktreeDeleteErr fail the marker read or delete for
@@ -93,6 +96,12 @@ func newFakeStore() *fakeStore {
 	}
 }
 func (f *fakeStore) AppendLifecycleLedger(_ context.Context, rec domain.LifecycleLedgerRecord) error {
+	if f.ledgerAlwaysErr {
+		if f.appendLedgerErr != nil {
+			return f.appendLedgerErr
+		}
+		return errors.New("injected ledger append failure")
+	}
 	if f.failLedgerPhase != "" && rec.Phase == f.failLedgerPhase {
 		if f.appendLedgerErr != nil {
 			return f.appendLedgerErr

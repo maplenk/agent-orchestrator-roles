@@ -52,6 +52,26 @@ type Notification struct {
 	ResolvedAt sql.NullTime
 }
 
+type OrchestratorReapQueue struct {
+	SessionID       string
+	ProjectID       string
+	RuntimeHandleID string
+	RuntimeLaunchID string
+	WorkspacePath   string
+	QueuedAt        time.Time
+	LastAttemptAt   sql.NullTime
+	AttemptCount    int64
+}
+
+type OrchestratorReplacementIntent struct {
+	ProjectID        string
+	RetiredSessionID string
+	RequestedAt      time.Time
+	AttemptCount     int64
+	LastAttemptAt    sql.NullTime
+	LastError        string
+}
+
 type PR struct {
 	URL                      string
 	SessionID                domain.SessionID
@@ -219,6 +239,7 @@ type Session struct {
 	ResolvedCanSpawn        int64
 	SpawnCapabilityHash     string
 	SwitchPendingJson       string
+	PauseJson               string
 }
 
 type SessionCleanupFact struct {

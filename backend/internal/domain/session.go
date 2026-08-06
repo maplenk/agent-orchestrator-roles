@@ -70,6 +70,11 @@ type SessionMetadata struct {
 	// gates session input (sessionguard).
 	SwitchPending *SwitchPending `json:"switchPending,omitempty"`
 
+	// Pause is the durable pause pin (Phase 3A). Non-nil gates every
+	// AO-initiated pane write in sessionguard and is cleared only by an
+	// explicit resume.
+	Pause *SessionPause `json:"pause,omitempty"`
+
 	// SpawnCapabilityHash is SHA-256 hex of the random per-session spawn
 	// capability. The plaintext token is never stored — only injected as
 	// AO_SPAWN_CAPABILITY for the owning process.

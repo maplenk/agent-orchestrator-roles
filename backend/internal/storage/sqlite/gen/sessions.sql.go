@@ -16,7 +16,7 @@ import (
 const getSession = `-- name: GetSession :one
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -42,6 +42,7 @@ type GetSessionRow struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	DisplayName             string
@@ -85,6 +86,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 		&i.AgentSessionID,
 		&i.Prompt,
 		&i.SwitchPendingJson,
+		&i.PauseJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisplayName,
@@ -114,7 +116,7 @@ func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessi
 const getSessionByPendingSourceHandle = `-- name: GetSessionByPendingSourceHandle :one
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -143,6 +145,7 @@ type GetSessionByPendingSourceHandleRow struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	DisplayName             string
@@ -188,6 +191,7 @@ func (q *Queries) GetSessionByPendingSourceHandle(ctx context.Context, switchPen
 		&i.AgentSessionID,
 		&i.Prompt,
 		&i.SwitchPendingJson,
+		&i.PauseJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisplayName,
@@ -217,7 +221,7 @@ func (q *Queries) GetSessionByPendingSourceHandle(ctx context.Context, switchPen
 const getSessionByRuntimeHandleID = `-- name: GetSessionByRuntimeHandleID :one
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -243,6 +247,7 @@ type GetSessionByRuntimeHandleIDRow struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	DisplayName             string
@@ -287,6 +292,7 @@ func (q *Queries) GetSessionByRuntimeHandleID(ctx context.Context, runtimeHandle
 		&i.AgentSessionID,
 		&i.Prompt,
 		&i.SwitchPendingJson,
+		&i.PauseJson,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DisplayName,
@@ -321,10 +327,10 @@ INSERT INTO sessions (
     resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash, display_name,
     activity_state, activity_last_at, first_signal_at, is_terminated,
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
-    runtime_launch_id, agent_session_id, prompt, switch_pending_json,
+    runtime_launch_id, agent_session_id, prompt, switch_pending_json, pause_json,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation,
     created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 
 type InsertSessionParams struct {
@@ -359,6 +365,7 @@ type InsertSessionParams struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	PreviewURL              string
 	PreviewRevision         int64
 	TerminateOnPRMerge      bool
@@ -400,6 +407,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.AgentSessionID,
 		arg.Prompt,
 		arg.SwitchPendingJson,
+		arg.PauseJson,
 		arg.PreviewURL,
 		arg.PreviewRevision,
 		arg.TerminateOnPRMerge,
@@ -413,7 +421,7 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 const listAllSessions = `-- name: ListAllSessions :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -439,6 +447,7 @@ type ListAllSessionsRow struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	DisplayName             string
@@ -488,6 +497,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 			&i.AgentSessionID,
 			&i.Prompt,
 			&i.SwitchPendingJson,
+			&i.PauseJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DisplayName,
@@ -527,7 +537,7 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 const listSessionsByProject = `-- name: ListSessionsByProject :many
 SELECT id, project_id, num, issue_id, kind, harness,
     activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json,
+    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
     created_at, updated_at, display_name, first_signal_at, preview_url,
     preview_revision, cleanup_generation, runtime_launch_id,
     workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
@@ -553,6 +563,7 @@ type ListSessionsByProjectRow struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	DisplayName             string
@@ -602,6 +613,7 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 			&i.AgentSessionID,
 			&i.Prompt,
 			&i.SwitchPendingJson,
+			&i.PauseJson,
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DisplayName,
@@ -738,7 +750,7 @@ UPDATE sessions SET
     resolved_workspace_writes = ?, resolved_can_spawn = ?, spawn_capability_hash = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
-    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?,
+    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?, pause_json = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, updated_at = ?
 WHERE id = ?
@@ -773,6 +785,7 @@ type UpdateSessionParams struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
+	PauseJson               string
 	PreviewURL              string
 	PreviewRevision         int64
 	TerminateOnPRMerge      bool
@@ -811,6 +824,7 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.AgentSessionID,
 		arg.Prompt,
 		arg.SwitchPendingJson,
+		arg.PauseJson,
 		arg.PreviewURL,
 		arg.PreviewRevision,
 		arg.TerminateOnPRMerge,

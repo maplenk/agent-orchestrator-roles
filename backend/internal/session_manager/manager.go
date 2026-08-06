@@ -3060,7 +3060,10 @@ func (m *Manager) confirmActive(ctx context.Context, guard *sessionguard.Guard, 
 		// into it would answer the decision. This closes the TOCTOU the
 		// per-poll check inside waitForActive cannot cover; a store failure
 		// inside the guard fails closed (no Enter on an unknown state).
-		nudge, nudgeErr := guard.Deliver(ctx, id, "")
+		// DeliverAuto, not Deliver: the user asked for the original message,
+		// but AO alone decides to press Enter again, so a durable pause must
+		// stop it.
+		nudge, nudgeErr := guard.DeliverAuto(ctx, id, "")
 		if nudgeErr != nil {
 			m.logger.Warn("send: confirm re-send failed", "sessionID", id, "attempt", attempt, "error", nudgeErr)
 			return
