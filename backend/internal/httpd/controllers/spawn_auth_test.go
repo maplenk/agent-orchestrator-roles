@@ -30,6 +30,8 @@ type spawnGateSvc struct {
 	spawned     int
 	switchCalls int
 	freshCalls  int
+	pauseCalls  int
+	resumeCalls int
 }
 
 func newSpawnGateSvcWithToken() (*spawnGateSvc, string) {
@@ -115,10 +117,14 @@ func (f *spawnGateSvc) FreshConversation(_ context.Context, id domain.SessionID,
 }
 
 func (f *spawnGateSvc) PauseSession(_ context.Context, id domain.SessionID, incidentID, reason string) (domain.SessionRecord, error) {
-	return domain.SessionRecord{ID: id}, nil
+	f.pauseCalls++
+	rec := domain.SessionRecord{ID: id}
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: incidentID, Reason: domain.PauseReasonOperator}
+	return rec, nil
 }
 
 func (f *spawnGateSvc) ResumeSession(_ context.Context, id domain.SessionID, incidentID string) (domain.SessionRecord, error) {
+	f.resumeCalls++
 	return domain.SessionRecord{ID: id}, nil
 }
 func (f *spawnGateSvc) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {

@@ -62,6 +62,22 @@ again.
 A `409 PAUSE_INCIDENT_MISMATCH` therefore means "the world moved: re-read and
 show the human what actually holds the session now", not "retry".
 
+## 3b. Authorization — pause is operator-owned
+
+Both endpoints require **LAN authentication or a valid operator credential**. A
+caller presenting session capability headers is refused with
+`403 PAUSE_AGENT_FORBIDDEN`, explicitly rather than by falling through.
+
+This is stricter than `switch`, deliberately. The incident id is in the session
+read model, so a worker can read its own; if the spawn capability were accepted
+here, that worker could POST `/resume` and lift the pause a human placed on it,
+and a sibling could pause a competitor to stop it. Either makes the pause
+guarantee vacuous. The capability authorizes an agent to **spawn**, which is a
+different question from whether it may release a session a human parked.
+
+The desktop is an operator and injects `X-AO-Operator-Spawn-Token` on these two
+paths, alongside spawn and switch.
+
 ## 4. HTTP surface (3A-2)
 
 ```
@@ -89,6 +105,15 @@ requires a structured envelope, which only a harness adapter can produce
 | `SESSION_NOT_PAUSED` | 409 | nothing to resume |
 | `PAUSE_INCIDENT_MISMATCH` | 409 | a newer incident holds it; response names which |
 | `SESSION_TERMINATED` | 409 | cannot pause a terminated session |
+| `PAUSE_INCIDENT_INVALID` | 400 | id over 128 bytes or outside `[A-Za-z0-9._-]` |
+| `PAUSE_AUTH_REQUIRED` | 403 | no operator credential and not LAN |
+| `PAUSE_AGENT_FORBIDDEN` | 403 | a session principal tried to pause/resume |
+| `OPERATOR_CREDENTIAL_INVALID` | 403 | operator credential present but wrong |
+
+`incidentId` is bounded because it is durable in three places — `pause_json`,
+the ledger `generation_id`, and the ledger PRIMARY key, which is built as
+`<session>:<incident>:<kind>`. A separator there would make the key
+structurally ambiguous, so the charset excludes one. Bodies are capped at 4 KiB.
 
 Re-pausing the **same** incident is `200`, not a conflict: polling detectors
 repeat, and a repeat is not an error.
@@ -106,6 +131,12 @@ countdown to an automatic resume — nothing schedules against it.
 
 Liveness is already in the read model (`activity.state`), and that is what
 distinguishes the two paused cells above. The UI must read both.
+
+**Boot makes this fact truthful.** When reconcile proves a paused session's
+runtime is dead it records an `exited` observation — without terminating the
+session, writing a restore marker, or touching the pin. Without that, the
+pre-crash activity would survive and the row would serialize as paused **and**
+working, leaving the UI unable to know it should offer "Restart agent".
 
 ## 6. What this does not cover
 

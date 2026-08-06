@@ -2123,6 +2123,7 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 		return nil
 	}
 	handle := runtimeHandle(rec.Metadata)
+	probedDead := false
 	if handle.ID != "" {
 		alive, err := m.runtime.IsAlive(ctx, handle)
 		if err != nil {
@@ -2132,14 +2133,24 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 		if alive {
 			return nil // adopt: the session survived the crash.
 		}
+		probedDead = true
 	}
 	// Past this point the runtime is confirmed dead and the session is torn
 	// down WITH a shutdown-saved marker — which RestoreAll then relaunches from,
 	// in this same boot. For a paused session that is the automatic restart
-	// rule 2 forbids, so leave the row untouched: it stays active with a dead
-	// agent, which is the ordinary "agent exited" state the guard already
-	// handles, and an explicit resume makes it eligible again.
+	// rule 2 forbids, so the teardown is skipped.
 	if m.pausedSkip(rec, "save-and-teardown of a dead runtime") {
+		// But skipping the teardown must not also skip the OBSERVATION. We just
+		// proved the process is gone; leaving the pre-crash activity in place
+		// would let the row serialize as paused AND working, and the pause
+		// contract requires the UI to tell paused-and-running from
+		// paused-and-dead so it knows to offer "Restart agent" instead of
+		// "Resume" (PHASE3A_PAUSE_CONTRACT §2). Recording it is not a teardown:
+		// no marker is written, the row stays active, the pin is untouched, and
+		// nothing relaunches.
+		if probedDead {
+			return m.recordConfirmedExit(ctx, rec)
+		}
 		return nil
 	}
 	if projectKind == domain.ProjectKindScratch {

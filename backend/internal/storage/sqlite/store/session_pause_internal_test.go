@@ -30,7 +30,7 @@ func TestDecodePauseFailsClosed(t *testing.T) {
 		want string
 	}{
 		{"malformed json", "{not-json", "corrupt"},
-		{"missing incident", `{"reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"{}","pausedAt":"2026-01-01T00:00:00Z"}`, "incidentId"},
+		{"missing incident", `{"reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"{}","pausedAt":"2026-01-01T00:00:00Z"}`, "incident id"},
 		{"unknown reason", `{"incidentId":"i","reason":"vibes","pausedAt":"2026-01-01T00:00:00Z"}`, "unknown reason"},
 		// A usage limit whose evidence channel is not structured is exactly the
 		// free-text claim MASTER_PLAN §7 rule 1 forbids. Rejecting it at decode

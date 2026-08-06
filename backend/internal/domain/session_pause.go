@@ -65,6 +65,38 @@ type SessionPause struct {
 	PausedAt time.Time `json:"pausedAt"`
 }
 
+// MaxIncidentIDBytes bounds a client-supplied incident id. The id is durable
+// and is copied into three places — pause_json, the ledger's generation_id, and
+// the ledger's PRIMARY key — so an unbounded value is a write amplifier on all
+// of them. Every real id is a uuid (36) or a short hash.
+const MaxIncidentIDBytes = 128
+
+// ValidateIncidentID bounds and constrains an externally supplied incident id.
+//
+// Non-empty is not enough: the value arrives from an API client and is spliced
+// into the ledger primary key as "<session>:<incident>:<kind>", so control
+// characters would corrupt logs and durable ids, and a separator would make the
+// key structurally ambiguous. The charset is deliberately narrow rather than
+// "printable" — uuids, hashes and slugs all fit, and nothing legitimate needs
+// more.
+func ValidateIncidentID(id string) error {
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("incident id: required")
+	}
+	if len(id) > MaxIncidentIDBytes {
+		return fmt.Errorf("incident id: %d bytes exceeds the %d byte cap", len(id), MaxIncidentIDBytes)
+	}
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-', r == '_', r == '.':
+		default:
+			return fmt.Errorf("incident id: %q is not allowed; use [A-Za-z0-9._-]", r)
+		}
+	}
+	return nil
+}
+
 // Validate enforces the structured-evidence rule. The load-bearing clause is
 // the usage_limit one: a usage limit may ONLY be recorded from a structured
 // envelope, so no free-text path can manufacture one. An operator pause is
@@ -73,8 +105,8 @@ func (p *SessionPause) Validate() error {
 	if p == nil {
 		return fmt.Errorf("pause: nil")
 	}
-	if strings.TrimSpace(p.IncidentID) == "" {
-		return fmt.Errorf("pause: incidentId required")
+	if err := ValidateIncidentID(p.IncidentID); err != nil {
+		return fmt.Errorf("pause: %w", err)
 	}
 	if p.PausedAt.IsZero() {
 		return fmt.Errorf("pause: pausedAt required")

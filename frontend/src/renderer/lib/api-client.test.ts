@@ -341,6 +341,17 @@ describe("applyOperatorSpawnHeaders", () => {
 		expect(fr.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
 	});
 
+	it("injects operator token for pause and resume", () => {
+		// The daemon refuses pause/resume outright for a caller presenting session
+		// capability headers — a worker that could lift its own pause would not be
+		// paused. So the desktop, which IS the operator, must send the token or
+		// every pause action 403s.
+		for (const path of ["/api/v1/sessions/mer-1/pause", "/api/v1/sessions/mer-1/resume"]) {
+			const h = applyOperatorSpawnHeaders(new Headers(), "POST", path, "op-tok");
+			expect(h.get("X-AO-Operator-Spawn-Token"), path).toBe("op-tok");
+		}
+	});
+
 	it("does not inject for GET or non-spawn paths", () => {
 		const h = applyOperatorSpawnHeaders(new Headers(), "GET", "/api/v1/sessions", "op-tok");
 		expect(h.has("X-AO-Operator-Spawn-Token")).toBe(false);

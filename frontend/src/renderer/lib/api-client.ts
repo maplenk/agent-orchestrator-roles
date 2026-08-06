@@ -184,12 +184,18 @@ export function applyOperatorSpawnHeaders(
 	token: string | undefined = daemonStatus.operatorSpawnToken,
 ): Headers {
 	const m = method.toUpperCase();
-	// Privileged desktop mutations: spawn + worker switch/fresh (operator only;
-	// never override agent session capability headers).
+	// Privileged desktop mutations: spawn, worker switch/fresh, and pause/resume
+	// (operator only; never override agent session capability headers).
+	//
+	// pause/resume are operator-owned in a stronger sense than the others: the
+	// daemon refuses them outright for a caller presenting session capability
+	// headers, because a worker that could lift its own pause would not be
+	// paused. The desktop is an operator, so it must send the token here or
+	// every pause action 403s.
 	const privileged =
 		pathname === "/api/v1/sessions" ||
 		pathname === "/api/v1/orchestrators" ||
-		/^\/api\/v1\/sessions\/[^/]+\/(switch|fresh-conversation)$/.test(pathname);
+		/^\/api\/v1\/sessions\/[^/]+\/(switch|fresh-conversation|pause|resume)$/.test(pathname);
 	if (
 		m === "POST" &&
 		privileged &&

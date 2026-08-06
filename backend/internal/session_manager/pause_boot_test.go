@@ -211,3 +211,69 @@ func TestReconcile_RecoversPostStopWhenNotPaused(t *testing.T) {
 		t.Fatal("the unpaused harness did not reach a relaunch; the paused test above proves nothing")
 	}
 }
+
+// Skipping the teardown must not also skip the OBSERVATION. Boot proved the
+// process is gone; if the pre-crash activity survives, the row serializes as
+// paused AND working and the UI cannot know to offer "Restart agent" instead of
+// "Resume" (PHASE3A_PAUSE_CONTRACT §2). The earlier version of this code
+// asserted "it stays active with a dead agent, the ordinary exited state" in a
+// comment without ever recording it.
+func TestReconcile_RecordsConfirmedExitForAPausedSession(t *testing.T) {
+	m, st, rt, _ := newLifecycleManager()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1/root",
+			RuntimeHandleID: "tmux-dead", AgentSessionID: "agent-w",
+			Pause: pausePin("inc-1"),
+		},
+		// Working when the daemon died — the state that would otherwise persist.
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile err = %v", err)
+	}
+	got := st.sessions["mer-1"]
+	if got.Activity.State != domain.ActivityExited {
+		t.Fatalf("activity = %q, want exited: the read model would report paused AND working, "+
+			"so the UI could not tell it needs a restart", got.Activity.State)
+	}
+	// And it is an observation, NOT a teardown: nothing may have been relaunched,
+	// terminated, or made restore-eligible.
+	if rt.created != 0 {
+		t.Errorf("runtime.Create called %d times", rt.created)
+	}
+	if got.IsTerminated {
+		t.Error("recording the exit terminated the session")
+	}
+	if got.Metadata.Pause == nil {
+		t.Error("recording the exit cleared the pause pin")
+	}
+	if len(st.worktrees["mer-1"]) != 0 {
+		t.Errorf("a restore marker was written: %+v", st.worktrees["mer-1"])
+	}
+}
+
+// A paused session whose runtime is ALIVE keeps its activity untouched — the
+// exit must be recorded only when boot actually proved death.
+func TestReconcile_LeavesALivePausedSessionAlone(t *testing.T) {
+	m, st, rt, _ := newLifecycleManager()
+	rt.aliveByHandle = map[string]bool{"tmux-live": true}
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1/root",
+			RuntimeHandleID: "tmux-live", AgentSessionID: "agent-w",
+			Pause: pausePin("inc-1"),
+		},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+
+	if err := m.Reconcile(ctx); err != nil {
+		t.Fatalf("Reconcile err = %v", err)
+	}
+	if got := st.sessions["mer-1"].Activity.State; got != domain.ActivityActive {
+		t.Fatalf("activity = %q, want active: a live paused agent was reported dead", got)
+	}
+}

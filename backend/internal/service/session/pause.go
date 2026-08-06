@@ -31,10 +31,10 @@ type pauseCommander interface {
 // cannot be retried against, and a retry would open a second incident for one
 // real pause. See docs/roles/PHASE3A_PAUSE_CONTRACT.md §3.
 func (s *Service) PauseSession(ctx context.Context, sessionID domain.SessionID, incidentID, reason string) (domain.SessionRecord, error) {
-	incident := strings.TrimSpace(incidentID)
-	if incident == "" {
-		return domain.SessionRecord{}, apierr.Invalid("PAUSE_INCIDENT_REQUIRED",
-			"An incidentId is required so a retried request cannot open a second incident", nil)
+	incident, err := validIncident(incidentID,
+		"An incidentId is required so a retried request cannot open a second incident")
+	if err != nil {
+		return domain.SessionRecord{}, err
 	}
 	if r := strings.TrimSpace(reason); r != "" && r != string(domain.PauseReasonOperator) {
 		return domain.SessionRecord{}, apierr.Invalid("PAUSE_REASON_INVALID",
@@ -64,14 +64,28 @@ func (s *Service) PauseSession(ctx context.Context, sessionID domain.SessionID, 
 // restarting is a separate, explicit act. Resuming a dead session is still
 // meaningful: it records the decision and makes the session restore-eligible.
 func (s *Service) ResumeSession(ctx context.Context, sessionID domain.SessionID, incidentID string) (domain.SessionRecord, error) {
-	incident := strings.TrimSpace(incidentID)
-	if incident == "" {
-		return domain.SessionRecord{}, apierr.Invalid("PAUSE_INCIDENT_REQUIRED",
-			"An incidentId is required: resume must name the incident it answers, not lift whatever is current", nil)
+	incident, err := validIncident(incidentID,
+		"An incidentId is required: resume must name the incident it answers, not lift whatever is current")
+	if err != nil {
+		return domain.SessionRecord{}, err
 	}
 	pc, ok := s.manager.(pauseCommander)
 	if !ok {
 		return domain.SessionRecord{}, fmt.Errorf("%w", ErrSwitchNotWired)
 	}
 	return pc.ResumeSession(ctx, sessionID, incident)
+}
+
+// validIncident bounds the client-supplied id at the API boundary so a bad one
+// is a 400 naming the problem rather than a 500 from deeper in. The domain
+// re-checks it — this is the fast, specific answer, not the guarantee.
+func validIncident(raw, missing string) (string, error) {
+	incident := strings.TrimSpace(raw)
+	if incident == "" {
+		return "", apierr.Invalid("PAUSE_INCIDENT_REQUIRED", missing, nil)
+	}
+	if err := domain.ValidateIncidentID(incident); err != nil {
+		return "", apierr.Invalid("PAUSE_INCIDENT_INVALID", err.Error(), nil)
+	}
+	return incident, nil
 }

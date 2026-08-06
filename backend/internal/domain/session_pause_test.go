@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -101,5 +102,61 @@ func TestMetadataPaused(t *testing.T) {
 	m.Pause = &SessionPause{}
 	if !m.Paused() {
 		t.Fatal("metadata with a pin does not report paused")
+	}
+}
+
+// The incident id is client-supplied and lands in three durable places:
+// pause_json, the ledger's generation_id, and the ledger's PRIMARY key, which
+// is built as "<session>:<incident>:<kind>". So "non-empty" is not a contract —
+// an oversized value amplifies every write, a control character corrupts logs
+// and ids, and a separator makes the key structurally ambiguous.
+func TestValidateIncidentID(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+		ok   bool
+	}{
+		{"uuid", "7bd9dfc6-7fd5-4bf2-aba1-bc2d88740f25", true},
+		{"slug", "incident-1", true},
+		{"hash-like", "sha256.a09f7d18", true},
+		{"underscored", "usage_limit_2026_08_06", true},
+		{"at the cap", strings.Repeat("a", MaxIncidentIDBytes), true},
+
+		{"empty", "", false},
+		{"whitespace only", "   ", false},
+		{"over the cap", strings.Repeat("a", MaxIncidentIDBytes+1), false},
+		{"newline", "inc\n1", false},
+		{"null byte", "inc\x001", false},
+		{"escape", "inc\x1b[31m", false},
+		// The ledger primary key separator: allowing it would let the durable id
+		// be read two different ways.
+		{"colon", "inc:1", false},
+		{"space", "inc 1", false},
+		{"slash", "inc/1", false},
+		{"quote", `inc"1`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateIncidentID(tc.id)
+			if tc.ok && err != nil {
+				t.Fatalf("rejected a legitimate id %q: %v", tc.id, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("accepted %q", tc.id)
+			}
+		})
+	}
+}
+
+// And it binds through SessionPause.Validate, so a hand-edited row cannot carry
+// one either.
+func TestSessionPauseValidateBoundsTheIncident(t *testing.T) {
+	p := &SessionPause{
+		IncidentID: strings.Repeat("a", MaxIncidentIDBytes+1),
+		Reason:     PauseReasonOperator,
+		DetectedBy: PauseDetectionOperator,
+		PausedAt:   time.Now().UTC(),
+	}
+	if err := p.Validate(); err == nil {
+		t.Fatal("an oversized incident id passed Validate")
 	}
 }

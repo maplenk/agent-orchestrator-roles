@@ -81,8 +81,8 @@ type PauseRequest struct {
 // retry converges rather than duplicating.
 func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req PauseRequest) (domain.SessionRecord, error) {
 	incident := strings.TrimSpace(req.IncidentID)
-	if incident == "" {
-		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, ErrIncidentRequired)
+	if err := domain.ValidateIncidentID(incident); err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w: %w", id, ErrIncidentRequired, err)
 	}
 
 	rec, ok, err := m.store.GetSession(ctx, id)
@@ -186,8 +186,10 @@ func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID,
 // either — that is a separate, explicit restore.
 func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID, expectedIncident string) (domain.SessionRecord, error) {
 	expected := strings.TrimSpace(expectedIncident)
-	if expected == "" {
-		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w", id, ErrIncidentRequired)
+	// Bounded here too: resume never builds a SessionPause, so Validate's own
+	// check would not run on this path.
+	if err := domain.ValidateIncidentID(expected); err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w: %w", id, ErrIncidentRequired, err)
 	}
 
 	rec, ok, err := m.store.GetSession(ctx, id)
@@ -296,4 +298,25 @@ func (m *Manager) pausedSkip(rec domain.SessionRecord, action string) bool {
 		"incident", rec.Metadata.Pause.IncidentID,
 		"reason", string(rec.Metadata.Pause.Reason))
 	return true
+}
+
+// recordConfirmedExit persists the death boot just proved, without touching
+// anything else. It exists only for the paused path: every other caller reaches
+// save-and-teardown, which records the exit as part of terminating the session.
+//
+// The write goes through the generic UpdateSession deliberately — pause is
+// column-owned, so a full-row write CANNOT clear the pin. That is the property
+// making this safe to do while a pause is held.
+func (m *Manager) recordConfirmedExit(ctx context.Context, rec domain.SessionRecord) error {
+	if rec.Activity.State == domain.ActivityExited {
+		return nil // already recorded on an earlier boot
+	}
+	m.logger.Info("recording confirmed runtime exit for a paused session",
+		"sessionID", rec.ID, "wasActivity", string(rec.Activity.State))
+	rec.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: m.clock()}
+	rec.UpdatedAt = m.clock()
+	if err := m.store.UpdateSession(ctx, rec); err != nil {
+		return fmt.Errorf("reconcile %s: record confirmed exit: %w", rec.ID, err)
+	}
+	return nil
 }

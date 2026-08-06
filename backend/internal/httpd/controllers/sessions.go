@@ -128,6 +128,10 @@ type OperatorSpawnValidator interface {
 //
 // Headerless spawn is rejected (workers must not fall through to "operator").
 const (
+	// maxPauseBodyBytes caps pause/resume bodies. They carry an incident id and
+	// a fixed reason; 4 KiB is already far more than either needs.
+	maxPauseBodyBytes = 4 << 10
+
 	operatorSpawnHeader   = "X-AO-Operator-Spawn-Token"
 	callerSessionHeader   = "X-AO-Caller-Session-Id"
 	spawnCapabilityHeader = "X-AO-Spawn-Capability"
@@ -1058,6 +1062,12 @@ func (c *SessionsController) pauseSession(w http.ResponseWriter, r *http.Request
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/pause")
 		return
 	}
+	if !c.authorizeOperatorPause(w, r) {
+		return
+	}
+	// Small body: an incident id and a fixed reason. Capped so an oversized
+	// post cannot be buffered before the id-length check ever runs.
+	r.Body = http.MaxBytesReader(w, r.Body, maxPauseBodyBytes)
 	var in PauseSessionRequest
 	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1081,6 +1091,10 @@ func (c *SessionsController) resumeSession(w http.ResponseWriter, r *http.Reques
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/resume")
 		return
 	}
+	if !c.authorizeOperatorPause(w, r) {
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxPauseBodyBytes)
 	var in ResumeSessionRequest
 	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1137,6 +1151,43 @@ func (c *SessionsController) freshConversation(w http.ResponseWriter, r *http.Re
 //
 // Headerless loopback is not trusted. Roleless or canSpawn=false sessions cannot
 // switch. Managed workers cannot elevate via runfile operator token (CLI no-upgrade).
+// authorizeOperatorPause gates pause/resume. It is deliberately STRICTER than
+// authorizeCallerSwitch: LAN auth or a valid operator credential only, and a
+// managed agent presenting session capability headers is refused outright.
+//
+// Pause is the human's control over the fleet. A worker that can read its own
+// incident id — it is in the session read model — and POST /resume has no pause
+// at all, and neither does one that can pause a sibling to stop it competing.
+// The capability token authorizes an agent to SPAWN, which is a different
+// question from whether it may release a session a human parked.
+func (c *SessionsController) authorizeOperatorPause(w http.ResponseWriter, r *http.Request) bool {
+	if authctx.IsLANAuthenticated(r.Context()) {
+		return true
+	}
+
+	if opTok := strings.TrimSpace(r.Header.Get(operatorSpawnHeader)); opTok != "" {
+		if c.OperatorAuth != nil && c.OperatorAuth.Valid(opTok) {
+			return true
+		}
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "OPERATOR_CREDENTIAL_INVALID",
+			"Operator credential is missing or invalid", nil)
+		return false
+	}
+
+	// Explicit, not incidental: falling through to the generic error would let a
+	// future edit quietly add a capability path here.
+	if strings.TrimSpace(r.Header.Get(callerSessionHeader)) != "" ||
+		strings.TrimSpace(r.Header.Get(spawnCapabilityHeader)) != "" {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "PAUSE_AGENT_FORBIDDEN",
+			"Agent sessions cannot pause or resume; pause is operator-owned", nil)
+		return false
+	}
+
+	envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "PAUSE_AUTH_REQUIRED",
+		"Pause and resume require operator credential or LAN authentication", nil)
+	return false
+}
+
 func (c *SessionsController) authorizeCallerSwitch(w http.ResponseWriter, r *http.Request) bool {
 	if authctx.IsLANAuthenticated(r.Context()) {
 		return true
