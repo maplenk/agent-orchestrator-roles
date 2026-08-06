@@ -10,7 +10,7 @@ chain, the ownership resolver and the session row shape.
 | Data dir | `~/.ao/sync-dogfood/data` (created empty) |
 | Daemon port | `127.0.0.1:3011` |
 | Project | `syncproj` — an isolated clone, **strict delegation** |
-| Preserved | `~/.ao/dev/data/ao.db` untouched, md5 `3240349d…`; its tmux sessions left running |
+| Preserved | `~/.ao/dev/data/ao.db` untouched, md5 `3240349d…`; its tmux sessions left running — **~~preserved~~ SUPERSEDED, see the correction at the end** |
 
 ## 1. Migration history
 
@@ -277,3 +277,35 @@ Test pane and artifacts removed afterwards.
 
 Live structured limit detection — 3A-2b, unbuilt. `limit_detection_supported`
 remains false for every harness.
+
+---
+
+## Correction — the preserved database is now quarantined
+
+**The "preserved, md5 `3240349d…`" claim above was true when written and is no
+longer true.** It is kept as dated evidence rather than rewritten, because the
+run it describes did happen and the checksum did hold for its duration.
+
+What changed afterwards: a later UI review started a daemon against
+`~/.ao/dev/data`. goose applied upstream's `0050`–`0052` and then failed at
+`0053` on a duplicate `role_id` column — exactly the loud failure
+`TestOldRolesDatabaseCannotMigrateSilently` exists to guarantee, so the guard
+worked. But the database is now **mid-migration**: version 52, carrying the
+roles schema under its pre-rename version numbers.
+
+```
+mtime:              2026-08-06 18:42
+max goose version:  52
+```
+
+Consequences, stated plainly:
+
+- It is **no longer valid upgrade-test evidence**. Any future "can an old roles
+  database upgrade?" run needs a fresh copy of a genuinely pre-sync database,
+  not this one — it is neither the old state nor a migrated state.
+- It is **quarantined**: do not open it, and do not attempt an in-place repair
+  opportunistically. The repair story belongs to the dedicated step in
+  `UPSTREAM_SYNC_PLAN.md`, which should be read alongside upstream #3598 rather
+  than reinvented under time pressure.
+- Everything else in this document stands. No scenario above read or wrote this
+  database; they ran against `~/.ao/sync-dogfood/data`, created empty.
