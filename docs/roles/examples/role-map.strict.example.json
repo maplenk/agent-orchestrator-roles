@@ -26,6 +26,12 @@
       "harness": "codex",
       "permissions": { "workspaceWrites": false, "canSpawn": false },
       "when": ["review", "pr review"]
+    },
+    "verifier": {
+      "template": "verifier",
+      "harness": "codex",
+      "permissions": { "workspaceWrites": false, "canSpawn": false },
+      "when": ["verification", "acceptance criteria", "release gate"]
     }
   },
   "failover": {
