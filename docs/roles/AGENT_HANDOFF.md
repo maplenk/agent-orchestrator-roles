@@ -105,11 +105,11 @@ backend/internal/
   datadirlock/            # exclusive AO_DATA_DIR lease (Unix flock / Win LockFileEx)
   daemon/daemon.go        # Acquire lease BEFORE sqlite open / reconcile
   storage/sqlite/migrations/
-    0053_session_role_fields.sql
+    9000_session_role_fields.sql
     0054_session_spawn_capability_hash.sql
     0055_lifecycle_ledger.sql
     0056_session_switch_pending.sql
-    # next free: 0061+  (fork migrations renumbered to 0053-0060; upstream reached 0052)
+    # next free: 9008+  (fork range; NEVER take a number in upstream's growth path)
 ```
 
 Go module path remains `github.com/aoagents/agent-orchestrator/...` (fork does not re-module for product name).
@@ -425,7 +425,12 @@ Suggested first steps for 2B:
 1. **Branch:** work on `roles/multi-sub-v1`; push to `origin` after accepted lands (human often expects push).
 2. **Commits:** conventional-ish prefixes used historically: `feat:`, `fix:`, `docs:`. Prefer **small, reviewable** CLs over mega-commits.
 3. **Docs sync:** update `REMAINING_PLAN.md` (snapshot, tables, next action, checklist) on every phase/slice land.
-4. **Migrations:** never edit merged SQL; next number **0061+**. The fork's 0042-0049 were renumbered to **0053-0060** because upstream had taken 0042/0043/0044/0047 and reached 0052 — check `git ls-tree upstream/main .../migrations/` before picking one.
+4. **Migrations:** never edit merged SQL; next number **9008+**. The fork owns
+   **9000–9007** and nothing below it. The first renumber (0042-0049 → 0053-0060)
+   put fork migrations immediately above upstream's counter, upstream then shipped
+   its own 0053, and every fork database silently skipped it — goose keys on the
+   NUMBER. Adjacency is not separation. Existing databases are carried into the
+   fork range by `repairForkMigrationVersions` before goose runs.
 5. **Capability promote:** separate CL; dogfood first.
 6. **Review severity:** human/Codex P1s block; P2 often block; P3 doc cleanup can ride with next related land (as with promotion).
 7. **Tests before claim:** run focused packages, not only compile:
@@ -499,7 +504,7 @@ High-level protocol used successfully:
 | Switch targets | `backend/internal/domain/switch_targets.go` |
 | Handoff types | `backend/internal/domain/handoff.go` |
 | Lifecycle phases | `backend/internal/domain/lifecycle_ledger.go` |
-| Migrations | `backend/internal/storage/sqlite/migrations/0053–0060_*.sql` |
+| Migrations | `backend/internal/storage/sqlite/migrations/9000–9007_*.sql` |
 
 ---
 

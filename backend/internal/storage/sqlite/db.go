@@ -130,6 +130,13 @@ func migrate(db *sql.DB) error {
 	if err := goose.SetDialect("sqlite3"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
+	// This fork's own renumber, from 0053-0060 into the 9000 range, has to
+	// land in the ledger BEFORE goose looks at it — see migrate_fork_range.go.
+	// Running it after would mean goose had already re-applied migrations the
+	// database has, against tables that already carry their effects.
+	if err := repairForkMigrationVersions(db); err != nil {
+		return err
+	}
 	// Builds can advance a database past a migration that is added or
 	// renumbered later (notably across fast-moving Nightly releases). Apply
 	// those embedded migrations instead of permanently wedging daemon startup
