@@ -645,8 +645,10 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	}
 	// Adapter-level RO for workspaceWrites=false (tools/sandbox — not prompt-only).
 	if roleResult.Applied && !roleResult.Policy.WorkspaceWrites {
+		// ApplyLaunch mutates launchCfg in place; everything downstream reads
+		// launchCfg, so copying it back into agentConfig assigned a value
+		// nothing goes on to use.
 		readonly.ApplyLaunch(cfg.Harness, &launchCfg)
-		agentConfig = launchCfg.Config
 	}
 	delivery, err := agent.GetPromptDeliveryStrategy(ctx, launchCfg)
 	if err != nil {
@@ -890,7 +892,11 @@ func (m *Manager) rollbackSeedSpawnWorkspace(ctx context.Context, rec domain.Ses
 		return
 	}
 	m.preserveFailedSpawnWorkspace(ctx, rec.ID, ws, true)
-	m.markSpawnFailedTerminated(ctx, rec.ID)
+	if err := m.markSpawnFailedTerminated(ctx, rec.ID); err != nil {
+		// Best-effort by design — the spawn already failed — but a row left
+		// active with no runtime holds its slot, so it must not be silent.
+		m.logger.Error("spawn rollback: could not mark session terminated", "sessionID", rec.ID, "error", err)
+	}
 }
 
 func (m *Manager) preserveFailedSpawnWorkspace(ctx context.Context, id domain.SessionID, ws ports.WorkspaceInfo, runtimeDestroyed bool) {
@@ -1142,7 +1148,14 @@ func (m *Manager) markSpawnFailedTerminatedWithoutWorkspace(ctx context.Context,
 	}
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil || !ok {
-		return nil
+		// Deliberately nil: the termination above already succeeded, which is
+		// the part that matters. Stripping the handles is cleanup, and NOT
+		// stripping them is the safe direction — reconcileReap uses the runtime
+		// handle to sweep a leaked tmux from a terminated row, so a row that
+		// keeps its handle is still reapable while one that loses it is not.
+		m.logger.Warn("spawn failure cleanup: could not re-read session to strip handles",
+			"sessionID", id, "found", ok, "error", err)
+		return nil //nolint:nilerr // see above: losing the handle is worse than keeping it
 	}
 	rec.Metadata.Branch = ""
 	rec.Metadata.WorkspacePath = ""
@@ -1166,7 +1179,9 @@ func (m *Manager) rollbackSpawnSeedRow(ctx context.Context, id domain.SessionID)
 		m.cleanupSystemPromptDir(id)
 		return
 	}
-	m.markSpawnFailedTerminated(ctx, id)
+	if err := m.markSpawnFailedTerminated(ctx, id); err != nil {
+		m.logger.Error("spawn rollback: could not mark session terminated", "sessionID", id, "error", err)
+	}
 }
 
 // rollbackSpawn deletes a session row when it is still in seed state — used

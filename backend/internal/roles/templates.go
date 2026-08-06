@@ -81,7 +81,7 @@ func LoadTemplateFile(path string, store *ArtifactStore) (Template, error) {
 
 // ParseTemplate parses raw markdown (+ optional frontmatter) and pins an artifact.
 func ParseTemplate(raw []byte, store *ArtifactStore) (Template, error) {
-	id, sha := "", ""
+	var id, sha string
 	if store != nil {
 		id, sha = store.Put(raw)
 	} else {

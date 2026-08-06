@@ -5,6 +5,10 @@ import "time"
 // LifecycleLedgerKind is an append-only event class (not full chat history).
 type LifecycleLedgerKind string
 
+// The closed set of lifecycle event classes. Adding one requires a migration:
+// the ledger's kind column carries a SQLite CHECK constraint, and a kind Go
+// accepts but the store rejects is a feature that cannot run (see
+// lifecycle_ledger_kinds_test.go).
 const (
 	LifecycleKindSwitch            LifecycleLedgerKind = "switch"
 	LifecycleKindPause             LifecycleLedgerKind = "pause"

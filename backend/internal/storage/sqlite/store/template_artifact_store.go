@@ -48,6 +48,11 @@ func (s *Store) PutTemplateArtifact(ctx context.Context, id, sha256 string, cont
 	return nil
 }
 
+// GetTemplateArtifact loads the immutable role template bytes pinned on a
+// session at spawn. ok=false means the artifact is absent, which restore must
+// treat as fatal rather than falling back to a current template: the whole
+// point of the CAS is that a restored session runs the exact bytes it started
+// with.
 func (s *Store) GetTemplateArtifact(ctx context.Context, id string) (content []byte, sha string, ok bool, err error) {
 	row, err := s.qr.GetTemplateArtifact(ctx, id)
 	if err != nil {

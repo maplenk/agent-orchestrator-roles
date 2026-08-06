@@ -112,13 +112,9 @@ func (m RoleMap) SHA256() (string, error) {
 		Roles            map[string]RoleBinding `json:"roles,omitempty"`
 		Failover         FailoverConfig         `json:"failover,omitempty"`
 	}
-	w := wire{
-		SchemaVersion:    m.SchemaVersion,
-		StrictDelegation: m.StrictDelegation,
-		OrchestratorRole: m.OrchestratorRole,
-		Roles:            m.Roles,
-		Failover:         m.Failover,
-	}
+	// Field-for-field identical to RoleMap, so a conversion is exact and cannot
+	// silently drop a field the way a literal does when RoleMap gains one.
+	w := wire(m)
 	// Encode roles deterministically by rebuilding with sorted keys in JSON via
 	// a slice form for hashing only.
 	type roleKV struct {

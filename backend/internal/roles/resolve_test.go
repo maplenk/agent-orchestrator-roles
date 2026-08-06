@@ -1,6 +1,7 @@
 package roles
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,7 +55,7 @@ func TestResolve_StrictWorkerRequiresRole(t *testing.T) {
 		Map:  testMap(),
 		Kind: domain.KindWorker,
 	})
-	if err != ErrRoleRequired {
+	if !errors.Is(err, ErrRoleRequired) {
 		t.Fatalf("err = %v, want ErrRoleRequired", err)
 	}
 }
@@ -69,7 +70,7 @@ func TestResolve_StrictRejectsHarnessOverride(t *testing.T) {
 		ExplicitHarness: domain.HarnessPi,
 		Loader:          loader,
 	})
-	if err != ErrHarnessOverrideForbidden {
+	if !errors.Is(err, ErrHarnessOverrideForbidden) {
 		t.Fatalf("err = %v, want ErrHarnessOverrideForbidden", err)
 	}
 }
@@ -84,7 +85,7 @@ func TestResolve_RejectsMatchingHarnessOverride(t *testing.T) {
 		ExplicitHarness: domain.HarnessCodex,
 		Loader:          loader,
 	})
-	if err != ErrHarnessOverrideForbidden {
+	if !errors.Is(err, ErrHarnessOverrideForbidden) {
 		t.Fatalf("err = %v, want ErrHarnessOverrideForbidden for matching harness", err)
 	}
 }

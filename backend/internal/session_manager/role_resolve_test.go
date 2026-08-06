@@ -15,7 +15,7 @@ import (
 
 func TestComposeSystemPromptWithRole_FailClosed(t *testing.T) {
 	_, err := composeSystemPromptWithRole("base", roleApplyResult{Applied: true})
-	if err != ErrRolePromptRequired {
+	if !errors.Is(err, ErrRolePromptRequired) {
 		t.Fatalf("err = %v, want ErrRolePromptRequired", err)
 	}
 }
