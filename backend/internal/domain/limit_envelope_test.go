@@ -35,7 +35,21 @@ func TestParseLimitEnvelopeRejectsForgeries(t *testing.T) {
 		// verbatim in durable state and in the ledger.
 		{"unknown field smuggling prose", `{"version":1,"kind":"usage_limit","note":"I hit a limit"}`, "unknown field"},
 		{"trailing content", `{"version":1,"kind":"usage_limit"} {"more":1}`, "trailing content"},
+		// Decoder.More() is NOT an end-of-document check: it asks "another
+		// element in the current array or object?", so at top level it returns
+		// false for a closing delimiter. Both of these decoded cleanly with
+		// More()==false and were accepted as well-formed envelopes. Only a
+		// second decode returning io.EOF proves the input ended.
+		{"trailing array delimiter", `{"version":1,"kind":"usage_limit"}]`, "malformed input after"},
+		{"trailing object delimiter", `{"version":1,"kind":"usage_limit"}}`, "malformed input after"},
+		{"fragment of a larger array", `{"version":1,"kind":"usage_limit"},{"version":1,"kind":"usage_limit"}]`, "malformed input after"},
+		{"trailing garbage", `{"version":1,"kind":"usage_limit"}garbage`, "after the object"},
 		{"oversize", `{"version":1,"kind":"usage_limit","detail":"` + strings.Repeat("x", MaxLimitEnvelopeBytes) + `"}`, "cap"},
+		// The cap must bind the RAW bytes: the raw string is what is persisted
+		// into pause_json and copied verbatim into the ledger, so measuring the
+		// trimmed substring would let unbounded whitespace through.
+		{"whitespace padding over the cap", strings.Repeat(" ", MaxLimitEnvelopeBytes) + `{"version":1,"kind":"usage_limit"}`, "cap"},
+		{"leading whitespace over the cap", strings.Repeat("\n", MaxLimitEnvelopeBytes+1) + `{"version":1,"kind":"usage_limit"}`, "cap"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseLimitEnvelope(tc.raw)

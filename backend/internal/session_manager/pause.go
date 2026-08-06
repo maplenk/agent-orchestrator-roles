@@ -169,11 +169,27 @@ func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID,
 // ResumeSession clears the pause pin and records a resume ledger event. It is
 // the ONLY way a pause is lifted.
 //
+// expectedIncident is REQUIRED and is the incident the caller believes it is
+// answering. Without it the operation is "lift whatever is currently there",
+// which is unsafe across any gap between the human deciding and the request
+// arriving: an operator or UI action raised for incident A can land after A was
+// resumed and a fresh limit B pinned the session, and would then resume B —
+// releasing a session on evidence nobody ever looked at. Reading the pin and
+// clearing that same pin makes the read-your-own-write vacuous; the caller's
+// expectation has to come from outside.
+//
 // It deliberately does not send or relaunch anything. Resuming restores AO's
 // permission to write, not an obligation to: re-sending on resume would
 // reintroduce the automatic send that pause exists to prevent, and
-// MASTER_PLAN §7 puts manual continue in 3B, on an explicit ladder rung.
-func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, error) {
+// MASTER_PLAN §7 puts manual continue in 3B, on an explicit ladder rung. For a
+// session whose agent died while paused, resuming does not bring it back
+// either — that is a separate, explicit restore.
+func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID, expectedIncident string) (domain.SessionRecord, error) {
+	expected := strings.TrimSpace(expectedIncident)
+	if expected == "" {
+		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w", id, ErrIncidentRequired)
+	}
+
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: read session: %w", id, err)
@@ -185,15 +201,25 @@ func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID) (domai
 	if paused == nil {
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w", id, ErrNotPaused)
 	}
+	// Checked BEFORE the ledger: a resume event for an incident this call is
+	// not going to lift would be a false entry in the audit trail, and the
+	// ledger is append-only.
+	if paused.IncidentID != expected {
+		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w: holding incident is %s, not %s",
+			id, ErrIncidentMismatch, paused.IncidentID, expected)
+	}
 
 	// Ledger first, matching PauseSession: a crash between the two leaves the
 	// session paused with a resume event recorded, which a retry makes right.
 	// The other order would clear the pin with nothing saying who lifted it.
-	if err := m.appendPauseLedger(ctx, rec, domain.LifecycleKindResume, paused.IncidentID, ""); err != nil {
+	if err := m.appendPauseLedger(ctx, rec, domain.LifecycleKindResume, expected, ""); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w", id, err)
 	}
 
-	cleared, err := m.store.ClearSessionPauseIfIncident(ctx, id, paused.IncidentID, m.clock())
+	// The CAS carries the CALLER's expectation, not the value just read, so the
+	// check above is not merely advisory: a pin that changes between that read
+	// and this write still fails here.
+	cleared, err := m.store.ClearSessionPauseIfIncident(ctx, id, expected, m.clock())
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: persist: %w", id, err)
 	}
@@ -212,11 +238,11 @@ func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID) (domai
 			return current, nil // someone else resumed the same incident; converged
 		}
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w: holding incident is %s, not %s",
-			id, ErrIncidentMismatch, current.Metadata.Pause.IncidentID, paused.IncidentID)
+			id, ErrIncidentMismatch, current.Metadata.Pause.IncidentID, expected)
 	}
 
 	rec.Metadata.Pause = nil
-	m.logger.Info("session resumed", "sessionID", id, "incident", paused.IncidentID)
+	m.logger.Info("session resumed", "sessionID", id, "incident", expected)
 	return rec, nil
 }
 

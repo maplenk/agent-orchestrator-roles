@@ -182,7 +182,7 @@ func TestResumeSession_ClearsAndLedgers(t *testing.T) {
 	}
 	incident := paused.Metadata.Pause.IncidentID
 
-	rec, err := m.ResumeSession(ctx, id)
+	rec, err := m.ResumeSession(ctx, id, incident)
 	if err != nil {
 		t.Fatalf("resume: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestResumeSession_SendsNothing(t *testing.T) {
 		t.Fatalf("pause: %v", err)
 	}
 	before := len(msg.msgs)
-	if _, err := m.ResumeSession(ctx, id); err != nil {
+	if _, err := m.ResumeSession(ctx, id, "incident-1"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if got := len(msg.msgs); got != before {
@@ -239,7 +239,7 @@ func TestResumeSession_SendsNothing(t *testing.T) {
 
 func TestResumeSession_RefusesWhenNotPaused(t *testing.T) {
 	m, _, id := pausedWorker(t)
-	if _, err := m.ResumeSession(ctx, id); !errors.Is(err, ErrNotPaused) {
+	if _, err := m.ResumeSession(ctx, id, "incident-1"); !errors.Is(err, ErrNotPaused) {
 		t.Fatalf("err = %v, want ErrNotPaused", err)
 	}
 }
@@ -438,33 +438,63 @@ func TestPauseSurvivesAConcurrentFullRowUpdate(t *testing.T) {
 	}
 }
 
-// And the mirror: a stale resume must not lift a pause it never saw.
-func TestResumeRefusesAStaleIncident(t *testing.T) {
+// And the mirror, THROUGH THE MANAGER. The earlier version of this test called
+// ClearSessionPauseIfIncident directly, which proved the store was safe while
+// leaving the manager contract — "resume whatever is currently pinned" —
+// untested and unsafe. An operator or UI action raised for incident A can land
+// after A was resumed and a fresh limit B pinned the session; resuming B there
+// releases a session on evidence nobody looked at.
+func TestResumeSession_RefusesAStaleIncident(t *testing.T) {
 	m, st, id := pausedWorker(t)
 	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
 		t.Fatalf("pause: %v", err)
 	}
-	// Simulate the incident being replaced under the caller: resume, then a new
-	// incident pins the session again.
-	if _, err := m.ResumeSession(ctx, id); err != nil {
+	if _, err := m.ResumeSession(ctx, id, "incident-1"); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
+	// A new limit pins the session while the stale request is still in flight.
 	second := limitPause()
 	second.IncidentID = "incident-2"
 	if _, err := m.PauseSession(ctx, id, second); err != nil {
 		t.Fatalf("second pause: %v", err)
 	}
 
-	// A resume built from the FIRST incident must not lift the second.
-	ok, err := st.ClearSessionPauseIfIncident(ctx, id, "incident-1", time.Now())
-	if err != nil {
-		t.Fatalf("clear: %v", err)
-	}
-	if ok {
-		t.Fatal("a resume for a stale incident lifted a newer pause")
+	// The stale request finally arrives, still naming incident-1.
+	_, err := m.ResumeSession(ctx, id, "incident-1")
+	if !errors.Is(err, ErrIncidentMismatch) {
+		t.Fatalf("err = %v, want ErrIncidentMismatch", err)
 	}
 	if st.sessions[id].Metadata.Pause == nil {
-		t.Fatal("the newer pause was cleared")
+		t.Fatal("a stale resume lifted a newer pause")
+	}
+	if st.sessions[id].Metadata.Pause.IncidentID != "incident-2" {
+		t.Fatalf("holding incident = %q, want incident-2", st.sessions[id].Metadata.Pause.IncidentID)
+	}
+	// And the append-only ledger must not carry a resume for an incident that
+	// was never resumed.
+	for _, e := range st.ledger {
+		if e.Kind == domain.LifecycleKindResume && e.GenerationID == "incident-2" {
+			t.Fatal("a refused resume still wrote a ledger row for incident-2")
+		}
+	}
+	if countLedger(st, domain.LifecycleKindResume) != 1 {
+		t.Fatalf("resume ledger rows = %d, want 1 (only the genuine resume)", countLedger(st, domain.LifecycleKindResume))
+	}
+}
+
+func TestResumeSession_RequiresAnExpectedIncident(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	if _, err := m.ResumeSession(ctx, id, "  "); !errors.Is(err, ErrIncidentRequired) {
+		t.Fatalf("err = %v, want ErrIncidentRequired", err)
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("an incident-less resume lifted the pause")
+	}
+	if countLedger(st, domain.LifecycleKindResume) != 0 {
+		t.Error("a refused resume wrote a ledger row")
 	}
 }
 
@@ -522,5 +552,33 @@ func TestPauseSession_LosingTheCASToTheSameIncidentSucceeds(t *testing.T) {
 	}
 	if rec.Metadata.Pause == nil || rec.Metadata.Pause.IncidentID != "incident-1" {
 		t.Fatalf("returned record = %+v, want the converged pause", rec.Metadata.Pause)
+	}
+}
+
+// The ledger is append-only, so a resume event for an incident that was never
+// resumed is a permanent false entry in the audit trail. The mismatch must
+// therefore be caught BEFORE the append, not merely before the pin write.
+//
+// The expected incident here has no prior ledger row of its own — with one, the
+// append's own idempotency would dedupe the false entry away and hide the
+// ordering bug entirely.
+func TestResumeSession_MismatchWritesNoLedgerRow(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	_, err := m.ResumeSession(ctx, id, "an-incident-that-never-held-this-session")
+	if !errors.Is(err, ErrIncidentMismatch) {
+		t.Fatalf("err = %v, want ErrIncidentMismatch", err)
+	}
+	for _, e := range st.ledger {
+		if e.Kind == domain.LifecycleKindResume {
+			t.Fatalf("a refused resume appended %q to the append-only ledger; "+
+				"the mismatch must be caught before the ledger write", e.ID)
+		}
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("the pause was lifted by a mismatched resume")
 	}
 }

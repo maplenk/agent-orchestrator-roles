@@ -209,6 +209,17 @@ to deliver its prompt, or pause blocks its own remedy).
 - A paused **terminated** session can still be resumed (resume has no liveness
   precondition); it becomes restore-eligible on the next boot.
 
+**Required before 3A-2 exposes `resume` (review condition, not optional):**
+define the UX for an **active-but-dead paused row** — the state the boot skips
+deliberately create. Clearing the pin does **not** relaunch the agent, and it
+must not: manual continue (3B) or an explicit agent restore is a *second*,
+separate operation the human chooses. The surface therefore has to show three
+distinct things — paused / agent alive?, resume, restart — rather than one
+"resume" button whose behaviour silently depends on whether the runtime
+happens to still be there. `ResumeSession` also requires the caller to name the
+incident it is answering, so the surface must carry that id through from
+whatever displayed the pause, not re-read it at submit time.
+
 ---
 
 ### Phase 3B — Manual continue + opt-in failover (~3–5 working days)

@@ -3,7 +3,9 @@ package domain
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 )
@@ -65,13 +67,18 @@ type LimitEnvelopeV1 struct {
 // cannot ride along in an extra key, and requires an exact version and a known
 // kind.
 func ParseLimitEnvelope(raw string) (LimitEnvelopeV1, error) {
+	// The cap is measured on the RAW bytes, not the trimmed ones, because the
+	// raw string is what gets persisted — into pause_json and, verbatim, into
+	// the lifecycle ledger payload. Bounding the trimmed substring would let an
+	// arbitrarily large run of surrounding whitespace through and defeat the
+	// write-amplification bound this constant exists to enforce.
+	if len(raw) > MaxLimitEnvelopeBytes {
+		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: %d bytes exceeds the %d byte cap",
+			len(raw), MaxLimitEnvelopeBytes)
+	}
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: empty")
-	}
-	if len(trimmed) > MaxLimitEnvelopeBytes {
-		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: %d bytes exceeds the %d byte cap",
-			len(trimmed), MaxLimitEnvelopeBytes)
 	}
 	// Must be an object. Checked before decoding because encoding/json will
 	// happily unmarshal `null` into a struct and leave every field zero, which
@@ -86,10 +93,20 @@ func ParseLimitEnvelope(raw string) (LimitEnvelopeV1, error) {
 	if err := dec.Decode(&env); err != nil {
 		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: %w", err)
 	}
-	// Trailing content after the object would mean the caller sent a stream,
-	// not a document; the first value alone must account for the whole input.
-	if dec.More() {
-		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: trailing content after the object")
+	// The first value must account for the WHOLE input: a document, not a
+	// stream, and not a fragment of some larger structure.
+	//
+	// This deliberately does not use Decoder.More(). More() answers "is there
+	// another element in the current array or object", so at top level it
+	// returns FALSE for a trailing `]` or `}` — `{"version":1,...}]` would have
+	// been accepted as a well-formed envelope. Only a second decode that
+	// reports io.EOF proves the input actually ended.
+	var trailing json.RawMessage
+	if err := dec.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: trailing content after the object")
+		}
+		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: malformed input after the object: %w", err)
 	}
 
 	if env.Version != 1 {
