@@ -88,7 +88,8 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 				"Orchestrators support in-place fresh conversation only; cross-harness switch is not available yet", nil)
 		}
 	default:
-		return SwitchWorkerOutcome{}, apierr.Invalid("NOT_A_WORKER", "Only worker sessions support switch/fresh conversation", nil)
+		// Workers and orchestrators both reach this saga; anything else does not.
+		return SwitchWorkerOutcome{}, apierr.Invalid("NOT_A_WORKER", "This session kind does not support switch or fresh conversation", nil)
 	}
 	if rec.IsTerminated {
 		return SwitchWorkerOutcome{}, apierr.Conflict("SESSION_TERMINATED", "Session is terminated", nil)

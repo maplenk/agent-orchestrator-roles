@@ -32,6 +32,8 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 2B-2 (replacement recoverability) | **Landed** — migration 0047 persists replacement intent **before** retirement, so a zero-owner interval is never terminal; boot recovery re-drives stranded projects under the project gate. `finalizeRetirement` reordered so a crash leaves the recoverable residue, and both residues are repaired at boot |
 | Phase 2B-3 (cross-harness orchestrator switch) | **BLOCKED / DEFERRED on 1-F (Claude RO)** — not merely unstarted. A strict orchestrator must be `workspaceWrites:false`, which requires `read_only_enforced`, which only Codex advertises. Until Claude RO lands this slice cannot be built for strict projects, and it is deliberately refused for non-strict ones too rather than ship a capability strict projects can never have. **Phase 2B is therefore NOT complete** |
 | Phase 3A / 3B | **Not started** |
+| **CI merge gate — `golangci-lint`** | **NOT clean: 40 findings.** `.github/workflows/go.yml` blocks on the full ruleset at zero findings ("any new issue fails CI rather than being grandfathered"), so the branch is unmergeable until this is cleared. **Pre-existing, not 2B debt** — measured 42 at `f091af2e` versus 40 at `e38ae32d`, i.e. the 2B delta *removed* two. Concentrated in fork-only files (`session_manager/switch.go` 12, `manager.go` 4, `roles/*` 7, `domain/rolemap.go` 2). Mostly mechanical: errorlint 18, goimports 9, dupl 5 |
+| **CI merge gate — tests** | `npm run lint` runs `go test ./...` first, which has intermittently failed before reaching lint on adapter auth tests (`fake`, `kilocode`, `opencode` — context deadlines). **Flaky, not consistently failing**: those three packages passed cleanly on a targeted re-run, so treat them as timing-sensitive under full-suite load, not broken. Frontend `vitest` has 6 **reproducible** pre-existing failures (5 in `src/landing/scripts/generate-markdown-twins.test.mjs`, 1 in `src/renderer/lib/api-client.test.ts`), confirmed on a stashed tree — unrelated to the roles work, and blocking |
 
 **Next eng (critical path):** **Phase 3A** (structured limit detection → durable pause → zero automatic send/restart). **2B-3** (cross-harness orchestrator switch) stays blocked on **Phase 1-F / Claude RO**, which remains parallel; 2B-1 deliberately refuses cross-harness today.
 
@@ -145,8 +147,8 @@ Strict `strictDelegation` as daily driver still wants full Phase 1 exit:
 
 ### Phase 2B — Orchestrator ownership transfer (~6–11 working days)
 
-**Plan:** `PHASE2B_PLAN.md` (**2B-0a landed; 2B-0b substantially landed**, remainder
-below; 2B-1 onward not started).
+**Plan:** `PHASE2B_PLAN.md` (**2B-0a, 2B-0b, 2B-1 and 2B-2 landed**; **2B-3
+blocked/deferred on 1-B Claude RO**, so Phase 2B is *not* complete).
 Scope decided: **in-place switch now, successor-session handoff deferred**;
 **fence only, no new durable inbox** (upstream shipped and reverted durable
 orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
@@ -215,7 +217,8 @@ cross-harness orchestrator switch on strict projects (2B-3).
 | ~~2A promotion gate~~ | **Done** | Close-out accepted; caps flipped |
 | 1-B Claude RO (optional parallel) | 3–5 | 1-A |
 | 1-F Phase 1 strict exit | 2–3 | 1-B if Claude RO required for strict maps |
-| Phase 2B | 3–5 | 2A patterns (available) |
+| ~~Phase 2B-0a/0b/1/2~~ | **Done** | 2A patterns; ≈6–11 d actual, not the 3–5 first estimated |
+| Phase 2B-3 (cross-harness orch) | 1–2 | **blocked on 1-B Claude RO** for strict projects |
 | Phase 3A/B | 7–11 | limit detection (promote in 3A) |
 | Integration | 3–5 | prior |
 
@@ -278,7 +281,7 @@ Still open:
 13. [x] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
 14. [x] Worker switch saga + fresh-conversation (manager + service/API/CLI)
 15. [x] Lifecycle ledger (switch/fresh)
-16. [ ] Orchestrator switch protocol
+16. [~] Orchestrator switch protocol — in-place fresh conversation (2B-1) + durable replacement recoverability (2B-2) landed; **cross-harness switch (2B-3) blocked on Claude RO**; successor-session handoff and live-worker rebind deferred
 17. [ ] Limit pause
 18. [ ] Manual continue + opt-in auto-failover
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted

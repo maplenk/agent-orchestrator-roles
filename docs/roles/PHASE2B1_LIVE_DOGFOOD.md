@@ -105,6 +105,14 @@ POST /sessions/{id}/send  ->  409  SWITCH_IN_PROGRESS
                               "A worker switch is already in progress for this session"
 ```
 
+That message is quoted as observed. Being told a **worker** switch was in
+progress while refreshing an *orchestrator* is exactly the worker-centric
+wording review flagged: orchestrator fresh reuses the same saga and fences, so
+`SWITCH_IN_PROGRESS`, `SWITCH_NOT_SUPPORTED` and `NOT_A_WORKER` are now
+kind-neutral. The same probe today reads "A switch or fresh conversation is
+already in progress for this session"; the code and fence behaviour are
+unchanged.
+
 After `target_ack` the same call is no longer fenced — it reaches ordinary
 message validation (`400 MESSAGE_REQUIRED` for an empty body), which is the
 distinguishing evidence that the gate lifted rather than the endpoint being

@@ -21,8 +21,10 @@
 | **`switch_supported`** | **true** for `claude-code` and `codex` only |
 | **`limit_detection_supported`** | **false** everywhere production — do not flip |
 | **`read_only_enforced`** | **true only for Codex**; Claude/Pi false by design for now |
-| **Critical path next** | **Phase 2B — Orchestrator ownership transfer** |
-| **Parallel optional** | Phase 1-F strict dogfood / Claude RO (1-B) — does not block 2B |
+| **Phase 2B** | **2B-0a / 0b / 1 / 2 landed** (see `PHASE2B_PLAN.md`); **2B-3 blocked** — a strict orchestrator must be `workspaceWrites:false`, which needs `read_only_enforced`, which only Codex has |
+| **Critical path next** | **Phase 3A — structured limit envelopes + durable pause** (independent of Claude RO) |
+| **Parallel optional** | Phase 1-F strict dogfood / Claude RO (1-B) — no longer merely optional: it is what unblocks 2B-3 |
+| **CI-blocking debt** | `golangci-lint` is **not clean** on this branch and `go.yml` blocks at zero findings — fix before any merge |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -326,7 +328,7 @@ Do not claim these in docs, PRs, or dogfood:
 3. **Claude RO** (`read_only_enforced=false`)
 4. **Pi switch** or other harness switch
 5. **Limit detection / durable pause / auto-failover runtime**
-6. **Orchestrator ownership transfer** (Phase 2B not started)
+6. **Cross-harness orchestrator switch** (2B-3) — blocked on Claude RO. In-place orchestrator fresh conversation (2B-1) and durable replacement recoverability (2B-2) **have** landed; successor-session handoff and live-worker rebind remain deferred non-claims
 7. Full `go test ./...` green as a formal gate (prefer focused packages; expand when doing 1-F)
 
 ---
@@ -518,10 +520,13 @@ High-level protocol used successfully:
    - `REMAINING_PLAN.md` (snapshot + §2 remaining)
    - `MASTER_PLAN.md` §5.4 (orch switch) + §8–10
    - skim `PHASE2A_LIVE_DOGFOOD.md` (lessons 5.5–5.7)
-3. **Start Phase 2B** unless human prioritizes Claude RO / 1-F:
-   - Explore orch session, routing, nudge, coordinator code paths
-   - Draft `PHASE2B_PLAN.md` with state machine + reuse of 2A primitives
+3. **Start Phase 3A** — 2B-0a/0b/1/2 have landed and 2B-3 is blocked on Claude RO,
+   so 3A (structured limit envelopes → durable pause → zero automatic
+   send/restart) is the critical path unless the human prioritizes Claude RO / 1-F:
+   - Read `PHASE2B_PLAN.md` + `PHASE2B1_LIVE_DOGFOOD.md` first — the switch saga,
+     fences and ledger 3A extends are documented there
    - Implement in thin vertical slices with tests
+   - Keep `limit_detection_supported` **false** until structured-limit tests exist
 4. On each land: update `REMAINING_PLAN.md`, run focused tests, prefer push after human accept of risky slices
 5. **Never** promote `limit_detection_supported` without Phase 3 evidence
 6. **Do not** reopen 2A switch promotion without a production regression

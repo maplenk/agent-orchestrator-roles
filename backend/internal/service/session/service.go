@@ -648,11 +648,15 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrAwaitingDecision):
 		return apierr.Conflict("SESSION_AWAITING_DECISION",
 			"Session is paused on a permission decision; answer it in the session terminal first", nil)
+	// Wording here is deliberately kind-neutral: orchestrator fresh conversation
+	// runs through the same saga and fences, so an orchestrator hitting the input
+	// fence used to be told a "worker switch" was in progress.
 	case errors.Is(err, sessionmanager.ErrSwitchNotSupported):
 		return apierr.Conflict("SWITCH_NOT_SUPPORTED",
-			"Harness does not support worker switch (switch_supported=false for this source or target)", nil)
+			"Harness does not support switching (switch_supported=false for this source or target)", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
-		return apierr.Conflict("SWITCH_IN_PROGRESS", "A worker switch is already in progress for this session", nil)
+		return apierr.Conflict("SWITCH_IN_PROGRESS",
+			"A switch or fresh conversation is already in progress for this session", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchPostStop):
 		return apierr.Conflict("SWITCH_POST_STOP",
 			"Source stopped but target switch did not complete; handoff retained for recovery", nil)
@@ -660,7 +664,7 @@ func toAPIError(err error) error {
 		return apierr.Conflict("SWITCH_UNCERTAIN",
 			"Switch runtime state is uncertain; inspect session and recover carefully", nil)
 	case errors.Is(err, sessionmanager.ErrNotWorker):
-		return apierr.Invalid("NOT_A_WORKER", "Only worker sessions support switch/fresh conversation", nil)
+		return apierr.Invalid("NOT_A_WORKER", "This session kind does not support switch or fresh conversation", nil)
 	case errors.Is(err, sessionmanager.ErrNotOrchestrator):
 		return apierr.Invalid("NOT_AN_ORCHESTRATOR", "This operation requires an orchestrator session", nil)
 	case errors.Is(err, sessionmanager.ErrOrchestratorCrossHarness):
