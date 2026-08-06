@@ -3,11 +3,16 @@ package controllers_test
 import (
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/authctx"
+	"github.com/aoagents/agent-orchestrator/backend/internal/config"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/httpd"
 )
 
 // Pause is the human's control over the fleet, so its gate is STRICTER than
@@ -142,4 +147,37 @@ func doPausePOST(t *testing.T, base, path, body string, headers map[string]strin
 	var env map[string]any
 	_ = json.Unmarshal(raw, &env)
 	return resp.StatusCode, env
+}
+
+// LAN authentication is a first-class operator path: a LAN-authenticated client
+// has already proved it is the human, so it needs no token. Without this the
+// gate could be "operator token only" and every LAN client would be locked out
+// of pausing anything.
+func TestPause_LANAuthenticatedAllowedWithoutOperatorHeader(t *testing.T) {
+	for _, tc := range []struct {
+		path  string
+		calls func(*spawnGateSvc) int
+	}{
+		{"/api/v1/sessions/mer-1/pause", func(s *spawnGateSvc) int { return s.pauseCalls }},
+		{"/api/v1/sessions/mer-1/resume", func(s *spawnGateSvc) int { return s.resumeCalls }},
+	} {
+		svc, _ := newSpawnGateSvcWithToken()
+		svc.sessions["mer-1"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "mer-1", Kind: domain.KindWorker}}
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		deps := httpd.APIDeps{Sessions: svc, OperatorSpawn: opAuth{tok: "op-secret"}}
+		inner := httpd.NewRouterWithControl(config.Config{}, log, nil, deps, httpd.ControlDeps{})
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			inner.ServeHTTP(w, r.WithContext(authctx.WithLANAuthenticated(r.Context())))
+		})
+		srv := httptest.NewServer(h)
+		t.Cleanup(srv.Close)
+
+		code, env := doPausePOST(t, srv.URL, tc.path, `{"incidentId":"inc-1"}`, nil)
+		if code != http.StatusOK {
+			t.Fatalf("%s: LAN-auth status=%d env=%v", tc.path, code, env)
+		}
+		if tc.calls(svc) != 1 {
+			t.Fatalf("%s: service calls=%d, want 1", tc.path, tc.calls(svc))
+		}
+	}
 }

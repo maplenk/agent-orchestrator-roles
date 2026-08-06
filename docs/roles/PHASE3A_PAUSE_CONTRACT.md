@@ -132,11 +132,19 @@ countdown to an automatic resume — nothing schedules against it.
 Liveness is already in the read model (`activity.state`), and that is what
 distinguishes the two paused cells above. The UI must read both.
 
-**Boot makes this fact truthful.** When reconcile proves a paused session's
-runtime is dead it records an `exited` observation — without terminating the
-session, writing a restore marker, or touching the pin. Without that, the
-pre-crash activity would survive and the row would serialize as paused **and**
-working, leaving the UI unable to know it should offer "Restart agent".
+**Boot makes this fact truthful, or refuses to serve.** When reconcile proves a
+paused session's runtime is dead it records an `exited` observation — without
+terminating the session, writing a restore marker, or touching the pin. Without
+that, the pre-crash activity would survive and the row would serialize as paused
+**and** working, leaving the UI unable to know it should offer "Restart agent".
+
+If that write **fails**, boot aborts (`ErrPausedLivenessUnresolved`, a child of
+`ErrBootUnsafe`). The surviving state is actively misleading rather than merely
+incomplete — the row claims an agent is working that boot has already proved
+gone — and serving a read model boot has disproved is worse than not serving.
+Both halves are required: the error must be an `ErrBootUnsafe` child, **and**
+the reconcile live pass must carry it out, which it previously could not because
+that loop logged everything it caught.
 
 ## 6. What this does not cover
 

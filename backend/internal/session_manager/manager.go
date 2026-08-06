@@ -1025,6 +1025,16 @@ var ErrOrchestratorEvidenceUnresolved = fmt.Errorf("%w: orchestrator restore evi
 // restart.
 var ErrLaunchCleanupUnresolved = fmt.Errorf("%w: launch cleanup unresolved", ErrBootUnsafe)
 
+// ErrPausedLivenessUnresolved is boot proving a paused session's runtime dead
+// and then FAILING to record it.
+//
+// Boot-fatal rather than logged, because the surviving state is actively
+// misleading rather than merely incomplete: the row still says the agent is
+// working. A human looking at a paused session would be shown "Resume" for a
+// process that no longer exists, and told nothing needs restarting. Serving a
+// read model that boot has already disproved is worse than not serving.
+var ErrPausedLivenessUnresolved = fmt.Errorf("%w: paused session liveness not recorded", ErrBootUnsafe)
+
 // reapFailedLaunchRuntime tears down the runtime of a launch that could not be
 // adopted, and reports whether its death is CONFIRMED.
 //
@@ -2263,6 +2273,16 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if err := m.reconcileLive(ctx, rec); err != nil {
+			// Boot-unsafe outcomes are COLLECTED, not merely logged: this loop
+			// used to log everything, so an ErrBootUnsafe raised here could never
+			// reach Reconcile's return and the daemon served anyway. The test is
+			// on the error, not on the pass, so any future boot-unsafe condition
+			// in the live pass is carried automatically.
+			if errors.Is(err, ErrBootUnsafe) {
+				m.logger.Error("reconcile: live pass left boot unsafe", "sessionID", rec.ID, "error", err)
+				unresolved = append(unresolved, err)
+				continue
+			}
 			m.logger.Error("reconcile: live pass failed, skipping", "sessionID", rec.ID, "error", err)
 		}
 	}
@@ -2271,6 +2291,12 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if err := m.reconcileReap(ctx, rec); err != nil {
+			// Same rule as the live pass above, for the same reason.
+			if errors.Is(err, ErrBootUnsafe) {
+				m.logger.Error("reconcile: reap pass left boot unsafe", "sessionID", rec.ID, "error", err)
+				unresolved = append(unresolved, err)
+				continue
+			}
 			m.logger.Error("reconcile: reap pass failed, skipping", "sessionID", rec.ID, "error", err)
 		}
 	}

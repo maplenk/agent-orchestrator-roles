@@ -1,6 +1,7 @@
 package sessionmanager
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -275,5 +276,43 @@ func TestReconcile_LeavesALivePausedSessionAlone(t *testing.T) {
 	}
 	if got := st.sessions["mer-1"].Activity.State; got != domain.ActivityActive {
 		t.Fatalf("activity = %q, want active: a live paused agent was reported dead", got)
+	}
+}
+
+// Recording the exit can FAIL, and that failure is boot-fatal.
+//
+// The surviving state is actively misleading rather than merely incomplete:
+// boot proved the process is gone, but the row still says working. Serving that
+// shows a human "Resume" for a session that actually needs restarting. Two
+// things have to hold for this to work — the error must be an ErrBootUnsafe
+// child, AND the live pass must carry it out of Reconcile, which it previously
+// could not because that loop logged everything it caught.
+func TestReconcile_FailedExitObservationIsBootFatal(t *testing.T) {
+	m, st, _, _ := newLifecycleManager()
+	st.sessions["mer-1"] = domain.SessionRecord{
+		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{
+			WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1/root",
+			RuntimeHandleID: "tmux-dead", AgentSessionID: "agent-w",
+			Pause: pausePin("inc-1"),
+		},
+		Activity: domain.Activity{State: domain.ActivityActive},
+	}
+	st.updateFailAfter = 1
+	st.updateErr = errors.New("database is locked")
+
+	err := m.Reconcile(ctx)
+	if !errors.Is(err, ErrPausedLivenessUnresolved) {
+		t.Fatalf("Reconcile = %v, want ErrPausedLivenessUnresolved", err)
+	}
+	// The daemon gates on the PARENT, so the child must satisfy it or boot
+	// serves regardless of how specific the child is.
+	if !errors.Is(err, ErrBootUnsafe) {
+		t.Fatal("the failure is not an ErrBootUnsafe child; daemon.Run would log it and serve")
+	}
+	// And the misleading state is exactly what it refuses to serve.
+	if got := st.sessions["mer-1"]; got.Activity.State != domain.ActivityActive || got.Metadata.Pause == nil {
+		t.Fatalf("fixture drifted: activity=%q paused=%v; the point is that the row still reads paused+working",
+			got.Activity.State, got.Metadata.Pause != nil)
 	}
 }

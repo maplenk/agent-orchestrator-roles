@@ -1116,6 +1116,7 @@ func sessionOperations() []operation {
 			resps: []respUnit{
 				{http.StatusOK, controllers.PauseSessionResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},
@@ -1129,6 +1130,7 @@ func sessionOperations() []operation {
 			resps: []respUnit{
 				{http.StatusOK, controllers.PauseSessionResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},
 				{http.StatusConflict, envelope.APIError{}},
 				{http.StatusInternalServerError, envelope.APIError{}},

@@ -316,7 +316,11 @@ func (m *Manager) recordConfirmedExit(ctx context.Context, rec domain.SessionRec
 	rec.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: m.clock()}
 	rec.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, rec); err != nil {
-		return fmt.Errorf("reconcile %s: record confirmed exit: %w", rec.ID, err)
+		// Boot-fatal. Continuing would serve a read model boot has already
+		// disproved: the row still claims the agent is working, so the UI
+		// offers "Resume" for a process that is gone and never suggests a
+		// restart. See ErrPausedLivenessUnresolved.
+		return fmt.Errorf("%w: session %s: %w", ErrPausedLivenessUnresolved, rec.ID, err)
 	}
 	return nil
 }
