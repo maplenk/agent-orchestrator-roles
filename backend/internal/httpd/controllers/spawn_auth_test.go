@@ -64,7 +64,7 @@ func (f *spawnGateSvc) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.S
 	f.sessions[id] = s
 	return s, 0, 0, nil
 }
-func (f *spawnGateSvc) SpawnOrchestrator(context.Context, domain.ProjectID, bool) (domain.Session, error) {
+func (f *spawnGateSvc) SpawnOrchestrator(context.Context, domain.ProjectID, bool, domain.SessionMode) (domain.Session, error) {
 	return domain.Session{}, nil
 }
 func (f *spawnGateSvc) Get(_ context.Context, id domain.SessionID) (domain.Session, error) {
@@ -322,4 +322,8 @@ func TestSpawn_LANAuthenticatedTrustedWithoutOperatorHeader(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("LAN-auth spawn status=%d", code)
 	}
+}
+
+func (f *spawnGateSvc) StageAttachments(context.Context, domain.SessionID, []ports.SpawnAttachment) ([]string, error) {
+	return nil, nil
 }

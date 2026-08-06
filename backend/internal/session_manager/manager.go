@@ -84,6 +84,21 @@ var (
 	// ErrSwitchUncertain means destroy/probe could not establish source/target
 	// runtime liveness; recovery must not invent a second live generation.
 	ErrSwitchUncertain = errors.New("session: switch runtime state uncertain")
+	// ErrInterfaceHandoffUnsupported means the harness has not proven that its
+	// TUI resume identity and Chat protocol identity name the same conversation.
+	ErrInterfaceHandoffUnsupported = errors.New("session: interface handoff unsupported")
+	// ErrNativeConversationMissing means a supported harness has not yet exposed
+	// the native id required to resume it through the other controller.
+	ErrNativeConversationMissing = errors.New("session: native conversation id unavailable")
+	// ErrInterfaceAlreadySelected makes a stale/double switch request an explicit
+	// conflict instead of leaking a generic 500 after the first switch commits.
+	ErrInterfaceAlreadySelected = errors.New("session: requested interface is already selected")
+	// ErrInterfaceTransitionNotFound distinguishes a missing handoff from a
+	// missing session when DELETE is retried after the transition settled.
+	ErrInterfaceTransitionNotFound = errors.New("session: no active interface transition")
+	// ErrInterfaceTransitionNotCancellable protects the no-overlap invariant once
+	// the source controller is already stopping or stopped.
+	ErrInterfaceTransitionNotCancellable = errors.New("session: interface transition can no longer be cancelled")
 	// ErrResumeInProgress prevents concurrent resume requests from replacing the
 	// same runtime twice.
 	ErrResumeInProgress = errors.New("session: agent resume already in progress")
@@ -137,6 +152,7 @@ type lifecycleRecorder interface {
 	PrepareLaunch(id domain.SessionID, launchID string) error
 	CancelLaunch(id domain.SessionID, launchID string)
 	MarkSpawned(ctx context.Context, id domain.SessionID, metadata domain.SessionMetadata) error
+	CommitControllerEpoch(ctx context.Context, id domain.SessionID, source, target domain.SessionMode, nativeConversationID string, startFresh bool) (bool, error)
 	MarkTerminated(ctx context.Context, id domain.SessionID) error
 }
 
@@ -162,6 +178,17 @@ type lifecycleRecorder interface {
 // lifecycle.Manager takes its completion terminator the same way.
 type ShellTerminalCloser interface {
 	BeginSessionTeardown(ctx context.Context, id domain.SessionID) (release func(), err error)
+}
+
+// TerminalInputGate closes the raw terminal input path while an interface
+// transition drains and stops a TUI controller. It is separate from Messenger:
+// xterm keystrokes travel over the terminal mux and never pass through Send.
+type TerminalInputGate interface {
+	// BeginInputDrain atomically blocks later writes and returns the time of the
+	// newest write that was accepted before the block. Session Manager uses that
+	// barrier to avoid trusting an idle hook which predates already-buffered PTY
+	// input.
+	BeginInputDrain(terminalID string) (lastInputAt time.Time, release func())
 }
 
 type runtimeController interface {
@@ -281,7 +308,15 @@ type Manager struct {
 	// each call site re-deriving the check. Send/confirmActive use Deliver for
 	// its Outcome; Spawn/Restore use the interface-level Send for
 	// initial-prompt delivery, where a blocked session is impossible.
-	messenger           *sessionguard.Guard
+	messenger *sessionguard.Guard
+	// chat launches the structured controller for a chat-mode session. Nil means
+	// this build cannot run chat sessions, and a chat spawn is refused rather
+	// than silently downgraded to a terminal.
+	// defaults resolves the daemon-owned default session interface for a spawn
+	// that names no mode. Nil falls back to the compatibility default, so a build
+	// without it behaves exactly as before.
+	defaults            SessionModeDefaults
+	chat                ChatLauncher
 	lcm                 lifecycleRecorder
 	preview             PreviewLifecycle
 	browser             BrowserLifecycle
@@ -309,6 +344,19 @@ type Manager struct {
 	// switchCapsOverride is tests-only: when set, SwitchWorker uses it instead
 	// of capabilities.For (e.g. force-enable cells or pin a matrix for isolation).
 	switchCapsOverride func(domain.AgentHarness) capabilities.Caps
+	// The fork's ownershipMu covers resuming (and switching, and the project
+	// ownership map) under ONE lock order; upstream's separate resumeMu would
+	// be a second lock over the same map.
+	transitionMu sync.Mutex
+	transitions  map[domain.SessionID]*interfaceTransitionRun
+	// transitionDeliveryWake drives the durable transition-message outbox. A
+	// daemon-lifetime worker is started by Reconcile; terminal transition paths
+	// also make one immediate delivery attempt so tests and in-process callers do
+	// not depend on the boot worker.
+	transitionDeliveryMu        sync.Mutex
+	transitionDeliveryRunning   bool
+	transitionDeliveryWake      chan struct{}
+	transitionDeliveryAttemptMu sync.Mutex
 	// sendConfirm bounds the best-effort post-send confirmation that the session
 	// actually became active (the agent accepted the prompt). New fills in the
 	// sendConfirm* defaults; tests in this package shrink the timings directly.
@@ -320,6 +368,9 @@ type Manager struct {
 	// under lock rather than through the constructor.
 	shellTerminalsMu sync.Mutex
 	shellTerminals   ShellTerminalCloser
+
+	terminalInputGateMu sync.Mutex
+	terminalInputGate   TerminalInputGate
 }
 
 // SetShellTerminalCloser wires every worktree-releasing path to gate the
@@ -331,6 +382,31 @@ func (m *Manager) SetShellTerminalCloser(closer ShellTerminalCloser) {
 	m.shellTerminalsMu.Lock()
 	defer m.shellTerminalsMu.Unlock()
 	m.shellTerminals = closer
+}
+
+// SetTerminalInputGate late-binds the daemon's terminal mux after Session
+// Manager is constructed. Nil preserves the no-op behavior used by narrow tests.
+func (m *Manager) SetTerminalInputGate(gate TerminalInputGate) {
+	m.terminalInputGateMu.Lock()
+	defer m.terminalInputGateMu.Unlock()
+	m.terminalInputGate = gate
+}
+
+func (m *Manager) beginTerminalInputDrain(rec domain.SessionRecord) (lastInputAt time.Time, release func()) {
+	if domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeTUI {
+		return time.Time{}, nil
+	}
+	handle := runtimeHandle(rec.Metadata)
+	if handle.ID == "" {
+		return time.Time{}, nil
+	}
+	m.terminalInputGateMu.Lock()
+	gate := m.terminalInputGate
+	m.terminalInputGateMu.Unlock()
+	if gate == nil {
+		return time.Time{}, nil
+	}
+	return gate.BeginInputDrain(handle.ID)
 }
 
 // beginShellTerminalTeardown starts the shell-terminal gate for id ahead of
@@ -415,11 +491,18 @@ const (
 
 // Deps are the collaborators a Session Manager needs; New wires them together.
 type Deps struct {
-	Runtime             runtimeController
-	Agents              ports.AgentResolver
-	Workspace           ports.Workspace
-	Store               Store
-	Messenger           ports.AgentMessenger
+	Runtime   runtimeController
+	Agents    ports.AgentResolver
+	Workspace ports.Workspace
+	Store     Store
+	Messenger ports.AgentMessenger
+	// Defaults supplies the daemon-owned default session interface for spawns that
+	// name no mode. Nil means always use the compatibility default.
+	Defaults SessionModeDefaults
+	// Chat launches the structured controller for a chat-mode session. Nil means
+	// chat mode is unavailable, and a chat spawn is refused rather than silently
+	// downgraded to a terminal.
+	Chat                ChatLauncher
 	Lifecycle           lifecycleRecorder
 	Preview             PreviewLifecycle
 	Browser             BrowserLifecycle
@@ -447,21 +530,25 @@ type Deps struct {
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
 	m := &Manager{
-		runtime:             d.Runtime,
-		agents:              d.Agents,
-		workspace:           d.Workspace,
-		store:               d.Store,
-		lcm:                 d.Lifecycle,
-		preview:             d.Preview,
-		browser:             d.Browser,
-		browserCapabilities: d.BrowserCapabilities,
-		dataDir:             d.DataDir,
-		clock:               d.Clock,
-		lookPath:            d.LookPath,
-		executable:          d.Executable,
-		newLaunchID:         d.NewLaunchID,
-		resuming:            make(map[domain.SessionID]struct{}),
-		switching:           make(map[domain.SessionID]struct{}),
+		runtime:                d.Runtime,
+		agents:                 d.Agents,
+		workspace:              d.Workspace,
+		store:                  d.Store,
+		lcm:                    d.Lifecycle,
+		preview:                d.Preview,
+		browser:                d.Browser,
+		browserCapabilities:    d.BrowserCapabilities,
+		dataDir:                d.DataDir,
+		clock:                  d.Clock,
+		lookPath:               d.LookPath,
+		executable:             d.Executable,
+		newLaunchID:            d.NewLaunchID,
+		resuming:               make(map[domain.SessionID]struct{}),
+		switching:              make(map[domain.SessionID]struct{}),
+		defaults:               d.Defaults,
+		chat:                   d.Chat,
+		transitions:            make(map[domain.SessionID]*interfaceTransitionRun),
+		transitionDeliveryWake: make(chan struct{}, 1),
 		sendConfirm: sendConfirmConfig{
 			pollInterval:    sendConfirmPollInterval,
 			attemptDeadline: sendConfirmAttemptDeadline,
@@ -549,8 +636,28 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %q", ErrUnknownHarness, cfg.Harness)
 	}
 
-	if err := m.validateRuntimePrerequisites(); err != nil {
-		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+	// Resolve the controller mode here, before anything durable is created, for
+	// the same reason an unknown harness is rejected above: a chat request AO
+	// cannot honor should cost nothing, not leave a terminated row and a worktree
+	// behind. It never falls back to TUI — that would put the user in a terminal
+	// they deliberately did not ask for.
+	mode := m.resolveSessionMode(ctx, cfg.RequestedMode)
+	if mode == domain.SessionModeChat {
+		if m.chat == nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: chat mode is not available in this build", ports.ErrChatUnsupported)
+		}
+		if err := m.chat.PreflightChat(ctx, cfg.Harness); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+		}
+	}
+	cfg.RequestedMode = mode
+
+	// A chat session runs no agent inside a terminal runtime, so the terminal
+	// prerequisites are not its concern.
+	if mode == domain.SessionModeTUI {
+		if err := m.validateRuntimePrerequisites(); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+		}
 	}
 
 	prompt, systemPrompt, err := m.buildSpawnTexts(ctx, cfg, roleResult)
@@ -618,6 +725,41 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		prompt = appendAttachmentReferences(prompt, refs)
 	}
 
+	// Composed, and the ORDER is the invariant: project base, then upstream's
+	// per-spawn override, then the host-resolved role LAST. A role pin is
+	// host-authoritative — resolve already refuses a caller-supplied harness or
+	// model alongside a role — so letting the override land after the role
+	// would invert that gate for anything resolve did not reject outright.
+	//
+	// Computed BEFORE the mode branch: both controllers must launch from the
+	// same resolved values. Chat previously read effectiveAgentConfig(project)
+	// directly, which silently dropped the role's model and permissions.
+	agentConfig := mergeAgentConfig(
+		applySpawnAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), cfg.AgentConfig),
+		roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
+
+	// Everything above is shared: project, harness, prompts, seed row, worktree,
+	// provisioning, attachments. From here the two modes launch different
+	// controllers, and exactly one of them runs.
+	if mode == domain.SessionModeChat {
+		rec, err = m.launchChatController(ctx, chatSpawn{
+			cfg:              cfg,
+			project:          project,
+			projectKind:      projectKind,
+			record:           rec,
+			workspace:        ws,
+			workspaceProject: workspaceProject,
+			prompt:           prompt,
+			systemPrompt:     systemPrompt,
+			agentConfig:      agentConfig,
+			spawnToken:       spawnToken,
+		})
+		if err != nil {
+			return domain.SessionRecord{}, 0, 0, err
+		}
+		return rec, promptBytes, systemPromptBytes, nil
+	}
+
 	agent, ok := m.agents.Agent(cfg.Harness)
 	if !ok {
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
@@ -629,9 +771,6 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	// model alongside a role (ErrHarnessOverrideForbidden) — so letting the
 	// override land after the role would invert that gate for anything resolve
 	// did not reject outright.
-	agentConfig := mergeAgentConfig(
-		applySpawnAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), cfg.AgentConfig),
-		roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
 	// spawnToken is ours: the session-scoped spawn capability injected as
 	// AO_SPAWN_CAPABILITY. Upstream's signature has no such parameter.
 	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env, spawnToken)
@@ -1271,6 +1410,11 @@ func (m *Manager) RollbackSpawn(ctx context.Context, id domain.SessionID) (delet
 // Killing an orchestrator takes the project ownership gate, so a teardown
 // cannot interleave with a replacement that is minting its successor.
 func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
+	if active, err := m.hasActiveInterfaceTransition(ctx, id); err != nil {
+		return false, fmt.Errorf("kill %s: interface transition: %w", id, err)
+	} else if active {
+		return false, fmt.Errorf("kill %s: %w", id, ErrSwitchInProgress)
+	}
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return false, fmt.Errorf("kill %s: %w", id, err)
@@ -1339,7 +1483,13 @@ func (m *Manager) killUnderOwnership(ctx context.Context, id domain.SessionID) (
 		}
 	}
 
-	if handle.ID != "" {
+	// Exactly one controller exists, so exactly one gets torn down. A chat
+	// session has no runtime handle; its controller owns an app-server child
+	// process, and closing it also settles any turn left in flight so a later
+	// read does not show work that is no longer running.
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		m.stopChatBestEffort(ctx, id)
+	} else if handle.ID != "" {
 		if err := m.runtime.Destroy(ctx, handle); err != nil {
 			return false, fmt.Errorf("kill %s: runtime: %w", id, err)
 		}
@@ -1669,6 +1819,11 @@ func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec 
 // without the gate two restores — or a restore racing a replacement — can adopt
 // the same worktree before any uniqueness check is reached.
 func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
+	if active, err := m.hasActiveInterfaceTransition(ctx, id); err != nil {
+		return RestoreResult{}, fmt.Errorf("restore %s: interface transition: %w", id, err)
+	} else if active {
+		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrSwitchInProgress)
+	}
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, err)
@@ -1740,6 +1895,14 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 			return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, acqErr)
 		}
 		defer release()
+	}
+	// Upstream's gate, kept after the ownership gate: an interface transition
+	// in flight owns the controller, and relaunching underneath it would give
+	// the session two.
+	if active, err := m.hasActiveInterfaceTransition(ctx, id); err != nil {
+		return RestoreResult{}, fmt.Errorf("resume agent %s: interface transition: %w", id, err)
+	} else if active {
+		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrSwitchInProgress)
 	}
 	if !m.beginAgentResume(id) {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrResumeInProgress)
@@ -1813,12 +1976,34 @@ type relaunchOpts struct {
 	// probe-authoritatively and a survivor's identity still recorded — only the
 	// row's terminal state is left to the saga.
 	KeepSessionOnLaunchFailure bool
+	// ForceFresh bypasses native resume on both sides (upstream's
+	// relaunchSessionFresh): used by the interface transition and by switches
+	// where an empty conversation would fail target startup.
+	ForceFresh bool
 }
 
 func (m *Manager) relaunchSession(ctx context.Context, operation string, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, restartHandle *ports.RuntimeHandle, opts ...relaunchOpts) (RestoreResult, error) {
 	var o relaunchOpts
 	if len(opts) > 0 {
 		o = opts[0]
+	}
+	// Relaunch dispatches from the currently committed persisted mode, never
+	// from a caller hint. The interface-transition coordinator changes that
+	// fact only after stopping the old controller, then reuses this path.
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		// A read-only role must not reach Chat. read_only_enforced is a
+		// property of the harness's TERMINAL launch — Codex earns it from the
+		// --sandbox read-only argv this function builds. The Chat controller
+		// does not take that argv, and Codex Chat maps ordinary permissions to
+		// danger-full-access, so inheriting the harness capability into Chat
+		// would hand writes to a role defined not to have them.
+		if err := requireChatModeAllowed(rec.Metadata.Role); err != nil {
+			return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
+		}
+		if o.ForceFresh {
+			rec.Metadata.ProviderConversationID = ""
+		}
+		return m.resumeChatController(ctx, operation, rec, project, ws)
 	}
 	launchHarness := rec.Harness
 	if o.LaunchHarness != "" {
@@ -1885,8 +2070,19 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if err := m.prepareWorkspace(ctx, agent, rec.ID, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
 	}
-	// For switch pending target, RO policy still follows pinned role permissions.
-	argv, delivery, mode, err := restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata, systemPrompt, systemPromptFile, agentConfig, rec.Kind, launchHarness, m.dataDir, rec.Metadata.Role.ResolvedPermissions)
+	var argv []string
+	var delivery ports.PromptDeliveryStrategy
+	var mode RestoreMode
+	if o.ForceFresh {
+		argv, delivery, mode, err = freshLaunchArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata,
+			systemPrompt, systemPromptFile, agentConfig, rec.Kind, m.dataDir, true,
+			rec.Metadata.Role.ResolvedPermissions)
+	} else {
+		// For switch pending target, RO policy still follows pinned role permissions.
+		argv, delivery, mode, err = restoreArgv(ctx, agent, rec.ID, ws.Path, rec.Metadata,
+			systemPrompt, systemPromptFile, agentConfig, rec.Kind, launchHarness, m.dataDir,
+			rec.Metadata.Role.ResolvedPermissions)
+	}
 	if err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
@@ -1963,6 +2159,12 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		return RestoreResult{}, err
 	}
 	return RestoreResult{Session: updated, Mode: mode}, nil
+}
+
+// relaunchSessionFresh bypasses native resume on both sides, so an empty
+// conversation cannot fail startup (or rollback) with "No conversation found".
+func (m *Manager) relaunchSessionFresh(ctx context.Context, operation string, rec domain.SessionRecord, project domain.ProjectRecord, ws ports.WorkspaceInfo, restartHandle *ports.RuntimeHandle) (RestoreResult, error) {
+	return m.relaunchSession(ctx, operation, rec, project, ws, restartHandle, relaunchOpts{ForceFresh: true})
 }
 
 // parkFailedRelaunch unwinds a relaunch (restore, resume agent, switch) that
@@ -2180,24 +2382,35 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	}
 	handle := runtimeHandle(rec.Metadata)
 	probedDead := false
-	if handle.ID != "" {
-		alive, err := m.runtime.IsAlive(ctx, handle)
-		switch {
-		case err == nil:
-		case errors.Is(err, ports.ErrRuntimeUnavailable):
-			// Boot-time pass with no reachable tmux server (normal after a
-			// machine reboot). The runtime is gone either way; fall through to
-			// save-and-teardown, which keeps the restore marker rather than
-			// silently archiving the session.
-			alive = false
-		default:
-			// A failed probe is not proof of death: leave the session as-is.
-			return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
+	// A chat controller is an in-process child of the daemon, so unlike tmux it
+	// can never have survived the crash: there is nothing to adopt and nothing
+	// to probe. It falls through to the same save-and-teardown a dead runtime
+	// gets, which is what records the restore marker RestoreAll needs.
+	//
+	// probedDead therefore stays FALSE for chat. It means "a probe confirmed
+	// death", and pause liveness keys on it — a session that was never probed
+	// must not be reported as confirmed dead.
+	isChat := domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat
+	if !isChat {
+		if handle.ID != "" {
+			alive, err := m.runtime.IsAlive(ctx, handle)
+			switch {
+			case err == nil:
+			case errors.Is(err, ports.ErrRuntimeUnavailable):
+				// Boot-time pass with no reachable tmux server (normal after a
+				// machine reboot). The runtime is gone either way; fall through
+				// to save-and-teardown, which keeps the restore marker rather
+				// than silently archiving the session.
+				alive = false
+			default:
+				// A failed probe is not proof of death: leave the session as-is.
+				return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
+			}
+			if alive {
+				return nil // adopt: the session survived the crash.
+			}
+			probedDead = true
 		}
-		if alive {
-			return nil // adopt: the session survived the crash.
-		}
-		probedDead = true
 	}
 	// Past this point the runtime is confirmed dead and the session is torn
 	// down WITH a shutdown-saved marker — which RestoreAll then relaunches from,
@@ -2278,6 +2491,11 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 // The daemon treats that return as FATAL, ahead of every client-facing surface
 // (daemon.go, pinned by boot_order_test.go).
 func (m *Manager) Reconcile(ctx context.Context) error {
+	m.startTransitionMessageDispatcher(ctx)
+	_, err := m.recoverInterruptedInterfaceTransitions(ctx)
+	if err != nil {
+		return fmt.Errorf("reconcile: interface transitions: %w", err)
+	}
 	recs, err := m.store.ListAllSessions(ctx)
 	if err != nil {
 		return fmt.Errorf("reconcile: list sessions: %w", err)
@@ -2357,8 +2575,23 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			m.logger.Error("reconcile: reap pass failed, skipping", "sessionID", rec.ID, "error", err)
 		}
 	}
+	// RestoreAll's error joins the unresolved boot-safety errors rather than
+	// replacing them: a boot that could not resolve a restore marker must stay
+	// unsafe even if the restore pass itself succeeded.
+	//
 	// errors.Join drops nils, so a healthy pass still returns nil.
-	return errors.Join(append(unresolved, m.RestoreAll(ctx))...)
+	if err := errors.Join(append(unresolved, m.RestoreAll(ctx))...); err != nil {
+		return err
+	}
+	// Upstream's transition outbox runs only on a boot that reached here
+	// cleanly. Delivery failure is deliberately non-fatal — the durable outbox
+	// retries — but it must not run at all on an unsafe boot, which returns
+	// above.
+	if err := m.deliverAllTransitionMessages(ctx); err != nil {
+		m.logger.Error("reconcile: transition-message delivery deferred for retry", "error", err)
+	}
+	m.wakeTransitionMessageDispatcher()
+	return nil
 }
 
 // RestoreAll relaunches every terminated session that was saved by the last
@@ -3050,6 +3283,31 @@ func (m *Manager) applyWorkspaceProjectPreserved(ctx context.Context, rows []por
 // the session is active or the budget is exhausted. Confirmation never fails
 // the send: it only decides whether to nudge again.
 func (m *Manager) Send(ctx context.Context, id domain.SessionID, message string) error {
+	return m.send(ctx, id, message, "")
+}
+
+// send carries an optional idempotency key used by durable transition-message
+// retries. Ordinary callers leave it empty; the outbox preserves the key across
+// restart, rollback, and even a second overlapping handoff.
+func (m *Manager) send(ctx context.Context, id domain.SessionID, message, clientMessageID string) error {
+	// A controller transition deliberately has a short interval with no writer.
+	// Queue internal/lifecycle sends durably instead of racing either controller
+	// or dropping coordination work; the transition worker drains this outbox
+	// only after the target controller is active.
+	if queued, err := m.queueDuringInterfaceTransition(ctx, id, message, clientMessageID); err != nil {
+		return fmt.Errorf("send %s: interface transition: %w", id, err)
+	} else if queued {
+		return nil
+	}
+	// Chat mode has no pane to type into, so it does not go through the messenger
+	// at all. Without this branch the send reached the runtime guard and was
+	// refused as "missing runtime handles" — true of the handles, wrong about the
+	// session, and it left `ao send` and orchestrator-to-worker relay unable to
+	// reach a chat worker.
+	if handled, err := m.sendChat(ctx, id, message, clientMessageID); handled {
+		return err
+	}
+
 	message, err := m.prepareOutboundMessage(ctx, id, message)
 	if err != nil {
 		return err
@@ -3465,6 +3723,9 @@ func seedRecord(cfg ports.SpawnConfig, now time.Time) domain.SessionRecord {
 		Harness:     cfg.Harness,
 		DisplayName: cfg.DisplayName,
 		Activity:    domain.Activity{State: domain.ActivityIdle, LastActivityAt: now},
+		// Resolved before this point and persisted here. There is no UPDATE
+		// statement that can change it afterwards.
+		Mode: domain.NormalizeSessionMode(cfg.RequestedMode),
 	}
 	if cfg.RoleBinding.RoleID != "" {
 		rec.Metadata.Role = cfg.RoleBinding
@@ -4308,10 +4569,22 @@ func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, wo
 	if ok {
 		return cmd, ports.PromptDeliveryInCommand, RestoreModeNative, nil
 	}
+	return freshLaunchArgv(ctx, agent, id, workspacePath, meta, systemPrompt,
+		systemPromptFile, agentConfig, kind, dataDir, false, policy)
+}
+
+// freshLaunchArgv builds the non-resume half of restoreArgv. Interface
+// transitions also use it when an adapter proves its reserved id has no
+// persisted history, both for preflight and for the actual target launch.
+// policy is the fork's addition: a FRESH launch of a role-pinned session still
+// has to reach the adapter with read-only applied. Without it, "start a fresh
+// conversation" would quietly become the way to get a writable process out of a
+// workspaceWrites:false role.
+func freshLaunchArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, workspacePath string, meta domain.SessionMetadata, systemPrompt, systemPromptFile string, agentConfig ports.AgentConfig, kind domain.SessionKind, dataDir string, allowPromptless bool, policy domain.RoleExecutionPolicy) ([]string, ports.PromptDeliveryStrategy, RestoreMode, error) {
 	// A saved prompt is replayed fresh. An orchestrator is promptless by design
 	// and relaunches with the system prompt only. A promptless WORKER has no task
 	// and no session id to restore from: do not blank-relaunch it.
-	if meta.Prompt == "" && kind != domain.KindOrchestrator {
+	if meta.Prompt == "" && kind != domain.KindOrchestrator && !allowPromptless {
 		return nil, "", "", ErrNotResumable
 	}
 	// Fall through to a fresh launch. Command-delivered agents receive
@@ -4329,7 +4602,7 @@ func restoreArgv(ctx context.Context, agent ports.Agent, id domain.SessionID, wo
 		Permissions:      agentConfig.Permissions,
 	}
 	if strings.TrimSpace(meta.Role.RoleID) != "" && !policy.WorkspaceWrites {
-		readonly.ApplyLaunch(harness, &launchCfg)
+		readonly.ApplyLaunch(meta.Role.ResolvedHarness, &launchCfg)
 	}
 	delivery, err := agent.GetPromptDeliveryStrategy(ctx, launchCfg)
 	if err != nil {
