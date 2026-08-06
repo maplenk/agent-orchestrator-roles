@@ -363,6 +363,20 @@ func resolveDataDir() (string, error) {
 	return filepath.Join(stateDir, "data"), nil
 }
 
+// DefaultDataDir is where durable state lives with NO override, i.e. the
+// installed app's directory. Exported so the runtime adapter can tell "this is
+// the default installation" from "this is an isolated instance" and namespace
+// the tmux server accordingly. An error resolving it is reported as empty,
+// which the caller treats as "not the default" — the fail-closed direction,
+// since an isolated socket is always safe and a shared one is not.
+func DefaultDataDir() string {
+	stateDir, err := defaultStateDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(stateDir, "data")
+}
+
 func defaultStateDir() (string, error) {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {

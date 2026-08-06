@@ -758,6 +758,13 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrIncidentMismatch):
 		return apierr.Conflict("PAUSE_INCIDENT_MISMATCH",
 			"A different incident now holds this session; re-read it and answer the current one", nil)
+	// A runtime name collision is actionable and specific: another AO instance
+	// owns that tmux session. Collapsing it into INTERNAL_ERROR was what a UI
+	// review saw when two data directories shared a tmux server.
+	case errors.Is(err, ports.ErrRuntimeSessionConflict):
+		return apierr.Conflict("RUNTIME_SESSION_CONFLICT",
+			"Another AO instance already owns this session's terminal. Stop the other instance, "+
+				"or run this one with its own AO_DATA_DIR so it gets an isolated terminal server", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):

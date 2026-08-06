@@ -55,6 +55,23 @@ type Options struct {
 	ChunkSize  int           // default 16*1024
 	EnterDelay time.Duration // pause after pasting a non-empty message before pressing Enter; default defaultEnterDelay. Conpty already does this (ptyInputEnterDelay); tmux lacked it, so a large multiline paste could absorb the trailing Enter and leave the prompt unsubmitted (issue #2342).
 	ReapGrace  time.Duration // grace between SIGTERM and SIGKILL when reaping a pane's leftover background processes on Destroy; default defaultReapGrace.
+	// Socket namespaces the tmux SERVER this runtime talks to (tmux -L).
+	//
+	// Empty means the default server, which is what the default data directory
+	// uses so an upgrade does not orphan panes an existing daemon created.
+	// Any other data directory gets its own socket, and that is what makes two
+	// daemons safe to run at once: session NAMES derive from the session id
+	// alone, so two data dirs with the same project produce the same name, and
+	// on a shared server the second daemon's create collides with — or worse,
+	// its kill destroys — the first's pane.
+	//
+	// Namespacing the server rather than the names is deliberate: every
+	// operation (create, probe, attach, write, resize, destroy, list) goes
+	// through the same argv, so isolation holds by construction instead of by
+	// remembering to prefix at each call site. It also means an isolated daemon
+	// CANNOT see the default server's sessions, so it can never silently adopt
+	// a pane belonging to another data directory.
+	Socket string
 }
 
 // Runtime runs agent sessions inside tmux sessions, driving them via the tmux
@@ -66,6 +83,7 @@ type Runtime struct {
 	chunkSize    int
 	enterDelay   time.Duration
 	reapGrace    time.Duration
+	socket       string
 	runner       runner
 	reapSessions func(ctx context.Context, pids []int, grace time.Duration)
 }
@@ -240,6 +258,7 @@ func stableRunDir() string {
 // (resolved via exec.LookPath), shell from $SHELL (else /bin/sh), and the
 // default timeout and output chunk size.
 func New(opts Options) *Runtime {
+	socket := strings.TrimSpace(opts.Socket)
 	binary := opts.Binary
 	if binary == "" {
 		if path, err := exec.LookPath("tmux"); err == nil {
@@ -278,6 +297,7 @@ func New(opts Options) *Runtime {
 		chunkSize:    chunkSize,
 		enterDelay:   enterDelay,
 		reapGrace:    reapGrace,
+		socket:       socket,
 		runner:       execRunner{},
 		reapSessions: killSessionsByPID,
 	}
@@ -303,6 +323,15 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	launchCmd := buildLaunchCommand(cfg)
 	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
 	if _, err := r.run(ctx, args...); err != nil {
+		// A name collision is not a generic runtime fault: it means another
+		// tmux client already owns this name. Classify it so the API and the UI
+		// can say WHICH instance and what to do, instead of collapsing to
+		// INTERNAL_ERROR — the failure a reviewer hit running two data
+		// directories at once.
+		if isDuplicateSession(err) {
+			return ports.RuntimeHandle{}, fmt.Errorf("%w: tmux session %q already exists on server %s",
+				ports.ErrRuntimeSessionConflict, id, r.serverLabel())
+		}
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: create session %s: %w", id, err)
 	}
 	if err := r.verifyPaneWorkingDirectory(ctx, id, cfg.WorkspacePath); err != nil {
@@ -680,7 +709,7 @@ func (r *Runtime) attachCommand(handle ports.RuntimeHandle) ([]string, error) {
 	// The embedded xterm renderer supports 24-bit SGR colors. Tell this tmux
 	// client explicitly so tmux forwards RGB instead of quantizing it to the
 	// xterm-256color palette. -T is available in AO's minimum tmux version (3.2).
-	return []string{r.binary, "-u", "-T", "RGB", "attach-session", "-t", id}, nil
+	return append([]string{r.binary}, r.withSocket("-u", "-T", "RGB", "attach-session", "-t", id)...), nil
 }
 
 func attachEnv(base []string) []string {
@@ -708,7 +737,31 @@ func attachEnv(base []string) []string {
 
 // run wraps runner.Run with a per-call timeout context.
 func (r *Runtime) run(ctx context.Context, args ...string) ([]byte, error) {
-	return r.runCommand(ctx, r.binary, args...)
+	return r.runCommand(ctx, r.binary, r.withSocket(args...)...)
+}
+
+// serverLabel names the tmux server for a human reading an error.
+func (r *Runtime) serverLabel() string {
+	if r.socket == "" {
+		return "default"
+	}
+	return r.socket
+}
+
+// isDuplicateSession recognises tmux refusing to create a name that is already
+// taken. Matched on the message because tmux exits 1 for everything.
+func isDuplicateSession(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate session")
+}
+
+// withSocket prefixes the tmux server selector. Every tmux invocation in this
+// package funnels through here or AttachCommand, so adding an operation cannot
+// accidentally escape the namespace.
+func (r *Runtime) withSocket(args ...string) []string {
+	if r.socket == "" {
+		return args
+	}
+	return append([]string{"-L", r.socket}, args...)
 }
 
 func (r *Runtime) runCommand(ctx context.Context, name string, args ...string) ([]byte, error) {

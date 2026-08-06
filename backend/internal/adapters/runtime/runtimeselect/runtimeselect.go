@@ -37,9 +37,19 @@ var _ ports.RuntimeSessionHandleResolver = (*conpty.Runtime)(nil)
 
 // New returns the per-platform runtime: tmux on Darwin/Linux, conpty on Windows.
 // log is accepted for signature stability with callers but is currently unused.
-func New(_ *slog.Logger) Runtime {
+//
+// dataDir and defaultDataDir namespace the tmux server so two daemons rooted at
+// different data directories cannot address — or destroy — each other's panes.
+// Session names derive from the session id alone, so the same project under two
+// data dirs produces the same name; on a shared tmux server the second daemon's
+// create collides with the first's pane, and its kill destroys it.
+//
+// Windows is deliberately unaffected: conpty processes are owned by the daemon
+// that spawned them and are not addressable by name from another process, so
+// there is nothing to namespace and its behaviour is unchanged.
+func New(_ *slog.Logger, dataDir, defaultDataDir string) Runtime {
 	if runtime.GOOS != "windows" {
-		return tmux.New(tmux.Options{})
+		return tmux.New(tmux.Options{Socket: tmux.SocketForDataDir(dataDir, defaultDataDir)})
 	}
 	return conpty.New(conpty.Options{})
 }

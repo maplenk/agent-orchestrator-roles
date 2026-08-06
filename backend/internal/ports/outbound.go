@@ -342,3 +342,12 @@ type WorkspaceRepoInfo struct {
 	ProjectID    domain.ProjectID
 	RelativePath string
 }
+
+// ErrRuntimeSessionConflict means the runtime refused to create a session
+// because that name is already owned by something else — in practice, another
+// AO instance rooted at a different data directory sharing a tmux server.
+//
+// It is a distinct sentinel because the remedy is specific and the user can act
+// on it (stop the other instance, or run this one isolated), which a generic
+// runtime failure collapsing to INTERNAL_ERROR does not tell them.
+var ErrRuntimeSessionConflict = errors.New("runtime session name already in use")
