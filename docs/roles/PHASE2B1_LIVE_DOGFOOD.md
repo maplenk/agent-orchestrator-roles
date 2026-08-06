@@ -130,24 +130,66 @@ unexplained ledger failures:    0
 | 1 | Service required a role pin + role map for **any** switch, making fresh conversation unreachable for un-pinned sessions — including every orchestrator on a non-strict project | Checks moved to the cross-harness path, where the map actually authorizes a target |
 | 2 | `relaunchSession` stamped an ephemeral `ResolvedHarness` onto an **empty** role binding, manufacturing a partial pin that restore correctly refused — *after* the source had stopped, so it failed identically on every boot | Stamp only applies when a pin exists |
 | 3 | `EnsureOrchestrator`'s non-`clean` path never discharged the replacement intent, so a project rescued by an ordinary spawn kept a durable record claiming it was still owed one | Both non-clean branches discharge |
-| 4 | Missing role profiles surface as an **opaque 500** with nothing logged | **Open** — see below |
+| 4 | Desktop bundles shipped **no role templates at all**, so a clean install could not launch a strict role-pinned orchestrator | Profiles staged + shipped as an ;  passed explicitly. Re-dogfooded from an empty data dir |
+| 5 | The five role-resolution sentinels were unmapped, so configuration errors surfaced as **opaque 500s** | Stable actionable 400s with wrapped-error coverage |
 
-### Open, not fixed here
+### Follow-ups from review — both closed
 
-**Missing role templates return 500.** With strict delegation on and no profile
-root present, `POST /orchestrators` returned `INTERNAL_ERROR` with no log line.
-The cause was that none of the profile roots existed — the daemon's cwd is the
-data dir, so `cwd/profiles` resolves to `~/.ao/dev/data/profiles`, and the
-repository's shipped `profiles/` is not on the search path in a dev launch.
-`ErrRolePromptRequired`, `ErrRoleUnknown` and `ErrRoleRequired` have no
-`toAPIError` mapping, so a legitimate configuration error is indistinguishable
-from a daemon bug. This is the same class as the orchestrator-uniqueness
-constraint that used to surface as an opaque 500, and should get the same
-treatment.
+**P1 — profiles were not shipped at all.** Recorded here first as a
+"dev-launch path issue", which understated it: `forge.config.ts`
+`extraResource` did not include `profiles`, so a **clean desktop install
+shipped no role templates**, and `profileRoots` only searches
+`AO_ROLE_PROFILES_DIR`, `cwd/profiles` and data-dir-relative paths — none of
+which exist for a packaged daemon running with cwd `~/.ao`. A fresh install
+therefore could not launch a strict role-pinned orchestrator at all.
 
-Worked around for this run by installing `profiles/` into `~/.ao/dev/data/profiles`.
+Fixed by staging `profiles/` into the bundle (`scripts/stage-profiles.mjs`, run
+from both `predev` and `prepackage`, failing closed on a missing or empty
+source), shipping it via `extraResource`, and passing `AO_ROLE_PROFILES_DIR`
+explicitly on every platform in both dev and packaged launches
+(`resolveRoleProfilesDir`).
 
-**This also means D2a was observed live**: the failed spawn happened *after* the
-predecessor was retired, leaving the project at zero orchestrators — and 2B-2's
-replacement intent was present and correctly retained, then discharged once an
-orchestrator existed again.
+**Clean-install re-dogfood**, with `~/.ao/dev` moved aside and nothing copied by
+hand:
+
+```
+daemon env: AO_ROLE_PROFILES_DIR=<repo>/profiles
+profiles under the data dir: NONE
+POST /projects                     -> 201
+PUT  /projects/{id}/config (strict) -> 200
+POST /orchestrators                -> 201  codex, role_id=orchestrator,
+                                            template_artifact_id=sha256:a09f7d18…,
+                                            workspaceWrites=0, canSpawn=1
+POST /sessions/{id}/fresh-conversation -> 200 orchestrator_fresh_conversation
+ledger: requested -> pre_stop -> post_stop -> target_ack
+```
+
+The `template_artifact_id` is byte-identical to the earlier run, so the pin
+resolved from the shipped templates rather than from anything left behind.
+
+**P2 — the role-error family is mapped.** All five sentinels now return stable
+actionable 400s instead of opaque 500s, with wrapped-error coverage (the service
+sees `spawn mer-1: spawn: <sentinel>`, so testing bare sentinels would have
+passed while the real path still 500'd):
+
+| Sentinel | Code |
+|---|---|
+| `ErrRoleRequired` | `ROLE_REQUIRED` |
+| `ErrRoleUnknown` | `ROLE_UNKNOWN` |
+| `ErrHarnessOverrideForbidden` | `HARNESS_OVERRIDE_FORBIDDEN` |
+| `ErrRolePromptRequired` | `ROLE_TEMPLATE_UNAVAILABLE` |
+| `ErrReadOnlyUnsupported` | `READ_ONLY_UNSUPPORTED` |
+
+Live, on the clean install:
+
+```
+POST /sessions roleId=nonexistent-role -> 400 ROLE_UNKNOWN
+POST /sessions (strict, no roleId)     -> 400 ROLE_REQUIRED
+```
+
+No extra server logging was added: these are expected configuration errors, and
+the response now carries the diagnosis.
+
+**D2a was also observed live and unplanned** during setup: a spawn failure landed
+*after* the predecessor was retired, leaving zero orchestrators, and 2B-2's
+replacement intent was correctly present, retained, and later discharged.

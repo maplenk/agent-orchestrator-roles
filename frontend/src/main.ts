@@ -38,6 +38,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { type DaemonLaunchSpec, resolveDaemonLaunch } from "./shared/daemon-launch";
+import { resolveRoleProfilesDir } from "./shared/role-profiles";
 import { createListenPortScanner, defaultRunFilePath, parseRunFile } from "./shared/daemon-discovery";
 import type { DaemonStatus } from "./shared/daemon-status";
 import { attachAppShortcuts } from "./main/app-shortcuts";
@@ -525,11 +526,30 @@ function daemonEnv(): NodeJS.ProcessEnv {
 		if (!process.env.AO_RUN_FILE) devExtras.AO_RUN_FILE = runFilePath() ?? "";
 		if (!process.env.AO_DATA_DIR) devExtras.AO_DATA_DIR = path.join(os.homedir(), ".ao", DEV_STATE_SUBDIR, "data");
 	}
+	// Shipped role templates. Passed explicitly on EVERY platform and in both
+	// dev and packaged launches, because the daemon's own fallback roots
+	// (cwd/profiles plus data-dir-relative paths) resolve to nothing for a real
+	// install: the packaged daemon's cwd is ~/.ao and a clean data dir has no
+	// profiles. Without this a strict role-pinned orchestrator cannot launch at
+	// all until someone copies templates in by hand.
+	const roleProfiles = {
+		AO_ROLE_PROFILES_DIR: resolveRoleProfilesDir(
+			process.env,
+			app.isPackaged,
+			process.resourcesPath,
+			app.getAppPath(),
+		),
+	};
 	// Windows keeps the old behavior exactly: no shell probe, no unix PATH floor.
 	if (process.platform === "win32") {
-		return { ...process.env, ...devExtras, ...telemetryOverrides(), ...ownerTag };
+		return { ...process.env, ...devExtras, ...roleProfiles, ...telemetryOverrides(), ...ownerTag };
 	}
-	return buildDaemonEnv(process.env, cachedShellEnv, { ...devExtras, ...telemetryOverrides(), ...ownerTag });
+	return buildDaemonEnv(process.env, cachedShellEnv, {
+		...devExtras,
+		...roleProfiles,
+		...telemetryOverrides(),
+		...ownerTag,
+	});
 }
 
 function pathKey(value: string): string {

@@ -75,6 +75,8 @@ frontend/test-results/
 
 # built daemon binary copied into the frontend bundle dir
 frontend/daemon/
+# role templates staged into the frontend bundle dir (source of truth: /profiles)
+frontend/profiles/
 
 # Locally-added agent skills (not for the team), except curated project skills
 .agents/

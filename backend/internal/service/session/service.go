@@ -669,6 +669,29 @@ func toAPIError(err error) error {
 		// sentinel would surface as a 500.
 		return apierr.Conflict("ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED",
 			"Orchestrators support in-place fresh conversation only; cross-harness switch is not available yet", nil)
+	// Role resolution family. Every one of these is a CONFIGURATION problem the
+	// caller can act on — a missing role, an unknown id, templates that are not
+	// installed, an override the project forbids, a harness that cannot enforce
+	// read-only. Unmapped they all became 500s, which is how a clean install
+	// with no shipped role templates reported itself as a daemon bug. A useful
+	// response is the fix; extra server-side logging is not, because none of
+	// these are unexpected.
+	case errors.Is(err, sessionmanager.ErrRoleRequired):
+		return apierr.Invalid("ROLE_REQUIRED",
+			"This project requires a role for the session; pass roleId", nil)
+	case errors.Is(err, sessionmanager.ErrRoleUnknown):
+		return apierr.Invalid("ROLE_UNKNOWN",
+			"The requested role is not defined in the project role map", nil)
+	case errors.Is(err, sessionmanager.ErrHarnessOverrideForbidden):
+		return apierr.Invalid("HARNESS_OVERRIDE_FORBIDDEN",
+			"The role map decides the harness for a role-pinned session; remove the harness override", nil)
+	case errors.Is(err, sessionmanager.ErrRolePromptRequired):
+		return apierr.Invalid("ROLE_TEMPLATE_UNAVAILABLE",
+			"The role's system prompt template could not be loaded. Check that role templates are installed "+
+				"and readable (AO_ROLE_PROFILES_DIR)", nil)
+	case errors.Is(err, sessionmanager.ErrReadOnlyUnsupported):
+		return apierr.Invalid("READ_ONLY_UNSUPPORTED",
+			"The role requires workspaceWrites:false, which this harness cannot enforce", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):
