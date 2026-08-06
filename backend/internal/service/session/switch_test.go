@@ -178,6 +178,69 @@ func TestSwitchWorker_OrchestratorFreshRoutesToTheGatedEntryPoint(t *testing.T) 
 	}
 }
 
+// TestSwitchWorker_FreshNeedsNoRolePin is the regression for 2B-1 being
+// unreachable in practice.
+//
+// The role pin and role map authorize a TARGET harness/model. A same-harness
+// refresh has no target, so requiring them gated the feature on something
+// irrelevant — and gated it hardest on the sessions that need it most: an
+// orchestrator is auto-bound to orchestratorRole only under strict delegation,
+// so on any project without a role map it has no pin at all. Live testing hit
+// ROLE_PIN_REQUIRED on a real orchestrator while every unit test passed,
+// because the fixtures all seeded a role-mapped project.
+func TestSwitchWorker_FreshNeedsNoRolePin(t *testing.T) {
+	for _, kind := range []domain.SessionKind{domain.KindOrchestrator, domain.KindWorker} {
+		t.Run(string(kind), func(t *testing.T) {
+			st := newFakeStore()
+			id := domain.SessionID("mer-1")
+			seedSwitchSession(st, id, domain.HarnessClaudeCode)
+			// What a real session on a project with no role map looks like.
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+			rec := st.sessions[id]
+			rec.Kind = kind
+			rec.Metadata.Role = domain.SessionRoleBinding{}
+			st.sessions[id] = rec
+
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+			if _, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+				SessionID: id, Fresh: true,
+			}); err != nil {
+				t.Fatalf("fresh conversation refused without a role pin: %v", err)
+			}
+			if cmd.freshCalls+cmd.orchestratorFreshCalls != 1 {
+				t.Fatalf("manager not reached: fresh=%d orchestratorFresh=%d",
+					cmd.freshCalls, cmd.orchestratorFreshCalls)
+			}
+		})
+	}
+}
+
+// TestSwitchWorker_CrossHarnessStillRequiresRolePin is the other side: the role
+// map remains the only source of legal targets, so dropping it there would be
+// an authorization hole rather than a convenience.
+func TestSwitchWorker_CrossHarnessStillRequiresRolePin(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Metadata.Role = domain.SessionRoleBinding{}
+	st.sessions[id] = rec
+
+	cmd := &fakeCommander{}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) || apiErr.Code != "ROLE_PIN_REQUIRED" {
+		t.Fatalf("err = %v, want ROLE_PIN_REQUIRED: an unpinned session has no authorized targets", err)
+	}
+	if cmd.switchCalls != 0 {
+		t.Error("the manager was reached for an unauthorized cross-harness switch")
+	}
+}
+
 // TestSwitchWorker_OrchestratorCrossHarnessIsConflict: the request is
 // well-formed and the harness is real; what is unavailable is the state
 // transition. Clients distinguish that from malformed input.

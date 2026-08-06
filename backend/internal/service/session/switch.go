@@ -94,29 +94,6 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 		return SwitchWorkerOutcome{}, apierr.Conflict("SESSION_TERMINATED", "Session is terminated", nil)
 	}
 
-	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
-	if roleID == "" {
-		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_PIN_REQUIRED",
-			"Session has no durable role pin; switch requires a role-mapped worker", nil)
-	}
-
-	project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
-	if err != nil {
-		return SwitchWorkerOutcome{}, fmt.Errorf("switch %s: project: %w", req.SessionID, err)
-	}
-	if !ok {
-		return SwitchWorkerOutcome{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
-	}
-	roleMap := project.Config.RoleMap.WithDefaults()
-	if roleMap.IsZero() {
-		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_MAP_REQUIRED",
-			"Project has no role map; host-authorized switch targets are unavailable", nil)
-	}
-	if _, ok := roleMap.Roles[roleID]; !ok {
-		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_NOT_IN_MAP",
-			fmt.Sprintf("Role %q is not present in the project role map", roleID), nil)
-	}
-
 	sc, ok := s.manager.(switchCommander)
 	if !ok {
 		return SwitchWorkerOutcome{}, fmt.Errorf("%w", ErrSwitchNotWired)
@@ -128,6 +105,16 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	}
 
 	// Fresh conversation: same harness only — never accepts free-form target.
+	//
+	// The role pin and role map are NOT required here, and requiring them was a
+	// real gap: those checks exist to authorize a TARGET harness/model against
+	// the map, and a same-harness refresh has no target to authorize —
+	// ResolveAuthorizedSwitchModel is never reached on this path. Demanding them
+	// anyway made the feature unreachable for exactly the sessions that most
+	// need it: an orchestrator is auto-bound to orchestratorRole only under
+	// strict delegation, so on any project without a role map it has no pin, and
+	// 2B-1's whole purpose — refreshing the longest-lived session in the
+	// project — returned ROLE_PIN_REQUIRED.
 	if req.Fresh {
 		res, err := freshConversationFor(ctx, sc, rec, sem)
 		if err != nil {
@@ -146,13 +133,39 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	}
 	requestedModel := strings.TrimSpace(req.TargetModel)
 
-	// Same harness → fresh conversation path (no free-form cross-provider model).
+	// Same harness → fresh conversation path (no free-form cross-provider model),
+	// so the same reasoning applies: nothing to authorize.
 	if to == rec.Harness {
 		res, err := freshConversationFor(ctx, sc, rec, sem)
 		if err != nil {
 			return SwitchWorkerOutcome{}, toAPIError(err)
 		}
 		return s.switchOutcome(ctx, res)
+	}
+
+	// Cross-harness from here on, which IS a host-authorized decision: the role
+	// map is the only source of legal targets, so a session without a pin, or a
+	// project without a map, has no way to authorize one.
+	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
+	if roleID == "" {
+		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_PIN_REQUIRED",
+			"Session has no durable role pin; cross-harness switch requires a role-mapped session", nil)
+	}
+	project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
+	if err != nil {
+		return SwitchWorkerOutcome{}, fmt.Errorf("switch %s: project: %w", req.SessionID, err)
+	}
+	if !ok {
+		return SwitchWorkerOutcome{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	roleMap := project.Config.RoleMap.WithDefaults()
+	if roleMap.IsZero() {
+		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_MAP_REQUIRED",
+			"Project has no role map; host-authorized switch targets are unavailable", nil)
+	}
+	if _, ok := roleMap.Roles[roleID]; !ok {
+		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_NOT_IN_MAP",
+			fmt.Sprintf("Role %q is not present in the project role map", roleID), nil)
 	}
 
 	model, err := domain.ResolveAuthorizedSwitchModel(roleMap, roleID, to, requestedModel)

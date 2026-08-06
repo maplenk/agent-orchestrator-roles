@@ -1125,13 +1125,17 @@ func (f *fakeCommander) SwitchWorker(_ context.Context, req sessionmanager.Switc
 // FreshOrchestratorConversation records the orchestrator entry point
 // separately: the service must route by kind, and a fake that answered both
 // through one counter could not tell a correct dispatch from a wrong one.
-func (f *fakeCommander) FreshOrchestratorConversation(ctx context.Context, id domain.SessionID, sem domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
-	f.orchestratorFreshCalls++
-	res, err := f.FreshConversation(ctx, id, sem)
-	if err == nil {
-		res.Kind = domain.LifecycleKindOrchestratorFresh
+func (f *fakeCommander) FreshOrchestratorConversation(_ context.Context, id domain.SessionID, _ domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
+	// Increments ONLY its own counter. Delegating to FreshConversation bumped
+	// both, so "fresh=1 orchestratorFresh=1" was indistinguishable from a
+	// dispatch bug that called both entry points.
+	if f.switchErr != nil {
+		return sessionmanager.SwitchResult{}, f.switchErr
 	}
-	return res, err
+	f.orchestratorFreshCalls++
+	res := f.freshResult(id)
+	res.Kind = domain.LifecycleKindOrchestratorFresh
+	return res, nil
 }
 
 func (f *fakeCommander) FreshConversation(_ context.Context, id domain.SessionID, _ domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error) {
@@ -1139,6 +1143,12 @@ func (f *fakeCommander) FreshConversation(_ context.Context, id domain.SessionID
 		return sessionmanager.SwitchResult{}, f.switchErr
 	}
 	f.freshCalls++
+	return f.freshResult(id), nil
+}
+
+// freshResult builds the shared fresh-conversation payload without touching any
+// call counter, so each entry point owns exactly one.
+func (f *fakeCommander) freshResult(id domain.SessionID) sessionmanager.SwitchResult {
 	rec := f.switchRecord
 	if rec.ID == "" {
 		rec = domain.SessionRecord{
@@ -1148,7 +1158,7 @@ func (f *fakeCommander) FreshConversation(_ context.Context, id domain.SessionID
 	}
 	return sessionmanager.SwitchResult{
 		Session: rec, GenerationID: "gen-fr-1", Kind: domain.LifecycleKindFreshConversation,
-	}, nil
+	}
 }
 
 // TestCleanupMapsManagerResult: the service forwards both reclaimed and

@@ -293,6 +293,50 @@ func TestObserveOrchestratorFleet_BoundsTerminatedHistory(t *testing.T) {
 	}
 }
 
+// TestFreshConversation_WorksWithoutARolePin is the regression for the failure
+// live testing found.
+//
+// relaunchSession stamps an ephemeral ResolvedHarness so the target's
+// AUTHORITATIVE ROLE FOOTER names the new harness. On a session with NO role
+// pin that stamp manufactured a partial pin out of an empty binding, and
+// restoreRoleApplyResult correctly refused it as corrupt — after the source had
+// already stopped. The result was a post-stop session that failed identically on
+// every boot: SWITCH_POST_STOP forever.
+//
+// Un-pinned sessions were previously unreachable behind the service's
+// ROLE_PIN_REQUIRED check, which is why no unit test covered it: every fixture
+// seeded a role-mapped project.
+func TestFreshConversation_WorksWithoutARolePin(t *testing.T) {
+	for _, kind := range []domain.SessionKind{domain.KindOrchestrator, domain.KindWorker} {
+		t.Run(string(kind), func(t *testing.T) {
+			m, st, id := orchestratorSwitchHarness(t)
+			rec := st.sessions[id]
+			rec.Kind = kind
+			// Exactly what a session on a project with no role map looks like.
+			rec.Metadata.Role = domain.SessionRoleBinding{}
+			st.sessions[id] = rec
+
+			var err error
+			if kind == domain.KindOrchestrator {
+				_, err = m.FreshOrchestratorConversation(context.Background(), id, domain.SemanticHandoffV1{})
+			} else {
+				_, err = m.FreshConversation(context.Background(), id, domain.SemanticHandoffV1{})
+			}
+			if err != nil {
+				t.Fatalf("fresh conversation failed for an un-pinned session: %v", err)
+			}
+			got := st.sessions[id]
+			if got.IsTerminated {
+				t.Error("session left terminated")
+			}
+			// The empty pin must stay empty — not half-populated by the stamp.
+			if got.Metadata.Role.ResolvedHarness != "" || got.Metadata.Role.RoleID != "" {
+				t.Errorf("an empty role pin was partially populated: %+v", got.Metadata.Role)
+			}
+		})
+	}
+}
+
 // TestObserveOrchestratorFleet_ReportsWhatAOKnows: the fleet is read from the
 // session table, not from the outgoing conversation's recollection. Terminated
 // workers are included because "that one already finished" is the correction a

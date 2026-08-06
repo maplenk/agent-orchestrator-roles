@@ -1775,7 +1775,19 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	// target_ack; only this in-memory copy is retargeted so the launched process
 	// receives AUTHORITATIVE ROLE FOOTER "Harness: <target>" (and model).
 	promptRec := rec
-	if o.LaunchHarness != "" {
+	// Only retarget a pin that EXISTS. This stamp is here so the authoritative
+	// role footer names the target harness, and a session with no role pin has
+	// no footer to retarget — writing ResolvedHarness onto an empty binding
+	// instead manufactures a partial pin, which restoreRoleApplyResult then
+	// correctly refuses as corrupt metadata (ErrIncompleteRolePin).
+	//
+	// That is not hypothetical: it is what a live orchestrator fresh
+	// conversation hit. Every un-pinned session was unreachable behind the
+	// service's ROLE_PIN_REQUIRED check, so the saga corrupted its own in-memory
+	// copy and failed at the system prompt — after the source had already
+	// stopped, leaving a post-stop recovery loop that failed identically on
+	// every boot.
+	if strings.TrimSpace(rec.Metadata.Role.RoleID) != "" && o.LaunchHarness != "" {
 		promptRec.Metadata.Role.ResolvedHarness = o.LaunchHarness
 		if o.LaunchHarness != rec.Harness {
 			// Cross-harness: explicit target model (empty = provider default).
