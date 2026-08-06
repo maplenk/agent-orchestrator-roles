@@ -130,7 +130,7 @@ unexplained ledger failures:    0
 | 1 | Service required a role pin + role map for **any** switch, making fresh conversation unreachable for un-pinned sessions — including every orchestrator on a non-strict project | Checks moved to the cross-harness path, where the map actually authorizes a target |
 | 2 | `relaunchSession` stamped an ephemeral `ResolvedHarness` onto an **empty** role binding, manufacturing a partial pin that restore correctly refused — *after* the source had stopped, so it failed identically on every boot | Stamp only applies when a pin exists |
 | 3 | `EnsureOrchestrator`'s non-`clean` path never discharged the replacement intent, so a project rescued by an ordinary spawn kept a durable record claiming it was still owed one | Both non-clean branches discharge |
-| 4 | Desktop bundles shipped **no role templates at all**, so a clean install could not launch a strict role-pinned orchestrator | Profiles staged + shipped as an ;  passed explicitly. Re-dogfooded from an empty data dir |
+| 4 | Desktop bundles shipped **no role templates at all**, so a clean install could not launch a strict role-pinned orchestrator | Profiles staged and shipped as an `extraResource`; `AO_ROLE_PROFILES_DIR` passed explicitly. Re-dogfooded from an empty data dir |
 | 5 | The five role-resolution sentinels were unmapped, so configuration errors surfaced as **opaque 500s** | Stable actionable 400s with wrapped-error coverage |
 
 ### Follow-ups from review — both closed
