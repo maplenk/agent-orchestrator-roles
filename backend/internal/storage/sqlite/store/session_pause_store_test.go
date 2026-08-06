@@ -8,6 +8,17 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+func storePause(incident string) *domain.SessionPause {
+	return &domain.SessionPause{
+		IncidentID:   incident,
+		Reason:       domain.PauseReasonUsageLimit,
+		DetectedBy:   domain.PauseDetectionStructured,
+		Harness:      domain.HarnessCodex,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","resetsAt":"2026-08-06T18:00:00Z"}`,
+		PausedAt:     time.Now().UTC().Truncate(time.Second),
+	}
+}
+
 // Against the REAL store, not the manager's in-memory fake. Migration 0049 adds
 // a column, and a column the queries do not carry reads back empty — which for
 // this pin means "not paused", i.e. the feature silently does nothing while
@@ -26,18 +37,11 @@ func TestSessionPausePersistsThroughRealStore(t *testing.T) {
 	}
 
 	retry := time.Now().UTC().Add(90 * time.Minute).Truncate(time.Second)
-	pause := &domain.SessionPause{
-		IncidentID:   "incident-7",
-		Reason:       domain.PauseReasonUsageLimit,
-		DetectedBy:   domain.PauseDetectionStructured,
-		Harness:      domain.HarnessCodex,
-		EvidenceJSON: `{"kind":"usage_limit","resetsAt":"2026-08-06T18:00:00Z"}`,
-		RetryAfter:   &retry,
-		PausedAt:     time.Now().UTC().Truncate(time.Second),
-	}
-	rec.Metadata.Pause = pause
-	if err := s.UpdateSession(ctx, rec); err != nil {
-		t.Fatalf("persist pause: %v", err)
+	pause := storePause("incident-7")
+	pause.RetryAfter = &retry
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, pause, time.Now().UTC())
+	if err != nil || !ok {
+		t.Fatalf("persist pause: ok=%v err=%v", ok, err)
 	}
 
 	got, ok, err := s.GetSession(ctx, rec.ID)
@@ -77,24 +81,145 @@ func TestSessionPausePersistsThroughRealStore(t *testing.T) {
 	if !found {
 		t.Fatal("session missing from project listing")
 	}
+}
 
-	// Clearing is a plain update; it must actually clear.
-	got.Metadata.Pause = nil
-	if err := s.UpdateSession(ctx, got); err != nil {
-		t.Fatalf("clear pause: %v", err)
+// THE race, against the real store. Every other writer in the manager does a
+// read-modify-write of the whole row: read a record, mutate one field, call
+// UpdateSession. If that statement carries pause_json, a writer whose snapshot
+// predates the pause silently clears it — and a cleared pin re-opens every
+// automatic send and every boot relaunch, with nothing in the ledger to say a
+// pause ever ended.
+func TestGenericUpdatePreservesThePausePin(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+
+	rec, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
 	}
+
+	// An unrelated writer reads the row BEFORE the pause exists.
+	stale, _, err := s.GetSession(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("stale read: %v", err)
+	}
+
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("incident-7"), time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("pause: ok=%v err=%v", ok, err)
+	}
+
+	// Now the stale writer flushes. Its record still has Pause == nil.
+	stale.Metadata.Prompt = "a field that writer legitimately owns"
+	stale.UpdatedAt = time.Now().UTC()
+	if err := s.UpdateSession(ctx, stale); err != nil {
+		t.Fatalf("stale update: %v", err)
+	}
+
 	after, _, err := s.GetSession(ctx, rec.ID)
 	if err != nil {
-		t.Fatalf("read after clear: %v", err)
+		t.Fatalf("read after: %v", err)
 	}
-	if after.Metadata.Pause != nil {
-		t.Fatal("pause survived an explicit clear")
+	if after.Metadata.Pause == nil {
+		t.Fatal("a stale full-row update cleared the pause pin")
+	}
+	if after.Metadata.Prompt != "a field that writer legitimately owns" {
+		t.Error("the unrelated write was lost; column ownership must not block other writers")
 	}
 }
 
-// A session created already paused must persist the pin on INSERT, not only on
-// UPDATE. The insert and update parameter lists are built by separate
-// functions, so covering one proves nothing about the other.
+// Compare-and-set, not last-write-wins: a second detector reporting a different
+// incident must not take the pin from the first. Losing the original incident
+// id would break 3B's per-incident failover cap, which counts against it.
+func TestSetPauseIfAbsentIsCompareAndSet(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("first"), time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("first pause: ok=%v err=%v", ok, err)
+	}
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("second"), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("second pause: %v", err)
+	}
+	if ok {
+		t.Fatal("the second incident overwrote the first")
+	}
+	got, _, _ := s.GetSession(ctx, rec.ID)
+	if got.Metadata.Pause.IncidentID != "first" {
+		t.Fatalf("holding incident = %q, want first", got.Metadata.Pause.IncidentID)
+	}
+}
+
+// A terminated session cannot be pinned: there is no runtime to protect, and a
+// pin there would only obstruct cleanup.
+func TestSetPauseIfAbsentRefusesTerminated(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	rec.IsTerminated = true
+	if err := s.UpdateSession(ctx, rec); err != nil {
+		t.Fatalf("terminate: %v", err)
+	}
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("inc"), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("set pause: %v", err)
+	}
+	if ok {
+		t.Fatal("pinned a terminated session")
+	}
+}
+
+// Resume is conditional on the incident, so a caller acting on a stale read
+// cannot lift a newer pause it never saw.
+func TestClearPauseIfIncident(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("current"), time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("pause: ok=%v err=%v", ok, err)
+	}
+
+	ok, err := s.ClearSessionPauseIfIncident(ctx, rec.ID, "stale", time.Now().UTC())
+	if err != nil {
+		t.Fatalf("clear stale: %v", err)
+	}
+	if ok {
+		t.Fatal("a resume naming a stale incident lifted the current pause")
+	}
+	if got, _, _ := s.GetSession(ctx, rec.ID); got.Metadata.Pause == nil {
+		t.Fatal("the current pause was cleared by a stale resume")
+	}
+
+	ok, err = s.ClearSessionPauseIfIncident(ctx, rec.ID, "current", time.Now().UTC())
+	if err != nil || !ok {
+		t.Fatalf("clear current: ok=%v err=%v", ok, err)
+	}
+	got, _, err := s.GetSession(ctx, rec.ID)
+	if err != nil {
+		t.Fatalf("read after clear: %v", err)
+	}
+	if got.Metadata.Pause != nil {
+		t.Fatal("pause survived its own resume")
+	}
+}
+
+// A session created already paused must persist the pin on INSERT, not only
+// through the column-owned write. The insert parameter list is built by a
+// separate function, so covering one proves nothing about the other.
 func TestSessionPausePersistsOnInsert(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -133,13 +258,32 @@ func TestSessionPauseRejectsUnstructuredUsageLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	rec.Metadata.Pause = &domain.SessionPause{
-		IncidentID: "hand-rolled",
-		Reason:     domain.PauseReasonUsageLimit,
-		DetectedBy: domain.PauseDetectionOperator, // not a structured envelope
-		PausedAt:   time.Now().UTC(),
-	}
-	if err := s.UpdateSession(ctx, rec); err == nil {
-		t.Fatal("the store accepted a usage_limit pause with no structured evidence")
+	for _, tc := range []struct {
+		name  string
+		pause *domain.SessionPause
+	}{
+		{"operator evidence for a usage limit", &domain.SessionPause{
+			IncidentID: "a", Reason: domain.PauseReasonUsageLimit,
+			DetectedBy: domain.PauseDetectionOperator, PausedAt: time.Now().UTC(),
+		}},
+		{"prose as the envelope", &domain.SessionPause{
+			IncidentID: "b", Reason: domain.PauseReasonUsageLimit,
+			DetectedBy: domain.PauseDetectionStructured, EvidenceJSON: "I hit a limit",
+			PausedAt: time.Now().UTC(),
+		}},
+		{"unversioned envelope", &domain.SessionPause{
+			IncidentID: "c", Reason: domain.PauseReasonUsageLimit,
+			DetectedBy: domain.PauseDetectionStructured, EvidenceJSON: `{"kind":"usage_limit"}`,
+			PausedAt: time.Now().UTC(),
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, tc.pause, time.Now().UTC()); err == nil {
+				t.Fatal("the store accepted a usage_limit pause with no structured envelope")
+			}
+			if got, _, _ := s.GetSession(ctx, rec.ID); got.Metadata.Pause != nil {
+				t.Fatalf("a rejected pause was persisted: %+v", got.Metadata.Pause)
+			}
+		})
 	}
 }

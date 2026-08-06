@@ -750,7 +750,7 @@ UPDATE sessions SET
     resolved_workspace_writes = ?, resolved_can_spawn = ?, spawn_capability_hash = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
-    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?, pause_json = ?,
+    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, updated_at = ?
 WHERE id = ?
@@ -785,7 +785,6 @@ type UpdateSessionParams struct {
 	AgentSessionID          string
 	Prompt                  string
 	SwitchPendingJson       string
-	PauseJson               string
 	PreviewURL              string
 	PreviewRevision         int64
 	TerminateOnPRMerge      bool
@@ -824,7 +823,6 @@ func (q *Queries) UpdateSession(ctx context.Context, arg UpdateSessionParams) er
 		arg.AgentSessionID,
 		arg.Prompt,
 		arg.SwitchPendingJson,
-		arg.PauseJson,
 		arg.PreviewURL,
 		arg.PreviewRevision,
 		arg.TerminateOnPRMerge,

@@ -53,11 +53,7 @@ func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (do
 func (s *Store) UpdateSession(ctx context.Context, rec domain.SessionRecord) error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	params, err := recordToUpdate(rec)
-	if err != nil {
-		return fmt.Errorf("update session %s: %w", rec.ID, err)
-	}
-	if err := s.qw.UpdateSession(ctx, params); err != nil {
+	if err := s.qw.UpdateSession(ctx, recordToUpdate(rec)); err != nil {
 		if isActiveOrchestratorConflict(err) {
 			return fmt.Errorf("update session %s: %w", rec.ID, domain.ErrActiveOrchestratorExists)
 		}
@@ -134,6 +130,71 @@ func (s *Store) SetSessionPreviewURL(ctx context.Context, id domain.SessionID, p
 	})
 	if err != nil {
 		return false, fmt.Errorf("set preview url for session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionPauseIfAbsent writes the durable pause pin, and ONLY that column.
+//
+// Conditional on the pin still being absent and the session still live, so the
+// write is a compare-and-set rather than a read-modify-write. ok=false means
+// the precondition failed — already paused, terminated, or gone — and the
+// caller must re-read to say which; it is not an error, because a detector
+// re-reporting the same limit is the normal case.
+//
+// This exists because the generic UpdateSession carries a whole session record
+// that its caller read at some earlier moment. A lifecycle or switch writer
+// holding a pre-pause snapshot would clear a pin it never saw, silently
+// re-opening every automatic write path.
+func (s *Store) SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error) {
+	encoded, err := encodePause(pause)
+	if err != nil {
+		return false, err
+	}
+	if encoded == "" {
+		return false, fmt.Errorf("set pause for %s: refusing to write an empty pin", id)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	// Raw, not sqlc: the literals in this WHERE clause trigger the parser bug
+	// documented in queries/sessions.sql, which silently truncates the
+	// statement (and leaks its tail into the next generated const).
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE sessions SET pause_json = ?, updated_at = ?
+		 WHERE id = ? AND pause_json = '' AND is_terminated = 0`,
+		encoded, updatedAt, id)
+	if err != nil {
+		return false, fmt.Errorf("set pause for session %s: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("set pause for session %s: rows: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// ClearSessionPauseIfIncident lifts the pause pin, and ONLY that column, when
+// the stored pin still names the incident the caller is answering. ok=false
+// means it did not: the session was resumed already, or a different incident
+// now holds it, and lifting that one would resume a session on evidence the
+// caller never saw.
+func (s *Store) ClearSessionPauseIfIncident(ctx context.Context, id domain.SessionID, incidentID string, updatedAt time.Time) (bool, error) {
+	if strings.TrimSpace(incidentID) == "" {
+		return false, fmt.Errorf("clear pause for %s: incident required", id)
+	}
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	// Raw, not sqlc: see SetSessionPauseIfAbsent.
+	res, err := s.writeDB.ExecContext(ctx,
+		`UPDATE sessions SET pause_json = '', updated_at = ?
+		 WHERE id = ? AND json_extract(pause_json, '$.incidentId') = ?`,
+		updatedAt, id, incidentID)
+	if err != nil {
+		return false, fmt.Errorf("clear pause for session %s: %w", id, err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("clear pause for session %s: rows: %w", id, err)
 	}
 	return rows > 0, nil
 }
@@ -592,11 +653,12 @@ func recordToInsert(rec domain.SessionRecord, num int64) (gen.InsertSessionParam
 	}, nil
 }
 
-func recordToUpdate(rec domain.SessionRecord) (gen.UpdateSessionParams, error) {
-	pause, err := encodePause(rec.Metadata.Pause)
-	if err != nil {
-		return gen.UpdateSessionParams{}, err
-	}
+// recordToUpdate deliberately omits pause_json. The pause pin is column-owned
+// (SetPauseIfAbsent / ClearPauseIfIncident) because callers of the generic
+// update hold a whole session record read at some earlier point: a lifecycle or
+// switch writer whose snapshot predates a pause would otherwise clear a pin it
+// never saw, and a stale resume would overwrite newer runtime state.
+func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
 	role := rec.Metadata.Role
 	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
@@ -630,13 +692,12 @@ func recordToUpdate(rec domain.SessionRecord) (gen.UpdateSessionParams, error) {
 		AgentSessionID:          rec.Metadata.AgentSessionID,
 		Prompt:                  rec.Metadata.Prompt,
 		SwitchPendingJson:       encodeSwitchPending(rec.Metadata.SwitchPending),
-		PauseJson:               pause,
 		PreviewURL:              rec.Metadata.PreviewURL,
 		PreviewRevision:         rec.Metadata.PreviewRevision,
 		TerminateOnPRMerge:      rec.TerminateOnPRMerge,
 		CleanupGeneration:       rec.CleanupGeneration,
 		UpdatedAt:               rec.UpdatedAt,
-	}, nil
+	}
 }
 
 // roleFromSessionRow maps sessions role columns to domain.SessionRoleBinding.

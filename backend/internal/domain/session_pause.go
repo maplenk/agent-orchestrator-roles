@@ -85,8 +85,11 @@ func (p *SessionPause) Validate() error {
 			return fmt.Errorf("pause: usage_limit requires detectedBy=%s, got %q",
 				PauseDetectionStructured, p.DetectedBy)
 		}
-		if strings.TrimSpace(p.EvidenceJSON) == "" {
-			return fmt.Errorf("pause: usage_limit requires structured evidence")
+		// Parsed, not merely present. "Non-empty" would admit `"I hit a limit"`
+		// — a valid JSON string — which is precisely the free-text claim the
+		// structured-envelope rule exists to exclude.
+		if _, err := ParseLimitEnvelope(p.EvidenceJSON); err != nil {
+			return fmt.Errorf("pause: usage_limit requires a structured envelope: %w", err)
 		}
 	case PauseReasonOperator:
 		if p.DetectedBy != PauseDetectionOperator {

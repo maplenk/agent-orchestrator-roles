@@ -31,7 +31,7 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 2B-1 (orchestrator in-place fresh) | **Landed + live-dogfooded** (`PHASE2B1_LIVE_DOGFOOD.md`) — first *product-visible* 2B behaviour. `FreshOrchestratorConversation` gates the project **before** the switch fence, keeps session id/worktree/branch, and compiles `ObservedOrchestratorV1` (the project's live+terminated worker fleet, read from AO's session table) into the handoff. Cross-harness explicitly refused (2B-3) |
 | Phase 2B-2 (replacement recoverability) | **Landed** — migration 0047 persists replacement intent **before** retirement, so a zero-owner interval is never terminal; boot recovery re-drives stranded projects under the project gate. `finalizeRetirement` reordered so a crash leaves the recoverable residue, and both residues are repaired at boot |
 | Phase 2B-3 (cross-harness orchestrator switch) | **BLOCKED / DEFERRED on 1-F (Claude RO)** — not merely unstarted. A strict orchestrator must be `workspaceWrites:false`, which requires `read_only_enforced`, which only Codex advertises. Until Claude RO lands this slice cannot be built for strict projects, and it is deliberately refused for non-strict ones too rather than ship a capability strict projects can never have. **Phase 2B is therefore NOT complete** |
-| Phase 3A-1 (durable pause primitive) | **Landed** @ `506467f5` — migration 0049 pins `domain.SessionPause`; `Validate` ties `usage_limit` to a structured envelope (§7 rule 1, enforced on encode *and* decode); `sessionguard` fences every AO-initiated pane write at the single choke point (§7 rule 2). **No scheduler, no timer, no auto-resume**; `RetryAfter` is recorded but never scheduled against. Pause/resume ledger kinds recorded. **No operator surface yet** — nothing calls `PauseSession` |
+| Phase 3A-1 (durable pause primitive) | **Landed** @ `506467f5`, **hardened after review**. Migration 0049 pins `domain.SessionPause`. Three enforcement points, not one: (a) `sessionguard` fences AO-initiated pane writes; (b) **boot** skips paused sessions in post-stop recovery, the live pass's save-and-teardown, and `RestoreAll`'s worker loop + orchestrator election — a pause that let boot relaunch the agent would only have been quiet until the next restart; (c) `LimitEnvelopeV1` — versioned, size-bounded, object-only, unknown fields rejected — so `"I hit a limit"` cannot masquerade as structured evidence. Persistence is **column-owned** (`SetSessionPauseIfAbsent` / `ClearSessionPauseIfIncident`), never a read-modify-write, so a stale full-row writer cannot clear the pin. Incident ids are **caller-supplied and required**, which is what makes a retry after a failed pin write idempotent. **No scheduler, no timer, no auto-resume**; `RetryAfter` is recorded but never scheduled against. **No operator surface yet** — nothing calls `PauseSession` |
 | Phase 3A-2 (structured limit detection + surface) | **Next** — per-harness structured envelopes, service/API/CLI, and only then the registry promotion |
 | Phase 3B | **Not started** |
 | **CI merge gate — `gofmt`** | **CLEARED** @ `57067f4c`. `go.yml`'s build-test job runs `gofmt -l .` and fails on any output; nine files had never been gofmt'd (struct-tag alignment only), so that step failed *before* the tests ran. Fixed mechanically; also removed all 9 goimports lint findings |
@@ -189,6 +189,25 @@ policy while being AO-initiated. AO-initiated writes are refused; the **user's**
 sends are not (they can type into the pane anyway, so fencing adds friction, not
 safety), and **host-owned launch injection is not** (a 3B failover must be able
 to deliver its prompt, or pause blocks its own remedy).
+
+**Consequences of the boot skips, stated deliberately:**
+
+- A paused session whose agent died stays **active with a dead runtime** rather
+  than being torn down. That is the ordinary "agent exited" state the guard
+  already handles; the alternative mints a restore marker, and `RestoreAll`
+  consumes it in the *same* boot.
+- A paused orchestrator is excluded from the survivor election as **neither
+  winner nor loser**. Losers get their markers neutralized, and neutralizing a
+  paused orchestrator's marker would destroy the restorability a later resume
+  depends on. It therefore holds the project's single active-orchestrator slot
+  while paused, which is correct: replacing it is a user decision.
+- `RecoverOrchestratorReplacements` is **not** skipped for paused projects, and
+  needs no change — it treats a paused active orchestrator as an owner and
+  discharges the intent. It only spawns when a project has zero orchestrators,
+  fulfilling an obligation an explicit `EnsureOrchestrator(clean)` created; that
+  is a crashed user action being completed, not an automatic restart.
+- A paused **terminated** session can still be resumed (resume has no liveness
+  precondition); it becomes restore-eligible on the next boot.
 
 ---
 

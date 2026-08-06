@@ -18,9 +18,17 @@ import (
 // ResumeSession, called from an explicit request. Anything that resumed on its
 // own would be an automatic restart regardless of how it were spelled.
 //
-// Enforcement does not live here. It lives in sessionguard, at the single
-// pane-write choke point, so a new automatic caller is fenced by construction
-// instead of by remembering to ask.
+// Two enforcement points, neither of them here:
+//   - sessionguard fences AO-initiated pane writes at the single write choke
+//     point, so a new automatic caller is fenced by construction; and
+//   - Reconcile / RestoreAll skip paused sessions, because "no automatic send"
+//     is worth nothing if boot relaunches the agent instead.
+//
+// Persistence is COLUMN-OWNED (SetSessionPauseIfAbsent /
+// ClearSessionPauseIfIncident), never a read-modify-write through the generic
+// UpdateSession. Every other writer in the manager carries a whole session
+// record read at some earlier point; one of those writing back a pre-pause
+// snapshot would clear the pin and silently re-open everything above.
 
 var (
 	// ErrAlreadyPaused is returned when pausing a session that already carries a
@@ -29,19 +37,35 @@ var (
 	ErrAlreadyPaused = errors.New("session already paused")
 	// ErrNotPaused is returned when resuming a session that is not paused.
 	ErrNotPaused = errors.New("session is not paused")
+	// ErrIncidentRequired is returned when a pause carries no incident id.
+	ErrIncidentRequired = errors.New("pause incident id required")
+	// ErrIncidentMismatch is returned when a resume names an incident that is
+	// not the one currently holding the session.
+	ErrIncidentMismatch = errors.New("pause incident mismatch")
 )
 
 // PauseRequest is the input to PauseSession. It carries no free-text reason
 // field on purpose: a usage limit may only be recorded from a structured
-// envelope (domain.SessionPause.Validate enforces the pairing), so there is no
-// channel here through which an agent's prose could become a pause.
+// envelope (domain.SessionPause.Validate parses one), so there is no channel
+// here through which an agent's prose could become a pause.
 type PauseRequest struct {
-	// IncidentID groups this pause with the resume that answers it. Empty means
-	// "mint one".
+	// IncidentID is REQUIRED and must be stable for the incident being
+	// reported. The manager deliberately does not mint one.
+	//
+	// A minted id is not retry-safe: the ledger row is written before the pin,
+	// so if the pin write fails the caller never learns the id that was
+	// recorded, and a retry with a blank id would open a second incident and a
+	// second ledger row for one real limit. With a caller-supplied stable id a
+	// retry re-derives the same value, the ledger append dedupes, and the pin
+	// is simply written — which is what makes the whole operation idempotent.
+	//
+	// Detection (3A-2) derives it from the envelope; an operator pause gets one
+	// from its request.
 	IncidentID string
 	Reason     domain.PauseReason
 	DetectedBy domain.PauseDetection
-	// EvidenceJSON is the structured envelope, required for usage_limit.
+	// EvidenceJSON is the structured envelope, required for usage_limit and
+	// parsed by domain.ParseLimitEnvelope.
 	EvidenceJSON string
 	// RetryAfter is recorded for audit only and never scheduled against.
 	RetryAfter *time.Time
@@ -52,9 +76,15 @@ type PauseRequest struct {
 // exactly as they are, because the point of pause is to stop AO acting, not to
 // destroy state the user may want to inspect or resume into.
 //
-// Idempotent for the same incident: re-pausing writes no second ledger row, so
-// a detector that reports the same limit twice cannot inflate the audit trail.
+// Idempotent for the same incident, including after a partial failure: the
+// ledger append dedupes on id and the pin write is a compare-and-set, so a
+// retry converges rather than duplicating.
 func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req PauseRequest) (domain.SessionRecord, error) {
+	incident := strings.TrimSpace(req.IncidentID)
+	if incident == "" {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, ErrIncidentRequired)
+	}
+
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: read session: %w", id, err)
@@ -65,19 +95,11 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 	if rec.IsTerminated {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, ErrTerminated)
 	}
-
-	incident := strings.TrimSpace(req.IncidentID)
 	if existing := rec.Metadata.Pause; existing != nil {
-		if incident == "" || existing.IncidentID == incident {
-			// Same incident (or an unspecified one): already recorded.
-			return rec, nil
+		if existing.IncidentID == incident {
+			return rec, nil // already recorded
 		}
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w (incident %s)", id, ErrAlreadyPaused, existing.IncidentID)
-	}
-	if incident == "" {
-		// Same generator the switch saga uses, so tests can pin incident ids the
-		// same way they pin generations.
-		incident = m.newSwitchGeneration()
 	}
 
 	pause := &domain.SessionPause{
@@ -95,28 +117,62 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 
 	// Ledger BEFORE the pin, so a crash between the two leaves an event with no
 	// pin — an over-reported pause, which is inert — rather than a pin with no
-	// audit trail, which is a session stuck for a reason nothing recorded.
+	// audit trail, which is a session stuck for a reason nothing recorded. The
+	// required incident id is what makes that recoverable: the retry writes the
+	// same ledger id (a no-op) and then the pin.
 	if err := m.appendPauseLedger(ctx, rec, domain.LifecycleKindPause, incident, pause.EvidenceJSON); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, err)
 	}
 
-	rec.Metadata.Pause = pause
-	rec.UpdatedAt = m.clock()
-	if err := m.store.UpdateSession(ctx, rec); err != nil {
+	set, err := m.store.SetSessionPauseIfAbsent(ctx, id, pause, m.clock())
+	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: persist: %w", id, err)
 	}
+	if !set {
+		// The compare-and-set lost. Re-read to say WHY rather than guess: it is
+		// the same incident (converged, fine), a different one, or the session
+		// stopped being pausable while we worked.
+		return m.explainLostPauseRace(ctx, id, incident)
+	}
+
+	rec.Metadata.Pause = pause
 	m.logger.Info("session paused", "sessionID", id, "reason", string(pause.Reason),
 		"detectedBy", string(pause.DetectedBy), "incident", incident, "harness", string(rec.Harness))
 	return rec, nil
 }
 
+// explainLostPauseRace turns a failed compare-and-set into a specific answer.
+func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID, incident string) (domain.SessionRecord, error) {
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: re-read after contended write: %w", id, err)
+	}
+	if !ok {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, ErrNotFound)
+	}
+	if rec.Metadata.Pause != nil {
+		if rec.Metadata.Pause.IncidentID == incident {
+			return rec, nil // a concurrent report of the same incident won; converged
+		}
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w (incident %s)",
+			id, ErrAlreadyPaused, rec.Metadata.Pause.IncidentID)
+	}
+	if rec.IsTerminated {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, ErrTerminated)
+	}
+	// Not paused, not terminated, yet the guarded write matched nothing: the
+	// row moved under us in a way this code does not model. Fail loudly rather
+	// than report a pause that is not there.
+	return domain.SessionRecord{}, fmt.Errorf("pause %s: pin write matched no row and the session is not paused", id)
+}
+
 // ResumeSession clears the pause pin and records a resume ledger event. It is
 // the ONLY way a pause is lifted.
 //
-// It deliberately does not send anything. Resuming restores AO's permission to
-// write, not an obligation to: re-sending on resume would reintroduce the
-// automatic send that pause exists to prevent, and MASTER_PLAN §7 puts manual
-// continue in 3B, on an explicit ladder rung.
+// It deliberately does not send or relaunch anything. Resuming restores AO's
+// permission to write, not an obligation to: re-sending on resume would
+// reintroduce the automatic send that pause exists to prevent, and
+// MASTER_PLAN §7 puts manual continue in 3B, on an explicit ladder rung.
 func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
@@ -137,11 +193,29 @@ func (m *Manager) ResumeSession(ctx context.Context, id domain.SessionID) (domai
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w", id, err)
 	}
 
-	rec.Metadata.Pause = nil
-	rec.UpdatedAt = m.clock()
-	if err := m.store.UpdateSession(ctx, rec); err != nil {
+	cleared, err := m.store.ClearSessionPauseIfIncident(ctx, id, paused.IncidentID, m.clock())
+	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("resume %s: persist: %w", id, err)
 	}
+	if !cleared {
+		// Conditional on the incident, so this means the pin changed under us.
+		// Lifting whatever is there now would resume the session on evidence
+		// this caller never saw.
+		current, ok, readErr := m.store.GetSession(ctx, id)
+		if readErr != nil {
+			return domain.SessionRecord{}, fmt.Errorf("resume %s: re-read after contended write: %w", id, readErr)
+		}
+		if !ok {
+			return domain.SessionRecord{}, fmt.Errorf("resume %s: %w", id, ErrNotFound)
+		}
+		if current.Metadata.Pause == nil {
+			return current, nil // someone else resumed the same incident; converged
+		}
+		return domain.SessionRecord{}, fmt.Errorf("resume %s: %w: holding incident is %s, not %s",
+			id, ErrIncidentMismatch, current.Metadata.Pause.IncidentID, paused.IncidentID)
+	}
+
+	rec.Metadata.Pause = nil
 	m.logger.Info("session resumed", "sessionID", id, "incident", paused.IncidentID)
 	return rec, nil
 }
@@ -176,4 +250,24 @@ func (m *Manager) appendPauseLedger(
 		return fmt.Errorf("lifecycle ledger %s: %w", kind, err)
 	}
 	return nil
+}
+
+// pausedSkip reports whether an AUTOMATIC boot-time action must leave this
+// session alone, and logs the skip so a quiet boot is not mistaken for a boot
+// with nothing to do.
+//
+// Every automatic relaunch path funnels through this: post-stop switch
+// recovery, the live pass's save-and-teardown (whose restore marker is what
+// causes the relaunch), and RestoreAll's worker loop and orchestrator election.
+// A pause that stops AO writing to a session but lets boot relaunch its agent
+// would not be a pause at all — it would just be quiet until the next restart.
+func (m *Manager) pausedSkip(rec domain.SessionRecord, action string) bool {
+	if rec.Metadata.Pause == nil {
+		return false
+	}
+	m.logger.Info("skipping automatic action for a paused session",
+		"sessionID", rec.ID, "action", action,
+		"incident", rec.Metadata.Pause.IncidentID,
+		"reason", string(rec.Metadata.Pause.Reason))
+	return true
 }

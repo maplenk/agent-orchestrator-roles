@@ -33,9 +33,12 @@ func pausedWorker(t *testing.T) (*Manager, *fakeStore, domain.SessionID) {
 
 func limitPause() PauseRequest {
 	return PauseRequest{
+		// Caller-supplied and stable: detection derives it from the envelope so
+		// a retry re-derives the same value. See PauseRequest.IncidentID.
+		IncidentID:   "incident-1",
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
-		EvidenceJSON: `{"kind":"usage_limit","window":"5h"}`,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","scope":"account"}`,
 	}
 }
 
@@ -112,10 +115,10 @@ func TestPauseSession_IdempotentForTheSameIncident(t *testing.T) {
 	if _, err := m.PauseSession(ctx, id, req); err != nil {
 		t.Fatalf("re-pause same incident: %v", err)
 	}
-	// Also the unspecified-incident repeat, which is what a detector that does
-	// not track incidents will send.
+	// And a third report of the same incident, which is what a polling
+	// detector produces.
 	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
-		t.Fatalf("re-pause unspecified incident: %v", err)
+		t.Fatalf("third report of the same incident: %v", err)
 	}
 
 	var pauses int
@@ -346,5 +349,178 @@ func TestSendConfirm_ReNudgesWhenNotPaused(t *testing.T) {
 	}
 	if len(msg.msgs) < 2 {
 		t.Fatalf("messages = %d, want >1: an unpaused stuck session must still be re-nudged", len(msg.msgs))
+	}
+}
+
+// The orphaned-ledger case. Ledger is written before the pin, so a pin failure
+// leaves a pause event with no pause. The fix is that the incident id is the
+// CALLER's: a retry re-derives it, the ledger append dedupes on it, and the pin
+// is simply written. With a manager-minted id the caller could never learn what
+// was recorded, and every retry would open a fresh incident for one real limit.
+func TestPauseSession_RetryAfterAFailedPinIsIdempotent(t *testing.T) {
+	m, st, id := pausedWorker(t)
+
+	st.pauseWriteErr = errors.New("disk full")
+	if _, err := m.PauseSession(ctx, id, limitPause()); err == nil {
+		t.Fatal("pause reported success despite a failed pin write")
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("a failed pin write left the session paused")
+	}
+	// The ledger row IS there — that is the orphan.
+	if got := countLedger(st, domain.LifecycleKindPause); got != 1 {
+		t.Fatalf("pause ledger rows after the failure = %d, want 1 (the orphan)", got)
+	}
+
+	// Retry with the same, caller-derived incident.
+	st.pauseWriteErr = nil
+	rec, err := m.PauseSession(ctx, id, limitPause())
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if rec.Metadata.Pause == nil {
+		t.Fatal("retry did not pin the pause")
+	}
+	if got := countLedger(st, domain.LifecycleKindPause); got != 1 {
+		t.Fatalf("pause ledger rows after the retry = %d, want 1: the orphan was adopted, not duplicated", got)
+	}
+	if rec.Metadata.Pause.IncidentID != "incident-1" {
+		t.Fatalf("incident = %q, want the caller's", rec.Metadata.Pause.IncidentID)
+	}
+}
+
+func TestPauseSession_RequiresAnIncident(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	req := limitPause()
+	req.IncidentID = "   "
+	if _, err := m.PauseSession(ctx, id, req); !errors.Is(err, ErrIncidentRequired) {
+		t.Fatalf("err = %v, want ErrIncidentRequired", err)
+	}
+	if countLedger(st, domain.LifecycleKindPause) != 0 {
+		t.Error("a rejected pause still wrote a ledger row")
+	}
+}
+
+func countLedger(st *fakeStore, kind domain.LifecycleLedgerKind) int {
+	var n int
+	for _, e := range st.ledger {
+		if e.Kind == kind {
+			n++
+		}
+	}
+	return n
+}
+
+// The read-modify-write race, as a test. An unrelated writer holding a snapshot
+// taken BEFORE the pause writes it back afterwards; the pin must survive. This
+// is the shape of every lifecycle and switch update in the manager.
+func TestPauseSurvivesAConcurrentFullRowUpdate(t *testing.T) {
+	m, st, id := pausedWorker(t)
+
+	// A writer reads the session...
+	stale := st.sessions[id]
+	// ...then a limit is detected and pinned...
+	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// ...and only then does the writer flush its pre-pause snapshot.
+	stale.Metadata.Prompt = "an unrelated field the other writer owns"
+	if err := st.UpdateSession(ctx, stale); err != nil {
+		t.Fatalf("stale update: %v", err)
+	}
+
+	after := st.sessions[id]
+	if after.Metadata.Pause == nil {
+		t.Fatal("a stale full-row write cleared the pause pin; every automatic path is open again")
+	}
+	if after.Metadata.Prompt != "an unrelated field the other writer owns" {
+		t.Error("the unrelated write was lost; pause must not block other writers")
+	}
+}
+
+// And the mirror: a stale resume must not lift a pause it never saw.
+func TestResumeRefusesAStaleIncident(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	// Simulate the incident being replaced under the caller: resume, then a new
+	// incident pins the session again.
+	if _, err := m.ResumeSession(ctx, id); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	second := limitPause()
+	second.IncidentID = "incident-2"
+	if _, err := m.PauseSession(ctx, id, second); err != nil {
+		t.Fatalf("second pause: %v", err)
+	}
+
+	// A resume built from the FIRST incident must not lift the second.
+	ok, err := st.ClearSessionPauseIfIncident(ctx, id, "incident-1", time.Now())
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if ok {
+		t.Fatal("a resume for a stale incident lifted a newer pause")
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("the newer pause was cleared")
+	}
+}
+
+// The genuine race: another detector pins the session between this caller's
+// read and its compare-and-set. The CAS is what makes that safe — but only if
+// the loser then reports what actually happened instead of claiming success or
+// inventing a failure. A silent "ok" here would tell a caller its incident
+// holds the session when a different one does, which is what 3B's per-incident
+// failover cap would then be counted against.
+func TestPauseSession_LosingTheCASReportsTheHoldingIncident(t *testing.T) {
+	m, st, id := pausedWorker(t)
+
+	st.beforePauseCAS = func() {
+		rec := st.sessions[id]
+		rec.Metadata.Pause = &domain.SessionPause{
+			IncidentID:   "the-other-detector",
+			Reason:       domain.PauseReasonUsageLimit,
+			DetectedBy:   domain.PauseDetectionStructured,
+			EvidenceJSON: `{"version":1,"kind":"usage_limit"}`,
+			PausedAt:     time.Now().UTC(),
+		}
+		st.sessions[id] = rec
+	}
+
+	_, err := m.PauseSession(ctx, id, limitPause())
+	if !errors.Is(err, ErrAlreadyPaused) {
+		t.Fatalf("err = %v, want ErrAlreadyPaused naming the winner", err)
+	}
+	if st.sessions[id].Metadata.Pause.IncidentID != "the-other-detector" {
+		t.Fatal("the losing caller overwrote the winning incident")
+	}
+}
+
+// And the converged case: the racing writer reported the SAME incident, so
+// there is nothing wrong — both callers were right, and this one must not
+// surface a spurious conflict to a detector that simply polled twice.
+func TestPauseSession_LosingTheCASToTheSameIncidentSucceeds(t *testing.T) {
+	m, st, id := pausedWorker(t)
+
+	st.beforePauseCAS = func() {
+		rec := st.sessions[id]
+		rec.Metadata.Pause = &domain.SessionPause{
+			IncidentID:   "incident-1", // the same one this caller is reporting
+			Reason:       domain.PauseReasonUsageLimit,
+			DetectedBy:   domain.PauseDetectionStructured,
+			EvidenceJSON: `{"version":1,"kind":"usage_limit"}`,
+			PausedAt:     time.Now().UTC(),
+		}
+		st.sessions[id] = rec
+	}
+
+	rec, err := m.PauseSession(ctx, id, limitPause())
+	if err != nil {
+		t.Fatalf("a concurrent report of the SAME incident was surfaced as a conflict: %v", err)
+	}
+	if rec.Metadata.Pause == nil || rec.Metadata.Pause.IncidentID != "incident-1" {
+		t.Fatalf("returned record = %+v, want the converged pause", rec.Metadata.Pause)
 	}
 }

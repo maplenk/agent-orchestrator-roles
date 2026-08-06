@@ -62,6 +62,11 @@ type fakeStore struct {
 	// ledgerAlwaysErr fails every append regardless of phase. Pause/resume rows
 	// carry no phase, so failLedgerPhase alone cannot reach them.
 	ledgerAlwaysErr bool
+	// pauseWriteErr fails the column-owned pause writes.
+	pauseWriteErr error
+	// beforePauseCAS runs immediately before the compare-and-set, so a test can
+	// let another writer win the race between PauseSession's read and its write.
+	beforePauseCAS func()
 	// worktrees maps session ID to its saved worktree rows (shutdown-saved marker).
 	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
 	// worktreeListErr / worktreeDeleteErr fail the marker read or delete for
@@ -166,8 +171,57 @@ func (f *fakeStore) UpdateSession(_ context.Context, rec domain.SessionRecord) e
 		}
 		return errors.New("injected update failure")
 	}
+	// Mirror the REAL store: pause_json is column-owned and the generic update
+	// does not carry it. A fake that let a whole-record write clobber the pin
+	// would be wrong in exactly the direction that hides the bug — every
+	// manager test would pass while production silently un-paused sessions.
+	if prev, ok := f.sessions[rec.ID]; ok {
+		rec.Metadata.Pause = prev.Metadata.Pause
+	}
 	f.sessions[rec.ID] = rec
 	return nil
+}
+
+// --- durable pause pin (migration 0049), column-owned ---
+
+func (f *fakeStore) SetSessionPauseIfAbsent(_ context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error) {
+	if f.beforePauseCAS != nil {
+		hook := f.beforePauseCAS
+		f.beforePauseCAS = nil // one shot: the racing writer only wins once
+		hook()
+	}
+	if f.pauseWriteErr != nil {
+		return false, f.pauseWriteErr
+	}
+	if pause == nil {
+		return false, errors.New("refusing to write an empty pin")
+	}
+	if err := pause.Validate(); err != nil {
+		return false, err
+	}
+	rec, ok := f.sessions[id]
+	if !ok || rec.IsTerminated || rec.Metadata.Pause != nil {
+		return false, nil // compare-and-set precondition failed
+	}
+	cp := *pause
+	rec.Metadata.Pause = &cp
+	rec.UpdatedAt = updatedAt
+	f.sessions[id] = rec
+	return true, nil
+}
+
+func (f *fakeStore) ClearSessionPauseIfIncident(_ context.Context, id domain.SessionID, incidentID string, updatedAt time.Time) (bool, error) {
+	if f.pauseWriteErr != nil {
+		return false, f.pauseWriteErr
+	}
+	rec, ok := f.sessions[id]
+	if !ok || rec.Metadata.Pause == nil || rec.Metadata.Pause.IncidentID != incidentID {
+		return false, nil
+	}
+	rec.Metadata.Pause = nil
+	rec.UpdatedAt = updatedAt
+	f.sessions[id] = rec
+	return true, nil
 }
 
 // --- orchestrator replacement intent (migration 0047) ---

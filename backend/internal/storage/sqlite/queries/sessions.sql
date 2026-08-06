@@ -22,7 +22,7 @@ UPDATE sessions SET
     resolved_workspace_writes = ?, resolved_can_spawn = ?, spawn_capability_hash = ?, display_name = ?,
     activity_state = ?, activity_last_at = ?, first_signal_at = ?, is_terminated = ?,
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
-    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?, pause_json = ?,
+    runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, updated_at = ?
 WHERE id = ?;
@@ -130,3 +130,10 @@ SELECT EXISTS(
 -- store runs that DELETE directly via tx.ExecContext inside
 -- Store.DeleteSession, inside the same transaction as the SessionIsSeed
 -- probe and the raw change_log cleanup.
+
+-- NOTE: the two conditional pause_json writes (set-if-absent, clear-if-incident)
+-- are deliberately NOT sqlc queries — same sqlc 1.31 SQLite-parser bug as the
+-- DELETE above. Literals on the RHS of `=` (`pause_json = ''`, `is_terminated =
+-- 0`) get silently stripped, and the truncated tail leaks into the NEXT
+-- generated const. The store runs both directly via ExecContext; see
+-- SetSessionPauseIfAbsent / ClearSessionPauseIfIncident in session_store.go.

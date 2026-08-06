@@ -235,6 +235,14 @@ type Store interface {
 	GetTemplateArtifact(ctx context.Context, id string) (content []byte, sha string, ok bool, err error)
 	// AppendLifecycleLedger records an append-only switch/pause/fresh event.
 	AppendLifecycleLedger(ctx context.Context, rec domain.LifecycleLedgerRecord) error
+	// SetSessionPauseIfAbsent writes ONLY the pause column, and only while the
+	// pin is still absent. Column-owned rather than part of the full-row
+	// update, so a writer holding a pre-pause snapshot cannot clear a pin it
+	// never read. ok=false means the precondition failed, not an error.
+	SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error)
+	// ClearSessionPauseIfIncident lifts the pin only while it still names this
+	// incident, so a stale resume cannot lift a newer pause.
+	ClearSessionPauseIfIncident(ctx context.Context, id domain.SessionID, incidentID string, updatedAt time.Time) (bool, error)
 	// ListOrchestratorReapQueue returns outstanding obligations to confirm the
 	// death of superseded orchestrators (migration 0046). A missing table must
 	// surface as an error, never as an empty queue.
@@ -2125,6 +2133,15 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 			return nil // adopt: the session survived the crash.
 		}
 	}
+	// Past this point the runtime is confirmed dead and the session is torn
+	// down WITH a shutdown-saved marker — which RestoreAll then relaunches from,
+	// in this same boot. For a paused session that is the automatic restart
+	// rule 2 forbids, so leave the row untouched: it stays active with a dead
+	// agent, which is the ordinary "agent exited" state the guard already
+	// handles, and an explicit resume makes it eligible again.
+	if m.pausedSkip(rec, "save-and-teardown of a dead runtime") {
+		return nil
+	}
 	if projectKind == domain.ProjectKindScratch {
 		return m.lcm.MarkTerminated(ctx, rec.ID)
 	}
@@ -2195,6 +2212,13 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 		// someone noticed. RecoverSwitchFromPostStop takes the project gate
 		// itself for those.
 		if rec.IsTerminated || (rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator) {
+			continue
+		}
+		// Recovery LAUNCHES the switch target. On a paused session that is an
+		// automatic restart, so the incomplete saga is left exactly as it is
+		// and re-driven after an explicit resume. The handoff is durable, so
+		// nothing is lost by waiting.
+		if m.pausedSkip(rec, "post_stop switch recovery") {
 			continue
 		}
 		if _, err := m.RecoverSwitchFromPostStop(ctx, rec.ID); err != nil {
@@ -2401,6 +2425,15 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 	// looked rather than by having failed to delete, so it gets the same answer.
 	restorable := make([]domain.SessionRecord, 0, len(candidates))
 	for _, rec := range candidates {
+		// A paused candidate does not take part in the election AT ALL — it is
+		// neither the survivor nor a loser. That distinction is the whole point:
+		// losers get their markers neutralized, and neutralizing a paused
+		// orchestrator's marker would permanently destroy the restorability a
+		// later resume depends on. Excluding it here also means it can never be
+		// elected and relaunched, which is the rule-2 violation.
+		if m.pausedSkip(rec, "orchestrator survivor election") {
+			continue
+		}
 		rows, err := m.restorableMarkers(ctx, rec.ID)
 		if err != nil {
 			m.logger.Error("restore-all: abandoning orchestrator election on an unreadable marker",
@@ -2491,6 +2524,16 @@ func (m *Manager) restorableMarkers(ctx context.Context, id domain.SessionID) ([
 // can. The ONE exception is ErrLaunchCleanupUnresolved, which is returned so
 // the caller can refuse to serve; see RestoreAll.
 func (m *Manager) restoreSavedSession(ctx context.Context, rec domain.SessionRecord) error {
+	// The last gate before an agent is relaunched, and the one every restore
+	// path funnels through — the worker loop and the elected orchestrator both
+	// end here. A session paused before a clean shutdown carries a marker like
+	// any other, so without this the next boot simply starts it again.
+	//
+	// The marker is deliberately NOT neutralized: it is what makes the session
+	// restorable once someone resumes it. An un-restored marker is inert.
+	if m.pausedSkip(rec, "restore of a shutdown-saved session") {
+		return nil
+	}
 	rows, err := m.restorableMarkers(ctx, rec.ID)
 	if err != nil {
 		// Single-session path: no election is riding on this, so an unreadable
