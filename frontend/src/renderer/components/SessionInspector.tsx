@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { SessionPausePanel } from "./SessionPausePanel";
 import { useTranslation } from "react-i18next";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useId, useState, type ReactNode } from "react";
@@ -328,6 +329,16 @@ function SummaryView({
 					)}
 				</div>
 			</Section>
+
+			{/* Above the fold: a paused session is the first thing a human needs to
+			    understand, and Resume lives here while "Restart agent" stays down in
+			    Activity — deliberately separate controls, because Resume never
+			    starts a process (PHASE3A_PAUSE_CONTRACT §2). */}
+			{session.pause ? (
+				<div className="px-4 pb-2">
+					<SessionPausePanel session={session} />
+				</div>
+			) : null}
 
 			{hasPRs ? <ReviewsSection onOpenReviewerTerminal={onOpenReviewerTerminal} session={session} /> : null}
 

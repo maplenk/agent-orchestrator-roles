@@ -106,6 +106,8 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						previewUrl: session.previewUrl,
 						previewRevision: session.previewRevision,
 						isPinned: session.isPinned ?? false,
+						// Pause is a durable pin, independent of activity/liveness.
+						pause: session.pause ?? undefined,
 						pinnedAt: session.pinnedAt ?? undefined,
 						prs: (session.prs ?? []).map(toPullRequestFacts),
 					};

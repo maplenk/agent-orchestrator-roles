@@ -117,6 +117,21 @@ export type PullRequestFacts = {
 	updatedAt: string;
 };
 
+/** Durable pause pin. Mirrors ControllersSessionPauseView. */
+export type SessionPause = {
+	incidentId: string;
+	reason: "usage_limit" | "operator";
+	detectedBy: "structured_envelope" | "operator";
+	harness?: string;
+	pausedAt: string;
+	/**
+	 * What the provider said, when it said anything. INFORMATION ONLY — nothing
+	 * schedules against it, so it must never be rendered as a countdown to an
+	 * automatic resume.
+	 */
+	retryAfter?: string;
+};
+
 export type WorkspaceSession = {
 	id: string;
 	terminalHandleId?: string;
@@ -145,6 +160,15 @@ export type WorkspaceSession = {
 	pinnedAt?: string;
 	/** Raw agent lifecycle activity from the daemon. */
 	activity?: SessionActivity;
+	/**
+	 * Durable pause pin from the daemon; absent means not paused.
+	 *
+	 * Paused and agent-liveness are INDEPENDENT facts: a paused session may be
+	 * running or dead, and the two need different controls (see
+	 * docs/roles/PHASE3A_PAUSE_CONTRACT.md). Liveness comes from `activity`, not
+	 * from here.
+	 */
+	pause?: SessionPause;
 	/**
 	 * Live preview target set by the daemon (via `ao preview`) and streamed over
 	 * CDC. When non-empty, the browser panel opens and navigates here.
