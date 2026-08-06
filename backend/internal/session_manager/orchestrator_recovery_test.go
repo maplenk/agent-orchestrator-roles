@@ -102,6 +102,46 @@ func TestEnsureOrchestrator_DischargesIntentOnSuccess(t *testing.T) {
 	}
 }
 
+// TestEnsureOrchestrator_NonCleanSpawnAlsoDischargesIntent: a stranded project
+// is usually rescued by an ordinary idempotent spawn, not a clean replacement.
+// Only the clean path discharged, so a healthy project kept a durable record
+// saying it was still owed an orchestrator until some later boot noticed —
+// found by live dogfood, where the intent survived a successful recovery spawn.
+func TestEnsureOrchestrator_NonCleanSpawnAlsoDischargesIntent(t *testing.T) {
+	t.Run("spawned", func(t *testing.T) {
+		m, st := recoveryHarness(t)
+		st.intents["mer"] = domain.OrchestratorReplacementIntent{ProjectID: "mer", RequestedAt: time.Now()}
+
+		if _, err := m.EnsureOrchestrator(context.Background(), ports.SpawnConfig{ProjectID: "mer"}, false); err != nil {
+			t.Fatalf("EnsureOrchestrator: %v", err)
+		}
+		if len(liveOrchestrators(st)) != 1 {
+			t.Fatal("no orchestrator spawned")
+		}
+		if _, ok := st.intents["mer"]; ok {
+			t.Error("intent survived a successful non-clean spawn: the record contradicts the live state")
+		}
+	})
+
+	t.Run("reused", func(t *testing.T) {
+		m, st := recoveryHarness(t)
+		st.sessions["mer-9"] = domain.SessionRecord{
+			ID: "mer-9", ProjectID: "mer", Kind: domain.KindOrchestrator, Harness: domain.HarnessCodex,
+			CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer/orchestrator"},
+		}
+		st.intents["mer"] = domain.OrchestratorReplacementIntent{ProjectID: "mer", RequestedAt: time.Now()}
+
+		res, err := m.EnsureOrchestrator(context.Background(), ports.SpawnConfig{ProjectID: "mer"}, false)
+		if err != nil || !res.Reused {
+			t.Fatalf("EnsureOrchestrator: %v reused=%v", err, res.Reused)
+		}
+		if _, ok := st.intents["mer"]; ok {
+			t.Error("intent survived an idempotent reuse of a live orchestrator")
+		}
+	})
+}
+
 // TestRecoverOrchestratorReplacements_SpawnsForAStrandedProject is the payoff:
 // the interval is not terminal.
 func TestRecoverOrchestratorReplacements_SpawnsForAStrandedProject(t *testing.T) {

@@ -8,8 +8,10 @@ parameterized, `FreshOrchestratorConversation` gates the project before the swit
 fence, and `ObservedOrchestratorV1` compiles the fleet into the handoff.
 **2B-2 landed** (and 2B-1 hardened after review: migration **0048** admits the new ledger kind, which the SQLite CHECK had rejected outright) — replacement intent (migration 0047) is persisted before retirement
 and boot recovery makes a zero-owner interval non-terminal; `finalizeRetirement` is
-now crash-consistent. **2B-3 not started**: cross-harness orchestrator switch is
-deliberately refused until Claude RO lands.
+now crash-consistent. **2B-3 is BLOCKED/DEFERRED on 1-F (Claude RO)**, not merely unstarted, so
+Phase 2B as a whole is NOT complete. Cross-harness orchestrator switch is
+deliberately refused until Claude RO lands. 2B-1 live evidence:
+`PHASE2B1_LIVE_DOGFOOD.md`.
 Written after Phase 2A close-out (`5e8476d5`).
 **Canonical design:** `MASTER_PLAN.md` §5.4. **Execution status:** `REMAINING_PLAN.md`.
 **Prereq reading:** `AGENT_HANDOFF.md` §5 (2A hard lessons — all still binding).

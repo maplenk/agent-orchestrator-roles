@@ -96,13 +96,21 @@ func (m *Manager) EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig,
 	}
 
 	if !clean {
+		// Either branch below ends with the project owning an orchestrator, and
+		// the intent means "this project is OWED one" — so both discharge it.
+		// A stranded project is most often rescued by an ordinary idempotent
+		// spawn like this one, not by a clean replacement, and leaving the
+		// intent behind would leave a durable record contradicting the live
+		// state until the next boot happened to notice.
 		if len(existing) > 0 {
+			m.dischargeReplacementIntent(ctx, cfg.ProjectID)
 			return EnsureOrchestratorResult{Record: newestOrchestratorRecord(existing), Reused: true}, nil
 		}
 		rec, promptBytes, systemPromptBytes, err := m.spawnUnderOwnership(ctx, cfg)
 		if err != nil {
 			return EnsureOrchestratorResult{}, err
 		}
+		m.dischargeReplacementIntent(ctx, cfg.ProjectID)
 		return EnsureOrchestratorResult{Record: rec, PromptBytes: promptBytes, SystemPromptBytes: systemPromptBytes}, nil
 	}
 
