@@ -555,6 +555,23 @@ export interface paths {
         patch: operations["setSessionMergePolicy"];
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/pause": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Pause a session at an operator's request (no automatic send or restart while paused) */
+        post: operations["pauseSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/pr": {
         parameters: {
             query?: never;
@@ -655,6 +672,23 @@ export interface paths {
         put?: never;
         /** Restore a terminated session */
         post: operations["restoreSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/sessions/{sessionId}/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Lift a named pause (does NOT restart the agent; restarting is a separate operation) */
+        post: operations["resumeSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -981,6 +1015,34 @@ export interface components {
         ContainerReapConfig: {
             disabled?: boolean;
         };
+        ControllersPauseSessionRequest: {
+            /** @description Client-generated stable id for this pause incident. */
+            incidentId: string;
+            /**
+             * @description Only "operator" is accepted.
+             * @enum {string}
+             */
+            reason?: "operator";
+        };
+        ControllersPauseSessionResponse: {
+            ok: boolean;
+            pause?: components["schemas"]["ControllersSessionPauseView"];
+            sessionId: string;
+        };
+        ControllersResumeSessionRequest: {
+            /** @description The incident this resume answers. */
+            incidentId: string;
+        };
+        ControllersSessionPauseView: {
+            /** @enum {string} */
+            detectedBy: "structured_envelope" | "operator";
+            harness?: string;
+            incidentId: string;
+            pausedAt: string;
+            /** @enum {string} */
+            reason: "usage_limit" | "operator";
+            retryAfter?: string;
+        };
         ControllersSessionView: {
             activity: components["schemas"]["DomainActivity"];
             branch?: string;
@@ -992,6 +1054,7 @@ export interface components {
             isTerminated: boolean;
             issueId?: string;
             kind: string;
+            pause?: components["schemas"]["ControllersSessionPauseView"];
             /** Format: int64 */
             previewRevision?: number;
             previewUrl?: string;
@@ -3620,6 +3683,69 @@ export interface operations {
             };
         };
     };
+    pauseSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersPauseSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersPauseSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
     listSessionPRs: {
         parameters: {
             query?: never;
@@ -4236,6 +4362,69 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RestoreSessionResponse"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    resumeSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ControllersResumeSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ControllersPauseSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
                 };
             };
             /** @description Not Found */

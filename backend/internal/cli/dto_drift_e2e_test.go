@@ -114,6 +114,14 @@ func (f *fakeSessionService) FreshConversation(context.Context, domain.SessionID
 	return sessionsvc.SwitchWorkerOutcome{}, nil
 }
 
+func (f *fakeSessionService) PauseSession(context.Context, domain.SessionID, string, string) (domain.SessionRecord, error) {
+	return domain.SessionRecord{}, nil
+}
+
+func (f *fakeSessionService) ResumeSession(context.Context, domain.SessionID, string) (domain.SessionRecord, error) {
+	return domain.SessionRecord{}, nil
+}
+
 func (f *fakeSessionService) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {
 	return nil, nil
 }

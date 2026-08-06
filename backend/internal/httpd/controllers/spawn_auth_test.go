@@ -113,6 +113,14 @@ func (f *spawnGateSvc) FreshConversation(_ context.Context, id domain.SessionID,
 		Session: s, GenerationID: "gen-fresh", Kind: domain.LifecycleKindFreshConversation,
 	}, nil
 }
+
+func (f *spawnGateSvc) PauseSession(_ context.Context, id domain.SessionID, incidentID, reason string) (domain.SessionRecord, error) {
+	return domain.SessionRecord{ID: id}, nil
+}
+
+func (f *spawnGateSvc) ResumeSession(_ context.Context, id domain.SessionID, incidentID string) (domain.SessionRecord, error) {
+	return domain.SessionRecord{ID: id}, nil
+}
 func (f *spawnGateSvc) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {
 	return nil, nil
 }

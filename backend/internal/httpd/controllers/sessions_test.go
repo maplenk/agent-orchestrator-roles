@@ -262,6 +262,14 @@ func (f *fakeSessionService) FreshConversation(ctx context.Context, id domain.Se
 	return f.SwitchWorker(ctx, sessionsvc.SwitchWorkerRequest{SessionID: id, Objective: objective, Fresh: true})
 }
 
+func (f *fakeSessionService) PauseSession(_ context.Context, id domain.SessionID, incidentID, reason string) (domain.SessionRecord, error) {
+	return domain.SessionRecord{ID: id}, nil
+}
+
+func (f *fakeSessionService) ResumeSession(_ context.Context, id domain.SessionID, incidentID string) (domain.SessionRecord, error) {
+	return domain.SessionRecord{ID: id}, nil
+}
+
 func (f *fakeSessionService) ListPRs(_ context.Context, id domain.SessionID) ([]domain.PRFacts, error) {
 	if f.listPRErr != nil {
 		return nil, f.listPRErr

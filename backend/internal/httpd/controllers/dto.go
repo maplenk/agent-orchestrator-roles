@@ -143,6 +143,56 @@ type SessionView struct {
 	// Metadata.
 	PreviewRevision int64            `json:"previewRevision,omitempty"`
 	PRs             []SessionPRFacts `json:"prs"`
+	// Pause is the durable pause pin (Phase 3A), null when the session is not
+	// paused. Pulled from the json:"-" domain Metadata.
+	//
+	// Liveness is NOT part of this: activity.state already carries it, and a
+	// paused session may be either alive or dead. The UI must read both — a
+	// paused-and-dead session resumes to un-paused-and-still-dead, because
+	// resume lifts the pin and never starts a process. See
+	// docs/roles/PHASE3A_PAUSE_CONTRACT.md.
+	Pause *SessionPauseView `json:"pause,omitempty"`
+}
+
+// SessionPauseView is the wire shape of a durable pause.
+type SessionPauseView struct {
+	// IncidentID must be carried back verbatim by a resume. Clients must not
+	// re-read the current pin at submit time: an action raised for one incident
+	// landing after another replaced it would otherwise resume the wrong one.
+	IncidentID string `json:"incidentId"`
+	Reason     string `json:"reason" enum:"usage_limit,operator"`
+	DetectedBy string `json:"detectedBy" enum:"structured_envelope,operator"`
+	// Harness that hit the limit, recorded at pause time.
+	Harness  string `json:"harness,omitempty"`
+	PausedAt string `json:"pausedAt"`
+	// RetryAfter is what the provider said, when it said anything. INFORMATION
+	// ONLY: nothing schedules against it, so it must never be rendered as a
+	// countdown to an automatic resume.
+	RetryAfter string `json:"retryAfter,omitempty"`
+}
+
+// PauseSessionRequest is the body of POST /api/v1/sessions/{sessionId}/pause.
+type PauseSessionRequest struct {
+	// IncidentID is required and client-generated, so a retried request cannot
+	// open a second incident for one real pause.
+	IncidentID string `json:"incidentId" description:"Client-generated stable id for this pause incident."`
+	// Reason may only be "operator". A usage limit needs a structured harness
+	// envelope; accepting it here would make the field a free-text limit claim.
+	Reason string `json:"reason,omitempty" enum:"operator" description:"Only \"operator\" is accepted."`
+}
+
+// ResumeSessionRequest is the body of POST /api/v1/sessions/{sessionId}/resume.
+type ResumeSessionRequest struct {
+	// IncidentID names the incident being answered. Required: resume must not
+	// lift whatever happens to be current.
+	IncidentID string `json:"incidentId" description:"The incident this resume answers."`
+}
+
+// PauseSessionResponse is returned by both pause and resume.
+type PauseSessionResponse struct {
+	OK        bool              `json:"ok"`
+	SessionID domain.SessionID  `json:"sessionId"`
+	Pause     *SessionPauseView `json:"pause,omitempty"`
 }
 
 // ListSessionsResponse is the body of GET /api/v1/sessions.

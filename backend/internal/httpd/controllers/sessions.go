@@ -82,6 +82,11 @@ type SessionService interface {
 	Send(ctx context.Context, id domain.SessionID, message string) error
 	SwitchWorker(ctx context.Context, req sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error)
 	FreshConversation(ctx context.Context, sessionID domain.SessionID, objective string) (sessionsvc.SwitchWorkerOutcome, error)
+	// PauseSession parks a session at an operator's request; ResumeSession
+	// lifts a pause the caller NAMES. Both take an incident id because neither
+	// may act on "whatever is current" — see PHASE3A_PAUSE_CONTRACT.md.
+	PauseSession(ctx context.Context, sessionID domain.SessionID, incidentID, reason string) (domain.SessionRecord, error)
+	ResumeSession(ctx context.Context, sessionID domain.SessionID, incidentID string) (domain.SessionRecord, error)
 	ListPRSummaries(ctx context.Context, id domain.SessionID) ([]sessionsvc.PRSummary, error)
 	ClaimPR(ctx context.Context, id domain.SessionID, ref string, opts sessionsvc.ClaimPROptions) (sessionsvc.ClaimPRResult, error)
 	WorkspaceWatchPaths(ctx context.Context, id domain.SessionID) ([]string, error)
@@ -165,6 +170,8 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/send", c.send)
 	r.Post("/sessions/{sessionId}/switch", c.switchWorker)
 	r.Post("/sessions/{sessionId}/fresh-conversation", c.freshConversation)
+	r.Post("/sessions/{sessionId}/pause", c.pauseSession)
+	r.Post("/sessions/{sessionId}/resume", c.resumeSession)
 	r.Post("/sessions/{sessionId}/activity", c.activity)
 	r.Get("/orchestrators", c.listOrchestrators)
 	r.Post("/orchestrators", c.spawnOrchestrator)
@@ -1044,6 +1051,53 @@ func (c *SessionsController) switchWorker(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// pauseSession parks a session at an operator's request. It never stops the
+// runtime: the pane, process and transcript stay put for the human to read.
+func (c *SessionsController) pauseSession(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/pause")
+		return
+	}
+	var in PauseSessionRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	rec, err := c.Svc.PauseSession(r.Context(), sessionID(r), in.IncidentID, in.Reason)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, PauseSessionResponse{
+		OK: true, SessionID: sessionID(r), Pause: pauseView(rec.Metadata.Pause),
+	})
+}
+
+// resumeSession lifts a pause the caller names. It deliberately does NOT start
+// an agent: a session whose agent died while paused resumes to un-paused and
+// still dead, and restarting it is a separate, explicit act by the human.
+func (c *SessionsController) resumeSession(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/resume")
+		return
+	}
+	var in ResumeSessionRequest
+	if err := decodeJSON(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	rec, err := c.Svc.ResumeSession(r.Context(), sessionID(r), in.IncidentID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	// Pause is nil after a successful resume; the field is omitted, which is
+	// the same shape an unpaused session carries everywhere else.
+	envelope.WriteJSON(w, http.StatusOK, PauseSessionResponse{
+		OK: true, SessionID: sessionID(r), Pause: pauseView(rec.Metadata.Pause),
+	})
+}
+
 func (c *SessionsController) freshConversation(w http.ResponseWriter, r *http.Request) {
 	if c.Svc == nil {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/fresh-conversation")
@@ -1423,7 +1477,27 @@ func previewFileURL(r *http.Request, id domain.SessionID, entry string) (string,
 }
 
 func sessionView(s domain.Session) SessionView {
-	return SessionView{Session: s, Branch: s.Metadata.Branch, PreviewURL: s.Metadata.PreviewURL, PreviewRevision: s.Metadata.PreviewRevision, PRs: sessionPRFacts(s.PRs)}
+	return SessionView{Session: s, Branch: s.Metadata.Branch, PreviewURL: s.Metadata.PreviewURL, PreviewRevision: s.Metadata.PreviewRevision, PRs: sessionPRFacts(s.PRs), Pause: pauseView(s.Metadata.Pause)}
+}
+
+// pauseView maps the durable pin to the wire shape. Nil in, nil out: "not
+// paused" must serialize as an absent field, never as a zero-valued object a
+// client could misread as a pause with an empty incident.
+func pauseView(p *domain.SessionPause) *SessionPauseView {
+	if p == nil {
+		return nil
+	}
+	out := &SessionPauseView{
+		IncidentID: p.IncidentID,
+		Reason:     string(p.Reason),
+		DetectedBy: string(p.DetectedBy),
+		Harness:    string(p.Harness),
+		PausedAt:   p.PausedAt.UTC().Format(time.RFC3339),
+	}
+	if p.RetryAfter != nil {
+		out.RetryAfter = p.RetryAfter.UTC().Format(time.RFC3339)
+	}
+	return out
 }
 
 func sessionViews(sessions []domain.Session) []SessionView {

@@ -696,6 +696,21 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrReadOnlyUnsupported):
 		return apierr.Invalid("READ_ONLY_UNSUPPORTED",
 			"The role requires workspaceWrites:false, which this harness cannot enforce", nil)
+	// Phase 3A pause. All four are states the caller can act on, and the two
+	// incident errors are "re-read, the world moved" rather than "retry": a
+	// blind retry is exactly how a stale request resumes an incident nobody
+	// looked at.
+	case errors.Is(err, sessionmanager.ErrIncidentRequired):
+		return apierr.Invalid("PAUSE_INCIDENT_REQUIRED",
+			"An incidentId is required so a retried request cannot open or lift the wrong incident", nil)
+	case errors.Is(err, sessionmanager.ErrAlreadyPaused):
+		return apierr.Conflict("SESSION_ALREADY_PAUSED",
+			"The session is already paused under a different incident; re-read it before acting", nil)
+	case errors.Is(err, sessionmanager.ErrNotPaused):
+		return apierr.Conflict("SESSION_NOT_PAUSED", "The session is not paused", nil)
+	case errors.Is(err, sessionmanager.ErrIncidentMismatch):
+		return apierr.Conflict("PAUSE_INCIDENT_MISMATCH",
+			"A different incident now holds this session; re-read it and answer the current one", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):

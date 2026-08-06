@@ -1109,6 +1109,32 @@ func sessionOperations() []operation {
 			},
 		},
 		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/pause", id: "pauseSession", tag: "sessions",
+			summary:    "Pause a session at an operator's request (no automatic send or restart while paused)",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.PauseSessionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PauseSessionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/resume", id: "resumeSession", tag: "sessions",
+			summary:    "Lift a named pause (does NOT restart the agent; restarting is a separate operation)",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.ResumeSessionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.PauseSessionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
 			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/activity", id: "setSessionActivity", tag: "sessions",
 			summary:    "Report an agent activity-state signal for a session",
 			pathParams: []any{controllers.SessionIDParam{}},

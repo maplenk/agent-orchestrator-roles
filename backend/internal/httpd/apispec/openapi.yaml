@@ -1505,6 +1505,58 @@ paths:
       summary: Configure whether PR completion terminates the session
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/pause:
+    post:
+      operationId: pauseSession
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersPauseSessionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersPauseSessionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Pause a session at an operator's request (no automatic send or restart
+        while paused)
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/pr:
     get:
       operationId: listSessionPRs
@@ -2010,6 +2062,58 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Internal Server Error
       summary: Restore a terminated session
+      tags:
+      - sessions
+  /api/v1/sessions/{sessionId}/resume:
+    post:
+      operationId: resumeSession
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ControllersResumeSessionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ControllersPauseSessionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Lift a named pause (does NOT restart the agent; restarting is a separate
+        operation)
       tags:
       - sessions
   /api/v1/sessions/{sessionId}/resume-agent:
@@ -2882,6 +2986,65 @@ components:
         disabled:
           type: boolean
       type: object
+    ControllersPauseSessionRequest:
+      properties:
+        incidentId:
+          description: Client-generated stable id for this pause incident.
+          type: string
+        reason:
+          description: Only "operator" is accepted.
+          enum:
+          - operator
+          type: string
+      required:
+      - incidentId
+      type: object
+    ControllersPauseSessionResponse:
+      properties:
+        ok:
+          type: boolean
+        pause:
+          $ref: '#/components/schemas/ControllersSessionPauseView'
+        sessionId:
+          type: string
+      required:
+      - ok
+      - sessionId
+      type: object
+    ControllersResumeSessionRequest:
+      properties:
+        incidentId:
+          description: The incident this resume answers.
+          type: string
+      required:
+      - incidentId
+      type: object
+    ControllersSessionPauseView:
+      properties:
+        detectedBy:
+          enum:
+          - structured_envelope
+          - operator
+          type: string
+        harness:
+          type: string
+        incidentId:
+          type: string
+        pausedAt:
+          type: string
+        reason:
+          enum:
+          - usage_limit
+          - operator
+          type: string
+        retryAfter:
+          type: string
+      required:
+      - incidentId
+      - reason
+      - detectedBy
+      - pausedAt
+      type: object
     ControllersSessionView:
       properties:
         activity:
@@ -2903,6 +3066,8 @@ components:
           type: string
         kind:
           type: string
+        pause:
+          $ref: '#/components/schemas/ControllersSessionPauseView'
         previewRevision:
           format: int64
           type: integer
