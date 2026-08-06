@@ -2,7 +2,8 @@ package sessionmanager
 
 import (
 	"errors"
-	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -324,32 +325,46 @@ func TestReconcile_FailedExitObservationIsBootFatal(t *testing.T) {
 // newly satisfied ErrBootUnsafe would silently turn a logged switch failure
 // into a refusal to boot.
 //
-// So both directions are pinned: the classification sentinel still matches, the
-// cause now matches too, and neither drags in a boot-safety sentinel.
+// Driven through the PRODUCTION wrapper — a real SwitchWorker whose target_ack
+// ledger write fails — rather than a hand-built error, so the assertion is
+// about the code that ships and not about a string this test wrote itself.
 func TestSwitchErrorsCarryTheirCauseWithoutBecomingBootUnsafe(t *testing.T) {
+	st := newFakeStore()
+	ws := filepath.Join(t.TempDir(), "ws")
+	_ = os.MkdirAll(ws, 0o750)
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+
 	cause := errors.New("database is locked")
-	for _, tc := range []struct {
-		name     string
-		err      error
-		sentinel error
-	}{
-		{"post-stop", fmt.Errorf("switch mer-1: %w: target ack ledger: %w", ErrSwitchPostStop, cause), ErrSwitchPostStop},
-		{"uncertain", fmt.Errorf("switch mer-1: %w: probe: %w", ErrSwitchUncertain, cause), ErrSwitchUncertain},
-		{"read-only", fmt.Errorf("switch mer-1: %w: %w", ErrReadOnlyUnsupported, cause), ErrReadOnlyUnsupported},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if !errors.Is(tc.err, tc.sentinel) {
-				t.Fatal("the classification sentinel no longer matches; toAPIError and recovery both route on it")
-			}
-			if !errors.Is(tc.err, cause) {
-				t.Fatal("the cause is not matchable; wrapping it is the whole reason for %w")
-			}
-			if errors.Is(tc.err, ErrBootUnsafe) {
-				t.Fatal("a switch failure became boot-unsafe; the daemon would refuse to serve on an ordinary store error")
-			}
-			if errors.Is(tc.err, ErrLaunchCleanupUnresolved) {
-				t.Fatal("a switch failure became a launch-cleanup failure; Reconcile would abort boot on it")
-			}
-		})
+	st.failLedgerPhase = domain.LifecyclePhaseTargetAck
+	st.appendLedgerErr = cause
+
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath:    func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "gen-1" },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	_, err := m.SwitchWorker(ctx, SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+		Semantic: domain.SemanticHandoffV1{Objective: "keep going"},
+	})
+	if err == nil {
+		t.Fatal("switch succeeded despite a failing target_ack ledger write; this test proves nothing")
+	}
+	if !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("err = %v; the classification sentinel no longer matches, and toAPIError and recovery both route on it", err)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("err = %v; the cause is not matchable, which is the whole reason for %%w", err)
+	}
+	if errors.Is(err, ErrBootUnsafe) {
+		t.Fatal("a switch failure became boot-unsafe; the daemon would refuse to serve on an ordinary store error")
+	}
+	if errors.Is(err, ErrLaunchCleanupUnresolved) {
+		t.Fatal("a switch failure became a launch-cleanup failure; Reconcile would abort boot on it")
 	}
 }
