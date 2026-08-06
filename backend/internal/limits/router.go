@@ -86,6 +86,15 @@ func (r *Router) Route(ctx context.Context, ev Event) (paused bool, err error) {
 		return false, nil
 	}
 
+	// The ENVELOPE's harness must match too. The detector-vs-event check above
+	// only proves the right adapter answered; this proves the adapter did not
+	// then describe some other harness's limit, which is the value that ends up
+	// durable in the pin and the ledger.
+	if env.Harness != ev.Harness {
+		return false, fmt.Errorf("limit router: envelope harness %q does not match the event's %q",
+			env.Harness, ev.Harness)
+	}
+
 	// Re-validate the detector's output. The detector is adapter code; this
 	// boundary does not take its word for the envelope being well formed, and
 	// the envelope rules (versioned, object-only, bounded, closed kind) are
@@ -107,6 +116,15 @@ func (r *Router) Route(ctx context.Context, ev Event) (paused bool, err error) {
 		// RetryAfter is carried for a human to read. Nothing schedules against
 		// it — see domain.SessionPause.
 		RetryAfter: env.ResetsAt,
+		// Ownership, enforced atomically by the pin write. A limit belongs to
+		// ONE harness process in ONE generation; by the time the report lands
+		// the session may have switched, been relaunched, or entered a switch
+		// saga, and pausing then would park a runtime that never hit it.
+		Guard: domain.PauseGuard{
+			ExpectHarness:          ev.Harness,
+			ExpectRuntimeLaunchID:  ev.RuntimeLaunchID,
+			RequireNoSwitchPending: true,
+		},
 	})
 	if err != nil {
 		return false, fmt.Errorf("limit router: pause %s: %w", ev.SessionID, err)

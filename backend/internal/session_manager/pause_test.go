@@ -38,7 +38,7 @@ func limitPause() PauseRequest {
 		IncidentID:   "incident-1",
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
-		EvidenceJSON: `{"version":1,"kind":"usage_limit","scope":"account"}`,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1","scope":"account"}`,
 	}
 }
 
@@ -513,7 +513,7 @@ func TestPauseSession_LosingTheCASReportsTheHoldingIncident(t *testing.T) {
 			IncidentID:   "the-other-detector",
 			Reason:       domain.PauseReasonUsageLimit,
 			DetectedBy:   domain.PauseDetectionStructured,
-			EvidenceJSON: `{"version":1,"kind":"usage_limit"}`,
+			EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1"}`,
 			PausedAt:     time.Now().UTC(),
 		}
 		st.sessions[id] = rec
@@ -540,7 +540,7 @@ func TestPauseSession_LosingTheCASToTheSameIncidentSucceeds(t *testing.T) {
 			IncidentID:   "incident-1", // the same one this caller is reporting
 			Reason:       domain.PauseReasonUsageLimit,
 			DetectedBy:   domain.PauseDetectionStructured,
-			EvidenceJSON: `{"version":1,"kind":"usage_limit"}`,
+			EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1"}`,
 			PausedAt:     time.Now().UTC(),
 		}
 		st.sessions[id] = rec

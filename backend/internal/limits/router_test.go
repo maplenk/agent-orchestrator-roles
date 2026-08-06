@@ -63,13 +63,13 @@ func goodEnvelope() domain.LimitEnvelopeV1 {
 	reset := time.Date(2026, 8, 6, 18, 0, 0, 0, time.UTC)
 	return domain.LimitEnvelopeV1{
 		Version: 1, Kind: domain.LimitEnvelopeUsageLimit,
-		Harness: domain.HarnessCodex, Scope: "account", ResetsAt: &reset,
+		Harness: domain.HarnessCodex, Scope: "account", SourceKey: "window-2026-08-06T18", ResetsAt: &reset,
 	}
 }
 
 func goodEvent() Event {
 	return Event{Version: EventVersion, Kind: EventProviderLimit,
-		Harness: domain.HarnessCodex, SessionID: "mer-1", Detail: "5h window"}
+		Harness: domain.HarnessCodex, SessionID: "mer-1", RuntimeLaunchID: "gen-1", Detail: "5h window"}
 }
 
 // promoted builds a router with the harness capability flipped on, which is the
@@ -147,6 +147,7 @@ func TestMalformedAndUnknownEventsRejected(t *testing.T) {
 		{"empty kind", func(e *Event) { e.Kind = "" }, "unknown kind"},
 		{"no harness", func(e *Event) { e.Harness = "" }, "harness required"},
 		{"no session", func(e *Event) { e.SessionID = "" }, "sessionId required"},
+		{"no runtime generation", func(e *Event) { e.RuntimeLaunchID = "" }, "runtimeLaunchId required"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ev := goodEvent()
@@ -190,6 +191,7 @@ func TestDetectorProducingAnInvalidEnvelopeIsRefused(t *testing.T) {
 		{"wrong version", domain.LimitEnvelopeV1{Version: 2, Kind: domain.LimitEnvelopeUsageLimit}},
 		{"unknown kind", domain.LimitEnvelopeV1{Version: 1, Kind: "vibes"}},
 		{"no kind", domain.LimitEnvelopeV1{Version: 1}},
+		{"no source key", domain.LimitEnvelopeV1{Version: 1, Kind: domain.LimitEnvelopeUsageLimit, Harness: domain.HarnessCodex}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := &fakePauser{}
@@ -392,5 +394,154 @@ func TestRoutedPauseFencesAutomaticWrites(t *testing.T) {
 	// The user is not locked out of their own session.
 	if out, _ := g.Deliver(ctx, "mer-1", "hello"); out != sessionguard.Sent {
 		t.Fatalf("Deliver = %v, want Sent: pause stops AO acting, not the human", out)
+	}
+}
+
+// --- ownership: the event must belong to the session's CURRENT owner ---
+
+// guardingPauser reproduces the real CAS: the pin write only lands when the
+// session is still the harness and generation the observation came from, and
+// no switch saga owns it.
+type guardingPauser struct {
+	harness   domain.AgentHarness
+	launchID  string
+	pending   bool
+	calls     []sessionmanager.PauseRequest
+	setWrites int
+}
+
+func (p *guardingPauser) PauseSession(_ context.Context, id domain.SessionID, req sessionmanager.PauseRequest) (domain.SessionRecord, error) {
+	p.calls = append(p.calls, req)
+	g := req.Guard
+	if (g.ExpectHarness != "" && g.ExpectHarness != p.harness) ||
+		(g.ExpectRuntimeLaunchID != "" && g.ExpectRuntimeLaunchID != p.launchID) ||
+		(g.RequireNoSwitchPending && p.pending) {
+		return domain.SessionRecord{}, sessionmanager.ErrPauseOwnershipChanged
+	}
+	p.setWrites++
+	rec := domain.SessionRecord{ID: id, Harness: p.harness}
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: req.IncidentID, Reason: req.Reason, DetectedBy: req.DetectedBy}
+	return rec, nil
+}
+
+// A promoted detector for one harness must not be able to pause a session that
+// now belongs to another. Matching the DETECTOR to the event is not enough —
+// the session itself has to still be that harness.
+func TestOwnership_DetectorHarnessDiffersFromSessionHarness(t *testing.T) {
+	p := &guardingPauser{harness: domain.HarnessClaudeCode, launchID: "gen-1"}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent()) // codex event, claude-code session
+	if !errors.Is(err, sessionmanager.ErrPauseOwnershipChanged) {
+		t.Fatalf("err = %v, want ErrPauseOwnershipChanged", err)
+	}
+	if paused || p.setWrites != 0 {
+		t.Fatal("a codex limit paused a claude-code session")
+	}
+}
+
+// A report that arrives after a fresh conversation or a switch belongs to a
+// generation that no longer exists. Pausing then parks a runtime that never hit
+// the limit.
+func TestOwnership_StaleRuntimeGenerationAfterSwitch(t *testing.T) {
+	p := &guardingPauser{harness: domain.HarnessCodex, launchID: "gen-2-after-switch"}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	ev := goodEvent()
+	ev.RuntimeLaunchID = "gen-1-before-switch"
+	paused, err := r.Route(ctx, ev)
+	if !errors.Is(err, sessionmanager.ErrPauseOwnershipChanged) {
+		t.Fatalf("err = %v, want ErrPauseOwnershipChanged", err)
+	}
+	if paused || p.setWrites != 0 {
+		t.Fatal("a stale generation's limit paused the current runtime")
+	}
+}
+
+// A switch saga owning the session is its own refusal: the pin would land on a
+// session whose ownership is mid-transfer.
+func TestOwnership_SwitchPendingBeforeTheCAS(t *testing.T) {
+	p := &guardingPauser{harness: domain.HarnessCodex, launchID: "gen-1", pending: true}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent())
+	if !errors.Is(err, sessionmanager.ErrPauseOwnershipChanged) {
+		t.Fatalf("err = %v, want ErrPauseOwnershipChanged", err)
+	}
+	if paused || p.setWrites != 0 {
+		t.Fatal("paused a session a switch saga owns")
+	}
+}
+
+// The envelope's own harness is what becomes durable in the pin and the ledger,
+// so it must match too — an adapter answering correctly but describing another
+// harness's limit would persist a lie.
+func TestOwnership_EnvelopeHarnessMustMatch(t *testing.T) {
+	for _, name := range []string{"empty", "different"} {
+		t.Run(name, func(t *testing.T) {
+			env := goodEnvelope()
+			if name == "empty" {
+				env.Harness = ""
+			} else {
+				env.Harness = domain.HarnessClaudeCode
+			}
+			p := &guardingPauser{harness: domain.HarnessCodex, launchID: "gen-1"}
+			r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: env, isLimit: true}, p)
+
+			if _, err := r.Route(ctx, goodEvent()); err == nil {
+				t.Fatal("an envelope describing another harness reached PauseSession")
+			}
+			if p.setWrites != 0 {
+				t.Fatal("an envelope describing another harness was persisted")
+			}
+		})
+	}
+}
+
+// The happy path still works with the guard in place, and carries it.
+func TestOwnership_MatchingOwnerPauses(t *testing.T) {
+	p := &guardingPauser{harness: domain.HarnessCodex, launchID: "gen-1"}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent())
+	if err != nil || !paused {
+		t.Fatalf("paused=%v err=%v", paused, err)
+	}
+	g := p.calls[0].Guard
+	if g.ExpectHarness != domain.HarnessCodex || g.ExpectRuntimeLaunchID != "gen-1" || !g.RequireNoSwitchPending {
+		t.Fatalf("guard = %+v; the observation's ownership must be carried into the write", g)
+	}
+}
+
+// --- incident identity: the same limit converges, different limits do not ---
+
+func TestIncident_SameSourceKeyConverges(t *testing.T) {
+	a := goodEnvelope()
+	b := goodEnvelope()
+	b.Detail = "a different human note" // leaf, must not affect identity
+	if IncidentID(a) != IncidentID(b) {
+		t.Fatal("redelivery of the same limit produced a second incident")
+	}
+}
+
+// The finding: without a source key, two genuinely different limits with the
+// same harness and scope — and an absent or repeated resetsAt — collapsed onto
+// one durable incident forever.
+func TestIncident_DifferentSourceKeysDiverge(t *testing.T) {
+	for _, tc := range []struct{ name, keyA, keyB string }{
+		{"distinct windows", "window-a", "window-b"},
+		{"distinct provider events", "evt-2026-08-06", "evt-2026-11-20"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := goodEnvelope()
+			a.SourceKey, a.ResetsAt = tc.keyA, nil
+			b := goodEnvelope()
+			b.SourceKey, b.ResetsAt = tc.keyB, nil
+			if IncidentID(a) == IncidentID(b) {
+				t.Fatalf("two different limits collapsed onto one incident; 3B's "+
+					"maxFailoversPerIncident counts against this id, and the resume "+
+					"audit would dedupe them (%s vs %s)", tc.keyA, tc.keyB)
+			}
+		})
 	}
 }

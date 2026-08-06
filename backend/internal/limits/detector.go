@@ -63,6 +63,12 @@ type Event struct {
 	Harness domain.AgentHarness
 	// SessionID the observation belongs to.
 	SessionID domain.SessionID
+	// RuntimeLaunchID is the generation the adapter was running as when it
+	// observed the limit. REQUIRED, and carried into the pause as an ownership
+	// condition: a report that arrives after a switch or relaunch belongs to a
+	// process that no longer exists, and acting on it would park a runtime that
+	// never hit the limit.
+	RuntimeLaunchID string
 	// Detail is a short adapter note carried into the envelope for a human.
 	// It is a LEAF: nothing branches on it, ever.
 	Detail string
@@ -81,6 +87,9 @@ func (e Event) Validate() error {
 	}
 	if strings.TrimSpace(string(e.SessionID)) == "" {
 		return fmt.Errorf("limit event: sessionId required")
+	}
+	if strings.TrimSpace(e.RuntimeLaunchID) == "" {
+		return fmt.Errorf("limit event: runtimeLaunchId required (the generation that observed the limit)")
 	}
 	return nil
 }
@@ -136,12 +145,18 @@ func (r *Registry) For(h domain.AgentHarness) (Detector, bool) {
 // delivery of the same limit a different incident, which is precisely the bug
 // this function exists to prevent.
 func IncidentID(env domain.LimitEnvelopeV1) string {
+	// SourceKey is what makes distinct limits distinct. harness+scope+resetsAt
+	// alone collapses every limit with an absent or repeated reset time onto one
+	// incident forever — including months apart — which corrupts the resume
+	// audit trail and breaks 3B's per-incident failover bound.
 	var b strings.Builder
 	b.WriteString(string(env.Kind))
 	b.WriteByte('|')
 	b.WriteString(string(env.Harness))
 	b.WriteByte('|')
 	b.WriteString(env.Scope)
+	b.WriteByte('|')
+	b.WriteString(env.SourceKey)
 	b.WriteByte('|')
 	if env.ResetsAt != nil {
 		b.WriteString(env.ResetsAt.UTC().Format("20060102T150405Z"))

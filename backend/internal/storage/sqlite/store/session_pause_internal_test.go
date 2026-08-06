@@ -14,7 +14,7 @@ func validPause() *domain.SessionPause {
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
 		Harness:      domain.HarnessCodex,
-		EvidenceJSON: `{"version":1,"kind":"usage_limit","scope":"account"}`,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1","scope":"account"}`,
 		PausedAt:     time.Now().UTC().Truncate(time.Second),
 	}
 }
@@ -43,7 +43,7 @@ func TestDecodePauseFailsClosed(t *testing.T) {
 		{"hand-edited prose envelope", `{"incidentId":"i","reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"I hit a limit","pausedAt":"2026-01-01T00:00:00Z"}`, "JSON object"},
 		{"hand-edited JSON-string envelope", `{"incidentId":"i","reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"\"I hit a limit\"","pausedAt":"2026-01-01T00:00:00Z"}`, "a string"},
 		{"hand-edited array envelope", `{"incidentId":"i","reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"[1]","pausedAt":"2026-01-01T00:00:00Z"}`, "an array"},
-		{"hand-edited unversioned envelope", `{"incidentId":"i","reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"{\"kind\":\"usage_limit\"}","pausedAt":"2026-01-01T00:00:00Z"}`, "version must be 1"},
+		{"hand-edited unversioned envelope", `{"incidentId":"i","reason":"usage_limit","detectedBy":"structured_envelope","evidenceJson":"{\"kind\":\"usage_limit\",\"sourceKey\":\"win-1\"}","pausedAt":"2026-01-01T00:00:00Z"}`, "version must be 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := decodePause(tc.raw)

@@ -239,7 +239,7 @@ type Store interface {
 	// pin is still absent. Column-owned rather than part of the full-row
 	// update, so a writer holding a pre-pause snapshot cannot clear a pin it
 	// never read. ok=false means the precondition failed, not an error.
-	SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error)
+	SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID, pause *domain.SessionPause, guard domain.PauseGuard, updatedAt time.Time) (bool, error)
 	// ClearSessionPauseIfIncident lifts the pin only while it still names this
 	// incident, so a stale resume cannot lift a newer pause.
 	ClearSessionPauseIfIncident(ctx context.Context, id domain.SessionID, incidentID string, updatedAt time.Time) (bool, error)

@@ -184,7 +184,7 @@ func (f *fakeStore) UpdateSession(_ context.Context, rec domain.SessionRecord) e
 
 // --- durable pause pin (migration 0060), column-owned ---
 
-func (f *fakeStore) SetSessionPauseIfAbsent(_ context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error) {
+func (f *fakeStore) SetSessionPauseIfAbsent(_ context.Context, id domain.SessionID, pause *domain.SessionPause, guard domain.PauseGuard, updatedAt time.Time) (bool, error) {
 	if f.beforePauseCAS != nil {
 		hook := f.beforePauseCAS
 		f.beforePauseCAS = nil // one shot: the racing writer only wins once
@@ -202,6 +202,16 @@ func (f *fakeStore) SetSessionPauseIfAbsent(_ context.Context, id domain.Session
 	rec, ok := f.sessions[id]
 	if !ok || rec.IsTerminated || rec.Metadata.Pause != nil {
 		return false, nil // compare-and-set precondition failed
+	}
+	// Mirror the real statement's ownership conditions.
+	if guard.ExpectHarness != "" && rec.Harness != guard.ExpectHarness {
+		return false, nil
+	}
+	if guard.ExpectRuntimeLaunchID != "" && rec.Metadata.RuntimeLaunchID != guard.ExpectRuntimeLaunchID {
+		return false, nil
+	}
+	if guard.RequireNoSwitchPending && rec.Metadata.SwitchPending != nil {
+		return false, nil
 	}
 	cp := *pause
 	rec.Metadata.Pause = &cp

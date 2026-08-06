@@ -14,7 +14,7 @@ func storePause(incident string) *domain.SessionPause {
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
 		Harness:      domain.HarnessCodex,
-		EvidenceJSON: `{"version":1,"kind":"usage_limit","resetsAt":"2026-08-06T18:00:00Z"}`,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1","resetsAt":"2026-08-06T18:00:00Z"}`,
 		PausedAt:     time.Now().UTC().Truncate(time.Second),
 	}
 }
@@ -39,7 +39,7 @@ func TestSessionPausePersistsThroughRealStore(t *testing.T) {
 	retry := time.Now().UTC().Add(90 * time.Minute).Truncate(time.Second)
 	pause := storePause("incident-7")
 	pause.RetryAfter = &retry
-	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, pause, time.Now().UTC())
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, pause, domain.PauseGuard{}, time.Now().UTC())
 	if err != nil || !ok {
 		t.Fatalf("persist pause: ok=%v err=%v", ok, err)
 	}
@@ -105,7 +105,7 @@ func TestGenericUpdatePreservesThePausePin(t *testing.T) {
 		t.Fatalf("stale read: %v", err)
 	}
 
-	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("incident-7"), time.Now().UTC()); err != nil || !ok {
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("incident-7"), domain.PauseGuard{}, time.Now().UTC()); err != nil || !ok {
 		t.Fatalf("pause: ok=%v err=%v", ok, err)
 	}
 
@@ -140,10 +140,10 @@ func TestSetPauseIfAbsentIsCompareAndSet(t *testing.T) {
 		t.Fatalf("create session: %v", err)
 	}
 
-	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("first"), time.Now().UTC()); err != nil || !ok {
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("first"), domain.PauseGuard{}, time.Now().UTC()); err != nil || !ok {
 		t.Fatalf("first pause: ok=%v err=%v", ok, err)
 	}
-	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("second"), time.Now().UTC())
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("second"), domain.PauseGuard{}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("second pause: %v", err)
 	}
@@ -170,7 +170,7 @@ func TestSetPauseIfAbsentRefusesTerminated(t *testing.T) {
 	if err := s.UpdateSession(ctx, rec); err != nil {
 		t.Fatalf("terminate: %v", err)
 	}
-	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("inc"), time.Now().UTC())
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("inc"), domain.PauseGuard{}, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("set pause: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestClearPauseIfIncident(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("current"), time.Now().UTC()); err != nil || !ok {
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("current"), domain.PauseGuard{}, time.Now().UTC()); err != nil || !ok {
 		t.Fatalf("pause: ok=%v err=%v", ok, err)
 	}
 
@@ -278,12 +278,76 @@ func TestSessionPauseRejectsUnstructuredUsageLimit(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, tc.pause, time.Now().UTC()); err == nil {
+			if _, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, tc.pause, domain.PauseGuard{}, time.Now().UTC()); err == nil {
 				t.Fatal("the store accepted a usage_limit pause with no structured envelope")
 			}
 			if got, _, _ := s.GetSession(ctx, rec.ID); got.Metadata.Pause != nil {
 				t.Fatalf("a rejected pause was persisted: %+v", got.Metadata.Pause)
 			}
 		})
+	}
+}
+
+// The ownership conditions are in the STATEMENT, not read-then-checked in Go.
+// That is the whole point: a switch or relaunch landing between a check and the
+// write cannot slip through, because there is no gap to land in.
+func TestSetPauseIfAbsentEnforcesOwnershipAtomically(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.RuntimeLaunchID = "gen-1"
+	if err := s.UpdateSession(ctx, rec); err != nil {
+		t.Fatalf("seed owner: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name  string
+		guard domain.PauseGuard
+		want  bool
+	}{
+		{"matching owner", domain.PauseGuard{
+			ExpectHarness: domain.HarnessCodex, ExpectRuntimeLaunchID: "gen-1", RequireNoSwitchPending: true}, true},
+		{"wrong harness", domain.PauseGuard{
+			ExpectHarness: domain.HarnessClaudeCode, ExpectRuntimeLaunchID: "gen-1"}, false},
+		{"stale generation", domain.PauseGuard{
+			ExpectHarness: domain.HarnessCodex, ExpectRuntimeLaunchID: "gen-0"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Each case starts unpaused.
+			if _, err := s.ClearSessionPauseIfIncident(ctx, rec.ID, "own-test", time.Now().UTC()); err != nil {
+				t.Fatalf("reset: %v", err)
+			}
+			ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("own-test"), tc.guard, time.Now().UTC())
+			if err != nil {
+				t.Fatalf("set: %v", err)
+			}
+			if ok != tc.want {
+				t.Fatalf("ok = %v, want %v", ok, tc.want)
+			}
+		})
+	}
+
+	// And a pending switch refuses, which is the ownership-in-transfer case.
+	if _, err := s.ClearSessionPauseIfIncident(ctx, rec.ID, "own-test", time.Now().UTC()); err != nil {
+		t.Fatalf("reset: %v", err)
+	}
+	cur, _, _ := s.GetSession(ctx, rec.ID)
+	cur.Metadata.SwitchPending = &domain.SwitchPending{GenerationID: "sw-1", ToHarness: domain.HarnessClaudeCode}
+	if err := s.UpdateSession(ctx, cur); err != nil {
+		t.Fatalf("set pending: %v", err)
+	}
+	ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, storePause("own-test"), domain.PauseGuard{
+		ExpectHarness: domain.HarnessCodex, ExpectRuntimeLaunchID: "gen-1", RequireNoSwitchPending: true,
+	}, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("set with pending: %v", err)
+	}
+	if ok {
+		t.Fatal("pinned a session a switch saga owns")
 	}
 }

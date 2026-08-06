@@ -49,6 +49,19 @@ type LimitEnvelopeV1 struct {
 	// Scope names what is exhausted (e.g. "account", "organization", "model"),
 	// for the human reading it. Advisory.
 	Scope string `json:"scope,omitempty"`
+	// SourceKey is the provider's STABLE identifier for this specific limit
+	// occurrence — an event id, a window id, a reset-cycle key. Required.
+	//
+	// It is what makes two genuinely different limits different incidents.
+	// Without it, harness+scope+resetsAt collapses every limit with an absent
+	// or repeated reset time onto ONE durable incident, months apart, which
+	// corrupts the resume audit trail and breaks 3B's maxFailoversPerIncident
+	// accounting — that bound counts against the incident id.
+	//
+	// A vendor that cannot supply a stable identifier or a reviewed window key
+	// cannot be promoted: an unstable key is worse than no detection, because
+	// it silently mis-groups durable history.
+	SourceKey string `json:"sourceKey"`
 	// ResetsAt is when the provider said the window reopens, if it said.
 	// Advisory: nothing schedules against it (see SessionPause).
 	ResetsAt *time.Time `json:"resetsAt,omitempty"`
@@ -114,6 +127,10 @@ func ParseLimitEnvelope(raw string) (LimitEnvelopeV1, error) {
 	}
 	if !env.Kind.Valid() {
 		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: unknown kind %q", env.Kind)
+	}
+	if strings.TrimSpace(env.SourceKey) == "" {
+		return LimitEnvelopeV1{}, fmt.Errorf("limit envelope: sourceKey required (a stable provider " +
+			"identifier for this limit occurrence; without one, distinct limits collapse to one incident)")
 	}
 	return env, nil
 }

@@ -42,6 +42,11 @@ var (
 	// ErrIncidentMismatch is returned when a resume names an incident that is
 	// not the one currently holding the session.
 	ErrIncidentMismatch = errors.New("pause incident mismatch")
+	// ErrPauseOwnershipChanged means the session is no longer the harness or
+	// runtime generation the caller observed — it switched, was relaunched, or
+	// a switch saga now owns it. Pausing on evidence from a generation that is
+	// already gone would park a runtime that never hit the limit.
+	ErrPauseOwnershipChanged = errors.New("session ownership changed since the observation")
 )
 
 // PauseRequest is the input to PauseSession. It carries no free-text reason
@@ -69,6 +74,13 @@ type PauseRequest struct {
 	EvidenceJSON string
 	// RetryAfter is recorded for audit only and never scheduled against.
 	RetryAfter *time.Time
+	// Guard is the ownership the caller believes it is pausing, enforced
+	// atomically by the pin write. An operator pause leaves it zero — a human
+	// is not claiming anything about which generation is running. Structured
+	// detection MUST fill it: a limit belongs to one harness process in one
+	// generation, and by the time the report lands the session may have
+	// switched or been relaunched.
+	Guard domain.PauseGuard
 }
 
 // PauseSession durably pins a session as paused and records a pause ledger
@@ -124,7 +136,7 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, err)
 	}
 
-	set, err := m.store.SetSessionPauseIfAbsent(ctx, id, pause, m.clock())
+	set, err := m.store.SetSessionPauseIfAbsent(ctx, id, pause, req.Guard, m.clock())
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: persist: %w", id, err)
 	}
@@ -132,7 +144,7 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 		// The compare-and-set lost. Re-read to say WHY rather than guess: it is
 		// the same incident (converged, fine), a different one, or the session
 		// stopped being pausable while we worked.
-		return m.explainLostPauseRace(ctx, id, incident)
+		return m.explainLostPauseRace(ctx, id, incident, req.Guard)
 	}
 
 	rec.Metadata.Pause = pause
@@ -142,7 +154,7 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 }
 
 // explainLostPauseRace turns a failed compare-and-set into a specific answer.
-func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID, incident string) (domain.SessionRecord, error) {
+func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID, incident string, guard domain.PauseGuard) (domain.SessionRecord, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: re-read after contended write: %w", id, err)
@@ -160,9 +172,15 @@ func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID,
 	if rec.IsTerminated {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, ErrTerminated)
 	}
-	// Not paused, not terminated, yet the guarded write matched nothing: the
-	// row moved under us in a way this code does not model. Fail loudly rather
-	// than report a pause that is not there.
+	// Not paused, not terminated — so the OWNERSHIP conditions are what the
+	// guarded write rejected: a different harness, a different runtime
+	// generation, or a switch saga that now owns the session. This is the
+	// expected answer for a stale observation, not a mystery.
+	if guard.ExpectHarness != "" || guard.ExpectRuntimeLaunchID != "" || guard.RequireNoSwitchPending {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w: observed %s/%s, now %s/%s pending=%v",
+			id, ErrPauseOwnershipChanged, guard.ExpectHarness, guard.ExpectRuntimeLaunchID,
+			rec.Harness, rec.Metadata.RuntimeLaunchID, rec.Metadata.SwitchPending != nil)
+	}
 	return domain.SessionRecord{}, fmt.Errorf("pause %s: pin write matched no row and the session is not paused", id)
 }
 

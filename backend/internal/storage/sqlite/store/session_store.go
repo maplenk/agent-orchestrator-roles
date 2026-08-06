@@ -162,7 +162,7 @@ func (s *Store) SetSessionPreviewURL(ctx context.Context, id domain.SessionID, p
 // that its caller read at some earlier moment. A lifecycle or switch writer
 // holding a pre-pause snapshot would clear a pin it never saw, silently
 // re-opening every automatic write path.
-func (s *Store) SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID, pause *domain.SessionPause, updatedAt time.Time) (bool, error) {
+func (s *Store) SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID, pause *domain.SessionPause, guard domain.PauseGuard, updatedAt time.Time) (bool, error) {
 	encoded, err := encodePause(pause)
 	if err != nil {
 		return false, err
@@ -175,10 +175,25 @@ func (s *Store) SetSessionPauseIfAbsent(ctx context.Context, id domain.SessionID
 	// Raw, not sqlc: the literals in this WHERE clause trigger the parser bug
 	// documented in queries/sessions.sql, which silently truncates the
 	// statement (and leaks its tail into the next generated const).
-	res, err := s.writeDB.ExecContext(ctx,
-		`UPDATE sessions SET pause_json = ?, updated_at = ?
-		 WHERE id = ? AND pause_json = '' AND is_terminated = 0`,
-		encoded, updatedAt, id)
+	// Every condition is in the STATEMENT, not read-then-checked in Go: the
+	// point is that ownership is verified atomically with the write, so a
+	// switch or relaunch landing between a check and the write cannot slip
+	// through.
+	q := `UPDATE sessions SET pause_json = ?, updated_at = ?
+		 WHERE id = ? AND pause_json = '' AND is_terminated = 0`
+	args := []any{encoded, updatedAt, id}
+	if h := strings.TrimSpace(string(guard.ExpectHarness)); h != "" {
+		q += ` AND harness = ?`
+		args = append(args, h)
+	}
+	if g := strings.TrimSpace(guard.ExpectRuntimeLaunchID); g != "" {
+		q += ` AND runtime_launch_id = ?`
+		args = append(args, g)
+	}
+	if guard.RequireNoSwitchPending {
+		q += ` AND switch_pending_json = ''`
+	}
+	res, err := s.writeDB.ExecContext(ctx, q, args...)
 	if err != nil {
 		return false, fmt.Errorf("set pause for session %s: %w", id, err)
 	}
@@ -202,8 +217,11 @@ func (s *Store) ClearSessionPauseIfIncident(ctx context.Context, id domain.Sessi
 	defer s.writeMu.Unlock()
 	// Raw, not sqlc: see SetSessionPauseIfAbsent.
 	res, err := s.writeDB.ExecContext(ctx,
+		// pause_json <> '' comes FIRST: json_extract raises "malformed JSON" on
+		// an empty string, so clearing an unpaused session would error instead
+		// of answering "nothing to clear". SQLite short-circuits AND.
 		`UPDATE sessions SET pause_json = '', updated_at = ?
-		 WHERE id = ? AND json_extract(pause_json, '$.incidentId') = ?`,
+		 WHERE id = ? AND pause_json <> '' AND json_extract(pause_json, '$.incidentId') = ?`,
 		updatedAt, id, incidentID)
 	if err != nil {
 		return false, fmt.Errorf("clear pause for session %s: %w", id, err)

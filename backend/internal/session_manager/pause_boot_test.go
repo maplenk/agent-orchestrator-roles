@@ -25,7 +25,7 @@ func pausePin(incident string) *domain.SessionPause {
 		IncidentID:   incident,
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
-		EvidenceJSON: `{"version":1,"kind":"usage_limit"}`,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1"}`,
 		PausedAt:     time.Now().UTC(),
 	}
 }

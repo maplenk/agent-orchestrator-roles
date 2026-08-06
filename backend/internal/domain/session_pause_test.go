@@ -16,7 +16,7 @@ func TestSessionPauseValidate(t *testing.T) {
 			IncidentID:   "inc-1",
 			Reason:       PauseReasonUsageLimit,
 			DetectedBy:   PauseDetectionStructured,
-			EvidenceJSON: `{"version":1,"kind":"usage_limit"}`,
+			EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1"}`,
 			PausedAt:     now,
 		}
 	}
