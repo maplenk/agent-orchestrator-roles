@@ -3,7 +3,7 @@ SELECT COALESCE(MAX(num), 0) + 1 AS next FROM sessions WHERE project_id = ?;
 
 -- name: InsertSession :exec
 INSERT INTO sessions (
-    id, project_id, num, issue_id, kind, harness,
+    id, project_id, num, issue_id, kind, harness, reviewer_harness,
     role_id, role_map_schema_version, role_map_sha256, role_config_revision,
     template_artifact_id, template_sha256, resolved_model,
     resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash, display_name,
@@ -11,12 +11,12 @@ INSERT INTO sessions (
     branch, workspace_path, workspace_repo_path, diff_base_sha, diff_base_ref, runtime_handle_id,
     runtime_launch_id, agent_session_id, prompt, switch_pending_json, pause_json,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation,
-    created_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+    created_at, updated_at, is_pinned, pinned_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
 
 -- name: UpdateSession :exec
 UPDATE sessions SET
-    issue_id = ?, kind = ?, harness = ?,
+    issue_id = ?, kind = ?, harness = ?, reviewer_harness = ?,
     role_id = ?, role_map_schema_version = ?, role_map_sha256 = ?, role_config_revision = ?,
     template_artifact_id = ?, template_sha256 = ?, resolved_model = ?,
     resolved_workspace_writes = ?, resolved_can_spawn = ?, spawn_capability_hash = ?, display_name = ?,
@@ -24,7 +24,7 @@ UPDATE sessions SET
     branch = ?, workspace_path = ?, workspace_repo_path = ?, diff_base_sha = ?, diff_base_ref = ?, runtime_handle_id = ?,
     runtime_launch_id = ?, agent_session_id = ?, prompt = ?, switch_pending_json = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
-    cleanup_generation = ?, updated_at = ?
+    cleanup_generation = ?, updated_at = ?, is_pinned = ?, pinned_at = ?
 WHERE id = ?;
 
 -- name: GetSession :one
@@ -65,6 +65,12 @@ UPDATE sessions SET preview_url = ?, preview_revision = preview_revision + 1, up
 
 -- name: SetSessionTerminateOnPRMerge :execrows
 UPDATE sessions SET terminate_on_pr_merge = ?, updated_at = ? WHERE id = ?;
+
+-- name: SetSessionPinned :execrows
+UPDATE sessions SET is_pinned = ?, pinned_at = ?, updated_at = ? WHERE id = ?;
+
+-- name: SetSessionReviewerHarness :execrows
+UPDATE sessions SET reviewer_harness = ?, updated_at = ? WHERE id = ?;
 
 -- name: SessionIsSeed :one
 -- SessionIsSeed reports whether the session id matches a row still in seed

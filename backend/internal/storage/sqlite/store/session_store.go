@@ -116,6 +116,22 @@ func (s *Store) RenameSession(ctx context.Context, id domain.SessionID, displayN
 	return rows > 0, nil
 }
 
+// SetSessionPinned updates the pinned status of a session.
+func (s *Store) SetSessionPinned(ctx context.Context, id domain.SessionID, isPinned bool, pinnedAt *time.Time, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionPinned(ctx, gen.SetSessionPinnedParams{
+		ID:        id,
+		IsPinned:  isPinned,
+		PinnedAt:  timePtrToNullTime(pinnedAt),
+		UpdatedAt: updatedAt,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set session pinned %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
 // SetSessionPreviewURL updates only the browser preview URL for an existing
 // session. It returns ok=false when the session id does not exist. The
 // sessions_cdc_update trigger fans out a session_updated CDC event when the
@@ -211,6 +227,21 @@ func (s *Store) SetSessionTerminateOnPRMerge(ctx context.Context, id domain.Sess
 	})
 	if err != nil {
 		return false, fmt.Errorf("set terminate-on-pr-merge for session %s: %w", id, err)
+	}
+	return rows > 0, nil
+}
+
+// SetSessionReviewerHarness persists the reviewer preference for one session.
+func (s *Store) SetSessionReviewerHarness(ctx context.Context, id domain.SessionID, harness domain.ReviewerHarness, updatedAt time.Time) (bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	rows, err := s.qw.SetSessionReviewerHarness(ctx, gen.SetSessionReviewerHarnessParams{
+		ReviewerHarness: harness,
+		UpdatedAt:       updatedAt,
+		ID:              id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("set reviewer harness for %s: %w", id, err)
 	}
 	return rows > 0, nil
 }
@@ -396,18 +427,21 @@ func rowToRecord(row gen.Session) (domain.SessionRecord, error) {
 	}
 
 	return domain.SessionRecord{
-		ID:          row.ID,
-		ProjectID:   row.ProjectID,
-		IssueID:     row.IssueID,
-		Kind:        row.Kind,
-		Harness:     row.Harness,
-		DisplayName: row.DisplayName,
+		ID:              row.ID,
+		ProjectID:       row.ProjectID,
+		IssueID:         row.IssueID,
+		Kind:            row.Kind,
+		Harness:         row.Harness,
+		ReviewerHarness: row.ReviewerHarness,
+		DisplayName:     row.DisplayName,
 		Activity: domain.Activity{
 			State:          row.ActivityState,
 			LastActivityAt: row.ActivityLastAt,
 		},
 		FirstSignalAt:      nullTimeToTime(row.FirstSignalAt),
 		IsTerminated:       row.IsTerminated,
+		IsPinned:           row.IsPinned,
+		PinnedAt:           nullTimeToTimePtr(row.PinnedAt),
 		TerminateOnPRMerge: row.TerminateOnPRMerge,
 		Metadata: domain.SessionMetadata{
 			Branch:              row.Branch,
@@ -513,6 +547,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) (gen.InsertSessionParam
 		IssueID:                 rec.IssueID,
 		Kind:                    rec.Kind,
 		Harness:                 rec.Harness,
+		ReviewerHarness:         rec.ReviewerHarness,
 		RoleID:                  role.RoleID,
 		RoleMapSchemaVersion:    int64(role.RoleMapSchemaVersion),
 		RoleMapSha256:           role.RoleMapSHA256,
@@ -528,6 +563,8 @@ func recordToInsert(rec domain.SessionRecord, num int64) (gen.InsertSessionParam
 		ActivityLastAt:          activity.LastActivityAt,
 		FirstSignalAt:           timeToNullTime(rec.FirstSignalAt),
 		IsTerminated:            rec.IsTerminated,
+		IsPinned:                rec.IsPinned,
+		PinnedAt:                timePtrToNullTime(rec.PinnedAt),
 		Branch:                  rec.Metadata.Branch,
 		WorkspacePath:           rec.Metadata.WorkspacePath,
 		WorkspaceRepoPath:       rec.Metadata.WorkspaceRepoPath,
@@ -562,6 +599,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		IssueID:                 rec.IssueID,
 		Kind:                    rec.Kind,
 		Harness:                 rec.Harness,
+		ReviewerHarness:         rec.ReviewerHarness,
 		RoleID:                  role.RoleID,
 		RoleMapSchemaVersion:    int64(role.RoleMapSchemaVersion),
 		RoleMapSha256:           role.RoleMapSHA256,
@@ -577,6 +615,8 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		ActivityLastAt:          activity.LastActivityAt,
 		FirstSignalAt:           timeToNullTime(rec.FirstSignalAt),
 		IsTerminated:            rec.IsTerminated,
+		IsPinned:                rec.IsPinned,
+		PinnedAt:                timePtrToNullTime(rec.PinnedAt),
 		Branch:                  rec.Metadata.Branch,
 		WorkspacePath:           rec.Metadata.WorkspacePath,
 		WorkspaceRepoPath:       rec.Metadata.WorkspaceRepoPath,
@@ -659,6 +699,20 @@ func timeToNullTime(t time.Time) sql.NullTime {
 		return sql.NullTime{}
 	}
 	return sql.NullTime{Time: t, Valid: true}
+}
+
+func nullTimeToTimePtr(t sql.NullTime) *time.Time {
+	if !t.Valid {
+		return nil
+	}
+	return &t.Time
+}
+
+func timePtrToNullTime(t *time.Time) sql.NullTime {
+	if t == nil {
+		return sql.NullTime{}
+	}
+	return sql.NullTime{Time: *t, Valid: true}
 }
 
 func normalActivity(a domain.Activity, fallback time.Time) domain.Activity {

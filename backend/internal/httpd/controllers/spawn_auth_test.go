@@ -127,6 +127,22 @@ func (f *spawnGateSvc) ResumeSession(_ context.Context, id domain.SessionID, inc
 	f.resumeCalls++
 	return domain.SessionRecord{ID: id}, nil
 }
+
+func (f *spawnGateSvc) DelegateTask(_ context.Context, in sessionsvc.DelegateTaskInput) (sessionsvc.DelegateTaskOutcome, error) {
+	return sessionsvc.DelegateTaskOutcome{}, nil
+}
+
+func (f *spawnGateSvc) SetReviewerHarness(_ context.Context, id domain.SessionID, _ domain.ReviewerHarness) (domain.Session, error) {
+	return domain.Session{SessionRecord: domain.SessionRecord{ID: id}}, nil
+}
+
+func (f *spawnGateSvc) Pin(_ context.Context, id domain.SessionID) (domain.Session, error) {
+	return domain.Session{SessionRecord: domain.SessionRecord{ID: id}}, nil
+}
+
+func (f *spawnGateSvc) Unpin(_ context.Context, id domain.SessionID) (domain.Session, error) {
+	return domain.Session{SessionRecord: domain.SessionRecord{ID: id}}, nil
+}
 func (f *spawnGateSvc) ListPRSummaries(context.Context, domain.SessionID) ([]sessionsvc.PRSummary, error) {
 	return nil, nil
 }

@@ -12,6 +12,15 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
+type AgentModelCatalog struct {
+	AgentID       string
+	ProjectID     string
+	BinaryVersion string
+	CatalogJson   string
+	Source        string
+	FetchedAt     time.Time
+}
+
 type ChangeLog struct {
 	Seq       int64
 	ProjectID domain.ProjectID
@@ -37,6 +46,20 @@ type LifecycleLedger struct {
 	TargetNativeSessionID string
 	PayloadJson           string
 	CreatedAt             time.Time
+}
+
+type ModelUsageEvent struct {
+	ID                  int64
+	BindingID           int64
+	UsageSourceID       int64
+	ModelID             string
+	InputTokens         int64
+	UncachedInputTokens int64
+	CacheReadTokens     int64
+	CacheWriteTokens    int64
+	OutputTokens        int64
+	ReasoningTokens     sql.NullInt64
+	SourceEventKey      string
 }
 
 type Notification struct {
@@ -228,6 +251,9 @@ type Session struct {
 	TerminateOnPRMerge      bool
 	DiffBaseSha             string
 	DiffBaseRef             string
+	ReviewerHarness         domain.ReviewerHarness
+	IsPinned                bool
+	PinnedAt                sql.NullTime
 	RoleID                  string
 	RoleMapSchemaVersion    int64
 	RoleMapSha256           string
@@ -290,6 +316,54 @@ type TemplateArtifact struct {
 	Sha256    string
 	Content   []byte
 	CreatedAt time.Time
+}
+
+type UsageBinding struct {
+	ID             int64
+	SessionID      domain.SessionID
+	Harness        domain.AgentHarness
+	NativeRootID   string
+	InitialModelID string
+	State          domain.UsageBindingState
+	LastErrorCode  string
+	UpdatedAt      time.Time
+}
+
+type UsageCodexPendingChild struct {
+	BindingID       int64
+	NativeSessionID string
+}
+
+type UsageCodexSourceDiscovery struct {
+	SourceID               int64
+	BindingID              int64
+	NativeSessionID        string
+	DiscoveredChildIdsJson string
+	HasMixedChildTypes     int64
+}
+
+type UsageSessionIntegrity struct {
+	SessionID  string
+	Incomplete int64
+}
+
+type UsageSource struct {
+	ID              int64
+	BindingID       int64
+	Kind            domain.UsageSourceKind
+	NativeSessionID string
+	SubagentID      string
+	ArtifactPath    string
+	FileIdentity    string
+	Generation      int64
+	ByteOffset      int64
+	ParserStateJson string
+	State           domain.UsageSourceState
+	FailureCount    int64
+	AnomalyCount    int64
+	NextRetryAt     sql.NullTime
+	LastErrorCode   string
+	UpdatedAt       time.Time
 }
 
 type WorkspaceRepo struct {

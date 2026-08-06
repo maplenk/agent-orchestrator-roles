@@ -623,8 +623,17 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
 	}
-	// Merge host-resolved role model/permissions over legacy project AgentConfig.
-	agentConfig := mergeAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
+	// Composed, and the ORDER is the invariant: project base, then upstream's
+	// per-spawn override, then the host-resolved role LAST. A role pin is
+	// host-authoritative — resolve already refuses a caller-supplied harness or
+	// model alongside a role (ErrHarnessOverrideForbidden) — so letting the
+	// override land after the role would invert that gate for anything resolve
+	// did not reject outright.
+	agentConfig := mergeAgentConfig(
+		applySpawnAgentConfig(effectiveAgentConfig(cfg.Kind, project.Config), cfg.AgentConfig),
+		roleResult.AgentConfigPatch, roleResult.Policy, roleResult.Applied)
+	// spawnToken is ours: the session-scoped spawn capability injected as
+	// AO_SPAWN_CAPABILITY. Upstream's signature has no such parameter.
 	env := m.runtimeEnv(id, cfg.ProjectID, cfg.IssueID, project.Config.Env, spawnToken)
 	m.augmentAgentRuntimeEnv(agent, env)
 	if err := m.prepareWorkspace(ctx, agent, id, ws.Path, systemPrompt, systemPromptFile, agentConfig, env); err != nil {
@@ -949,10 +958,26 @@ func effectiveAgentConfig(kind domain.SessionKind, cfg domain.ProjectConfig) por
 	if override.Model != "" {
 		merged.Model = override.Model
 	}
+	if override.Mode != "" {
+		merged.Mode = override.Mode
+	}
 	if override.Permissions != "" {
 		merged.Permissions = override.Permissions
 	}
 	return merged
+}
+
+func applySpawnAgentConfig(base, override ports.AgentConfig) ports.AgentConfig {
+	if override.Model != "" {
+		base.Model = override.Model
+	}
+	if override.Mode != "" {
+		base.Mode = override.Mode
+	}
+	if override.Permissions != "" {
+		base.Permissions = override.Permissions
+	}
+	return base
 }
 
 func roleOverride(kind domain.SessionKind, cfg domain.ProjectConfig) domain.RoleOverride {
@@ -1996,7 +2021,13 @@ func (m *Manager) parkFailedRelaunch(ctx context.Context, operation string, id d
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
+		if !errors.Is(err, ports.ErrRuntimeUnavailable) {
+			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
+		}
+		// The runtime infrastructure itself is gone (e.g. the tmux server was
+		// killed). Restore/restart is exactly the recovery path for that
+		// outage, so proceed as "no existing runtime" and create a fresh one.
+		alive = false
 	}
 	if alive {
 		if restarter, ok := m.runtime.(ports.RuntimeRestarter); ok {
@@ -2151,7 +2182,15 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	probedDead := false
 	if handle.ID != "" {
 		alive, err := m.runtime.IsAlive(ctx, handle)
-		if err != nil {
+		switch {
+		case err == nil:
+		case errors.Is(err, ports.ErrRuntimeUnavailable):
+			// Boot-time pass with no reachable tmux server (normal after a
+			// machine reboot). The runtime is gone either way; fall through to
+			// save-and-teardown, which keeps the restore marker rather than
+			// silently archiving the session.
+			alive = false
+		default:
 			// A failed probe is not proof of death: leave the session as-is.
 			return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
 		}
@@ -2201,6 +2240,9 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 	}
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
+		if errors.Is(err, ports.ErrRuntimeUnavailable) {
+			return nil // no server means no leaked session to reap
+		}
 		return fmt.Errorf("reconcile reap %s: probe: %w", rec.ID, err)
 	}
 	if !alive {
