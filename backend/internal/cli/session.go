@@ -180,10 +180,10 @@ type freshConversationAPIRequest struct {
 }
 
 type switchWorkerAPIResponse struct {
-	OK           bool   `json:"ok"`
-	SessionID    string `json:"sessionId"`
-	GenerationID string `json:"generationId"`
-	Kind         string `json:"kind"`
+	OK           bool       `json:"ok"`
+	SessionID    string     `json:"sessionId"`
+	GenerationID string     `json:"generationId"`
+	Kind         string     `json:"kind"`
 	Session      sessionDTO `json:"session"`
 }
 

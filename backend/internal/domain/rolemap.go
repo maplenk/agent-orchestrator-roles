@@ -106,11 +106,11 @@ func (m RoleMap) SHA256() (string, error) {
 	// Normalize for stable hashing: sort role keys via json.Marshal of maps is
 	// randomized in Go — re-encode through sorted structure.
 	type wire struct {
-		SchemaVersion    int                      `json:"role_map_schema_version"`
-		StrictDelegation bool                     `json:"strictDelegation,omitempty"`
-		OrchestratorRole string                   `json:"orchestratorRole,omitempty"`
-		Roles            map[string]RoleBinding   `json:"roles,omitempty"`
-		Failover         FailoverConfig           `json:"failover,omitempty"`
+		SchemaVersion    int                    `json:"role_map_schema_version"`
+		StrictDelegation bool                   `json:"strictDelegation,omitempty"`
+		OrchestratorRole string                 `json:"orchestratorRole,omitempty"`
+		Roles            map[string]RoleBinding `json:"roles,omitempty"`
+		Failover         FailoverConfig         `json:"failover,omitempty"`
 	}
 	w := wire{
 		SchemaVersion:    m.SchemaVersion,
@@ -258,13 +258,13 @@ func validateRoleID(id string) error {
 
 // SessionRoleBinding is the durable role identity pinned on a session at spawn.
 type SessionRoleBinding struct {
-	RoleID             string              `json:"roleId,omitempty"`
-	RoleMapSchemaVersion int               `json:"roleMapSchemaVersion,omitempty"`
-	RoleMapSHA256      string              `json:"roleMapSha256,omitempty"`
-	RoleConfigRevision int64               `json:"roleConfigRevision,omitempty"`
-	TemplateArtifactID string              `json:"templateArtifactId,omitempty"`
-	TemplateSHA256     string              `json:"templateSha256,omitempty"`
-	ResolvedHarness    AgentHarness        `json:"resolvedHarness,omitempty"`
-	ResolvedModel      string              `json:"resolvedModel,omitempty"`
-	ResolvedPermissions RoleExecutionPolicy `json:"resolvedPermissions,omitempty"`
+	RoleID               string              `json:"roleId,omitempty"`
+	RoleMapSchemaVersion int                 `json:"roleMapSchemaVersion,omitempty"`
+	RoleMapSHA256        string              `json:"roleMapSha256,omitempty"`
+	RoleConfigRevision   int64               `json:"roleConfigRevision,omitempty"`
+	TemplateArtifactID   string              `json:"templateArtifactId,omitempty"`
+	TemplateSHA256       string              `json:"templateSha256,omitempty"`
+	ResolvedHarness      AgentHarness        `json:"resolvedHarness,omitempty"`
+	ResolvedModel        string              `json:"resolvedModel,omitempty"`
+	ResolvedPermissions  RoleExecutionPolicy `json:"resolvedPermissions,omitempty"`
 }

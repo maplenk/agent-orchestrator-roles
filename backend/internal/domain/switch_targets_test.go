@@ -36,7 +36,7 @@ func TestSwitchTargetAuthorized_ExactModel(t *testing.T) {
 		Failover: FailoverConfig{
 			Roles: map[string][]FailoverTarget{
 				"implementor": {
-					{Harness: HarnessCodex},          // provider default only
+					{Harness: HarnessCodex},           // provider default only
 					{Harness: HarnessPi, Model: "k2"}, // fixed model
 				},
 			},

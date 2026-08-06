@@ -93,8 +93,8 @@ func TestResolve_StrictOrchestratorAutoBindsRole(t *testing.T) {
 	dir := writeProfiles(t)
 	loader := NewLoader(NewArtifactStore(), dir)
 	r, err := Resolve(ResolveInput{
-		Map:    testMap(),
-		Kind:   domain.KindOrchestrator,
+		Map:  testMap(),
+		Kind: domain.KindOrchestrator,
 		// no RoleID — strict map must auto-bind orchestratorRole
 		Loader: loader,
 	})

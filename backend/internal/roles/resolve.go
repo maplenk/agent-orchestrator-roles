@@ -29,9 +29,9 @@ type Resolved struct {
 
 // ResolveInput is the spawn-time resolution request.
 type ResolveInput struct {
-	Map          domain.RoleMap
-	RoleID       string
-	Kind         domain.SessionKind
+	Map    domain.RoleMap
+	RoleID string
+	Kind   domain.SessionKind
 	// ExplicitHarness is the free-form --agent/--harness from the client.
 	ExplicitHarness domain.AgentHarness
 	// Loader loads templates; required when RoleID is set.
@@ -119,11 +119,11 @@ func Resolve(in ResolveInput) (Resolved, error) {
 	}
 
 	return Resolved{
-		RoleID:  roleID,
-		Binding: b,
+		RoleID:   roleID,
+		Binding:  b,
 		Template: tmpl,
-		MapSHA:  mapSHA,
-		Session: sess,
+		MapSHA:   mapSHA,
+		Session:  sess,
 		AgentConfig: domain.AgentConfig{
 			Model: b.Model,
 		},

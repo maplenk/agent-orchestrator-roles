@@ -120,6 +120,7 @@ type OperatorSpawnValidator interface {
 // HTTP headers for spawn identity. Exactly one of:
 //   - X-AO-Operator-Spawn-Token (operator/desktop; never in session env)
 //   - X-AO-Caller-Session-Id + X-AO-Spawn-Capability (agent session)
+//
 // Headerless spawn is rejected (workers must not fall through to "operator").
 const (
 	operatorSpawnHeader   = "X-AO-Operator-Spawn-Token"

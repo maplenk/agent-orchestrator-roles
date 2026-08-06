@@ -61,13 +61,13 @@ type Template struct {
 }
 
 type frontmatter struct {
-	ID           string   `yaml:"id"`
-	Name         string   `yaml:"name"`
-	Description  string   `yaml:"description"`
-	RoleReminder string   `yaml:"roleReminder"`
-	DefaultHarness string `yaml:"defaultHarness"`
-	DefaultModel string   `yaml:"defaultModel"`
-	When         []string `yaml:"when"`
+	ID             string   `yaml:"id"`
+	Name           string   `yaml:"name"`
+	Description    string   `yaml:"description"`
+	RoleReminder   string   `yaml:"roleReminder"`
+	DefaultHarness string   `yaml:"defaultHarness"`
+	DefaultModel   string   `yaml:"defaultModel"`
+	When           []string `yaml:"when"`
 }
 
 // LoadTemplateFile reads a Markdown file with optional YAML frontmatter.
@@ -144,10 +144,10 @@ func (t Template) SystemPrompt() string {
 // Loader loads templates from an ordered list of root directories
 // (first match wins). Typical order: shipped profiles/, then approved base only.
 type Loader struct {
-	Roots  []string
-	Store  *ArtifactStore
-	cache  map[string]Template
-	mu     sync.Mutex
+	Roots []string
+	Store *ArtifactStore
+	cache map[string]Template
+	mu    sync.Mutex
 }
 
 // NewLoader constructs a template loader.

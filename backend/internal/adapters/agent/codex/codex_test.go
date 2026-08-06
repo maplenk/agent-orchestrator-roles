@@ -240,9 +240,9 @@ func TestGetLaunchCommandMapsApprovalModes(t *testing.T) {
 		},
 		{
 			name:        "read-only sandbox",
-			permission: ports.PermissionModeBypassPermissions, // ignored when ReadOnly
-			readOnly:   true,
-			want:       []string{"--sandbox", "read-only", "--ask-for-approval", "never"},
+			permission:  ports.PermissionModeBypassPermissions, // ignored when ReadOnly
+			readOnly:    true,
+			want:        []string{"--sandbox", "read-only", "--ask-for-approval", "never"},
 			notExpected: "--dangerously-bypass-approvals-and-sandbox",
 		},
 	}
