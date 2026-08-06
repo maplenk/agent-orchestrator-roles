@@ -298,7 +298,7 @@ func (s *Store) GetSession(ctx context.Context, id domain.SessionID) (domain.Ses
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session %s: %w", id, err)
 	}
-	rec, err := rowToRecord(sessionFromGetRow(row))
+	rec, err := rowToRecord(row.Session)
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session %s: %w", id, err)
 	}
@@ -319,7 +319,7 @@ func (s *Store) GetSessionByRuntimeHandleID(ctx context.Context, handleID string
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session by runtime handle %q: %w", handleID, err)
 	}
-	rec, err := rowToRecord(sessionFromRuntimeHandleRow(row))
+	rec, err := rowToRecord(row.Session)
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session by runtime handle %q: %w", handleID, err)
 	}
@@ -340,7 +340,7 @@ func (s *Store) GetSessionByPendingSourceHandle(ctx context.Context, handleID st
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session by pending source handle %q: %w", handleID, err)
 	}
-	rec, err := rowToRecord(sessionFromPendingSourceHandleRow(row))
+	rec, err := rowToRecord(row.Session)
 	if err != nil {
 		return domain.SessionRecord{}, false, fmt.Errorf("get session by pending source handle %q: %w", handleID, err)
 	}
@@ -355,7 +355,7 @@ func (s *Store) ListSessions(ctx context.Context, project domain.ProjectID) ([]d
 	}
 	out := make([]domain.SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		rec, err := rowToRecord(sessionFromProjectListRow(r))
+		rec, err := rowToRecord(r.Session)
 		if err != nil {
 			return nil, fmt.Errorf("list sessions for %s: %w", project, err)
 		}
@@ -372,118 +372,13 @@ func (s *Store) ListAllSessions(ctx context.Context) ([]domain.SessionRecord, er
 	}
 	out := make([]domain.SessionRecord, 0, len(rows))
 	for _, r := range rows {
-		rec, err := rowToRecord(sessionFromAllListRow(r))
+		rec, err := rowToRecord(r.Session)
 		if err != nil {
 			return nil, fmt.Errorf("list all sessions: %w", err)
 		}
 		out = append(out, rec)
 	}
 	return out, nil
-}
-
-func sessionFromGetRow(row gen.GetSessionRow) gen.Session {
-	return gen.Session{
-		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
-		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
-		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
-		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
-		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
-		PauseJson: row.PauseJson,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
-		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
-		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
-		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
-		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
-		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
-		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
-		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
-		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
-		SpawnCapabilityHash: row.SpawnCapabilityHash,
-	}
-}
-
-func sessionFromRuntimeHandleRow(row gen.GetSessionByRuntimeHandleIDRow) gen.Session {
-	return gen.Session{
-		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
-		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
-		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
-		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
-		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
-		PauseJson: row.PauseJson,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
-		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
-		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
-		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
-		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
-		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
-		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
-		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
-		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
-		SpawnCapabilityHash: row.SpawnCapabilityHash,
-	}
-}
-
-func sessionFromPendingSourceHandleRow(row gen.GetSessionByPendingSourceHandleRow) gen.Session {
-	return gen.Session{
-		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
-		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
-		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
-		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
-		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
-		PauseJson: row.PauseJson,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
-		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
-		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
-		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
-		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
-		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
-		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
-		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
-		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
-		SpawnCapabilityHash: row.SpawnCapabilityHash,
-	}
-}
-
-func sessionFromProjectListRow(row gen.ListSessionsByProjectRow) gen.Session {
-	return gen.Session{
-		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
-		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
-		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
-		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
-		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
-		PauseJson: row.PauseJson,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
-		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
-		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
-		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
-		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
-		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
-		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
-		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
-		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
-		SpawnCapabilityHash: row.SpawnCapabilityHash,
-	}
-}
-
-func sessionFromAllListRow(row gen.ListAllSessionsRow) gen.Session {
-	return gen.Session{
-		ID: row.ID, ProjectID: row.ProjectID, Num: row.Num, IssueID: row.IssueID,
-		Kind: row.Kind, Harness: row.Harness, ActivityState: row.ActivityState,
-		ActivityLastAt: row.ActivityLastAt, IsTerminated: row.IsTerminated,
-		Branch: row.Branch, WorkspacePath: row.WorkspacePath, RuntimeHandleID: row.RuntimeHandleID,
-		AgentSessionID: row.AgentSessionID, Prompt: row.Prompt, SwitchPendingJson: row.SwitchPendingJson,
-		PauseJson: row.PauseJson,
-		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, DisplayName: row.DisplayName,
-		FirstSignalAt: row.FirstSignalAt, PreviewURL: row.PreviewURL, PreviewRevision: row.PreviewRevision,
-		CleanupGeneration: row.CleanupGeneration, RuntimeLaunchID: row.RuntimeLaunchID,
-		WorkspaceRepoPath: row.WorkspaceRepoPath, TerminateOnPRMerge: row.TerminateOnPRMerge,
-		DiffBaseSha: row.DiffBaseSha, DiffBaseRef: row.DiffBaseRef,
-		RoleID: row.RoleID, RoleMapSchemaVersion: row.RoleMapSchemaVersion, RoleMapSha256: row.RoleMapSha256,
-		RoleConfigRevision: row.RoleConfigRevision, TemplateArtifactID: row.TemplateArtifactID,
-		TemplateSha256: row.TemplateSha256, ResolvedModel: row.ResolvedModel,
-		ResolvedWorkspaceWrites: row.ResolvedWorkspaceWrites, ResolvedCanSpawn: row.ResolvedCanSpawn,
-		SpawnCapabilityHash: row.SpawnCapabilityHash,
-	}
 }
 
 func rowToRecord(row gen.Session) (domain.SessionRecord, error) {

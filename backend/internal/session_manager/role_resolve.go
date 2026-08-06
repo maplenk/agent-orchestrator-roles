@@ -128,7 +128,7 @@ func applyRoleMap(cfg *ports.SpawnConfig, project domain.ProjectRecord, dataDir 
 	// Prompt text is never enforcement. See docs/roles/READ_ONLY_CONTRACT.md.
 	if !resolved.Session.ResolvedPermissions.WorkspaceWrites {
 		if err := capabilities.RequireReadOnly(cfg.Harness); err != nil {
-			return roleApplyResult{}, fmt.Errorf("%w: %v", ErrReadOnlyUnsupported, err)
+			return roleApplyResult{}, fmt.Errorf("%w: %w", ErrReadOnlyUnsupported, err)
 		}
 	}
 
@@ -237,7 +237,7 @@ func (m *Manager) restoreRoleApplyResult(ctx context.Context, rec domain.Session
 			h = rec.Harness
 		}
 		if err := capabilities.RequireReadOnly(h); err != nil {
-			return roleApplyResult{}, fmt.Errorf("%w: restore: %v", ErrReadOnlyUnsupported, err)
+			return roleApplyResult{}, fmt.Errorf("%w: restore: %w", ErrReadOnlyUnsupported, err)
 		}
 	}
 	extra := []string{systemPrompt}

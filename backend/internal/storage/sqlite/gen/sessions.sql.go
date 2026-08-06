@@ -14,115 +14,62 @@ import (
 )
 
 const getSession = `-- name: GetSession :one
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
-    template_artifact_id, template_sha256, resolved_model,
-    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions WHERE id = ?
 `
 
 type GetSessionRow struct {
-	ID                      domain.SessionID
-	ProjectID               domain.ProjectID
-	Num                     int64
-	IssueID                 domain.IssueID
-	Kind                    domain.SessionKind
-	Harness                 domain.AgentHarness
-	ActivityState           domain.ActivityState
-	ActivityLastAt          time.Time
-	IsTerminated            bool
-	Branch                  string
-	WorkspacePath           string
-	RuntimeHandleID         string
-	AgentSessionID          string
-	Prompt                  string
-	SwitchPendingJson       string
-	PauseJson               string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
-	DisplayName             string
-	FirstSignalAt           sql.NullTime
-	PreviewURL              string
-	PreviewRevision         int64
-	CleanupGeneration       int64
-	RuntimeLaunchID         string
-	WorkspaceRepoPath       string
-	TerminateOnPRMerge      bool
-	DiffBaseSha             string
-	DiffBaseRef             string
-	RoleID                  string
-	RoleMapSchemaVersion    int64
-	RoleMapSha256           string
-	RoleConfigRevision      int64
-	TemplateArtifactID      string
-	TemplateSha256          string
-	ResolvedModel           string
-	ResolvedWorkspaceWrites int64
-	ResolvedCanSpawn        int64
-	SpawnCapabilityHash     string
+	Session Session
 }
 
 func (q *Queries) GetSession(ctx context.Context, id domain.SessionID) (GetSessionRow, error) {
 	row := q.db.QueryRowContext(ctx, getSession, id)
 	var i GetSessionRow
 	err := row.Scan(
-		&i.ID,
-		&i.ProjectID,
-		&i.Num,
-		&i.IssueID,
-		&i.Kind,
-		&i.Harness,
-		&i.ActivityState,
-		&i.ActivityLastAt,
-		&i.IsTerminated,
-		&i.Branch,
-		&i.WorkspacePath,
-		&i.RuntimeHandleID,
-		&i.AgentSessionID,
-		&i.Prompt,
-		&i.SwitchPendingJson,
-		&i.PauseJson,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.DisplayName,
-		&i.FirstSignalAt,
-		&i.PreviewURL,
-		&i.PreviewRevision,
-		&i.CleanupGeneration,
-		&i.RuntimeLaunchID,
-		&i.WorkspaceRepoPath,
-		&i.TerminateOnPRMerge,
-		&i.DiffBaseSha,
-		&i.DiffBaseRef,
-		&i.RoleID,
-		&i.RoleMapSchemaVersion,
-		&i.RoleMapSha256,
-		&i.RoleConfigRevision,
-		&i.TemplateArtifactID,
-		&i.TemplateSha256,
-		&i.ResolvedModel,
-		&i.ResolvedWorkspaceWrites,
-		&i.ResolvedCanSpawn,
-		&i.SpawnCapabilityHash,
+		&i.Session.ID,
+		&i.Session.ProjectID,
+		&i.Session.Num,
+		&i.Session.IssueID,
+		&i.Session.Kind,
+		&i.Session.Harness,
+		&i.Session.ActivityState,
+		&i.Session.ActivityLastAt,
+		&i.Session.IsTerminated,
+		&i.Session.Branch,
+		&i.Session.WorkspacePath,
+		&i.Session.RuntimeHandleID,
+		&i.Session.AgentSessionID,
+		&i.Session.Prompt,
+		&i.Session.CreatedAt,
+		&i.Session.UpdatedAt,
+		&i.Session.DisplayName,
+		&i.Session.FirstSignalAt,
+		&i.Session.PreviewURL,
+		&i.Session.PreviewRevision,
+		&i.Session.CleanupGeneration,
+		&i.Session.RuntimeLaunchID,
+		&i.Session.WorkspaceRepoPath,
+		&i.Session.TerminateOnPRMerge,
+		&i.Session.DiffBaseSha,
+		&i.Session.DiffBaseRef,
+		&i.Session.RoleID,
+		&i.Session.RoleMapSchemaVersion,
+		&i.Session.RoleMapSha256,
+		&i.Session.RoleConfigRevision,
+		&i.Session.TemplateArtifactID,
+		&i.Session.TemplateSha256,
+		&i.Session.ResolvedModel,
+		&i.Session.ResolvedWorkspaceWrites,
+		&i.Session.ResolvedCanSpawn,
+		&i.Session.SpawnCapabilityHash,
+		&i.Session.SwitchPendingJson,
+		&i.Session.PauseJson,
 	)
 	return i, err
 }
 
 const getSessionByPendingSourceHandle = `-- name: GetSessionByPendingSourceHandle :one
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
-    template_artifact_id, template_sha256, resolved_model,
-    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions
 WHERE switch_pending_json != ''
   AND json_extract(switch_pending_json, '$.sourceRuntimeHandleId') = ?
@@ -130,44 +77,7 @@ LIMIT 1
 `
 
 type GetSessionByPendingSourceHandleRow struct {
-	ID                      domain.SessionID
-	ProjectID               domain.ProjectID
-	Num                     int64
-	IssueID                 domain.IssueID
-	Kind                    domain.SessionKind
-	Harness                 domain.AgentHarness
-	ActivityState           domain.ActivityState
-	ActivityLastAt          time.Time
-	IsTerminated            bool
-	Branch                  string
-	WorkspacePath           string
-	RuntimeHandleID         string
-	AgentSessionID          string
-	Prompt                  string
-	SwitchPendingJson       string
-	PauseJson               string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
-	DisplayName             string
-	FirstSignalAt           sql.NullTime
-	PreviewURL              string
-	PreviewRevision         int64
-	CleanupGeneration       int64
-	RuntimeLaunchID         string
-	WorkspaceRepoPath       string
-	TerminateOnPRMerge      bool
-	DiffBaseSha             string
-	DiffBaseRef             string
-	RoleID                  string
-	RoleMapSchemaVersion    int64
-	RoleMapSha256           string
-	RoleConfigRevision      int64
-	TemplateArtifactID      string
-	TemplateSha256          string
-	ResolvedModel           string
-	ResolvedWorkspaceWrites int64
-	ResolvedCanSpawn        int64
-	SpawnCapabilityHash     string
+	Session Session
 }
 
 // After source destroy, RuntimeHandleID is cleared but pending still records the
@@ -176,100 +86,55 @@ func (q *Queries) GetSessionByPendingSourceHandle(ctx context.Context, switchPen
 	row := q.db.QueryRowContext(ctx, getSessionByPendingSourceHandle, switchPendingJson)
 	var i GetSessionByPendingSourceHandleRow
 	err := row.Scan(
-		&i.ID,
-		&i.ProjectID,
-		&i.Num,
-		&i.IssueID,
-		&i.Kind,
-		&i.Harness,
-		&i.ActivityState,
-		&i.ActivityLastAt,
-		&i.IsTerminated,
-		&i.Branch,
-		&i.WorkspacePath,
-		&i.RuntimeHandleID,
-		&i.AgentSessionID,
-		&i.Prompt,
-		&i.SwitchPendingJson,
-		&i.PauseJson,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.DisplayName,
-		&i.FirstSignalAt,
-		&i.PreviewURL,
-		&i.PreviewRevision,
-		&i.CleanupGeneration,
-		&i.RuntimeLaunchID,
-		&i.WorkspaceRepoPath,
-		&i.TerminateOnPRMerge,
-		&i.DiffBaseSha,
-		&i.DiffBaseRef,
-		&i.RoleID,
-		&i.RoleMapSchemaVersion,
-		&i.RoleMapSha256,
-		&i.RoleConfigRevision,
-		&i.TemplateArtifactID,
-		&i.TemplateSha256,
-		&i.ResolvedModel,
-		&i.ResolvedWorkspaceWrites,
-		&i.ResolvedCanSpawn,
-		&i.SpawnCapabilityHash,
+		&i.Session.ID,
+		&i.Session.ProjectID,
+		&i.Session.Num,
+		&i.Session.IssueID,
+		&i.Session.Kind,
+		&i.Session.Harness,
+		&i.Session.ActivityState,
+		&i.Session.ActivityLastAt,
+		&i.Session.IsTerminated,
+		&i.Session.Branch,
+		&i.Session.WorkspacePath,
+		&i.Session.RuntimeHandleID,
+		&i.Session.AgentSessionID,
+		&i.Session.Prompt,
+		&i.Session.CreatedAt,
+		&i.Session.UpdatedAt,
+		&i.Session.DisplayName,
+		&i.Session.FirstSignalAt,
+		&i.Session.PreviewURL,
+		&i.Session.PreviewRevision,
+		&i.Session.CleanupGeneration,
+		&i.Session.RuntimeLaunchID,
+		&i.Session.WorkspaceRepoPath,
+		&i.Session.TerminateOnPRMerge,
+		&i.Session.DiffBaseSha,
+		&i.Session.DiffBaseRef,
+		&i.Session.RoleID,
+		&i.Session.RoleMapSchemaVersion,
+		&i.Session.RoleMapSha256,
+		&i.Session.RoleConfigRevision,
+		&i.Session.TemplateArtifactID,
+		&i.Session.TemplateSha256,
+		&i.Session.ResolvedModel,
+		&i.Session.ResolvedWorkspaceWrites,
+		&i.Session.ResolvedCanSpawn,
+		&i.Session.SpawnCapabilityHash,
+		&i.Session.SwitchPendingJson,
+		&i.Session.PauseJson,
 	)
 	return i, err
 }
 
 const getSessionByRuntimeHandleID = `-- name: GetSessionByRuntimeHandleID :one
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
-    template_artifact_id, template_sha256, resolved_model,
-    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions WHERE runtime_handle_id = ? LIMIT 1
 `
 
 type GetSessionByRuntimeHandleIDRow struct {
-	ID                      domain.SessionID
-	ProjectID               domain.ProjectID
-	Num                     int64
-	IssueID                 domain.IssueID
-	Kind                    domain.SessionKind
-	Harness                 domain.AgentHarness
-	ActivityState           domain.ActivityState
-	ActivityLastAt          time.Time
-	IsTerminated            bool
-	Branch                  string
-	WorkspacePath           string
-	RuntimeHandleID         string
-	AgentSessionID          string
-	Prompt                  string
-	SwitchPendingJson       string
-	PauseJson               string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
-	DisplayName             string
-	FirstSignalAt           sql.NullTime
-	PreviewURL              string
-	PreviewRevision         int64
-	CleanupGeneration       int64
-	RuntimeLaunchID         string
-	WorkspaceRepoPath       string
-	TerminateOnPRMerge      bool
-	DiffBaseSha             string
-	DiffBaseRef             string
-	RoleID                  string
-	RoleMapSchemaVersion    int64
-	RoleMapSha256           string
-	RoleConfigRevision      int64
-	TemplateArtifactID      string
-	TemplateSha256          string
-	ResolvedModel           string
-	ResolvedWorkspaceWrites int64
-	ResolvedCanSpawn        int64
-	SpawnCapabilityHash     string
+	Session Session
 }
 
 // Terminal mux keys panes by runtime handle (tmux session name), not always SessionID.
@@ -277,44 +142,44 @@ func (q *Queries) GetSessionByRuntimeHandleID(ctx context.Context, runtimeHandle
 	row := q.db.QueryRowContext(ctx, getSessionByRuntimeHandleID, runtimeHandleID)
 	var i GetSessionByRuntimeHandleIDRow
 	err := row.Scan(
-		&i.ID,
-		&i.ProjectID,
-		&i.Num,
-		&i.IssueID,
-		&i.Kind,
-		&i.Harness,
-		&i.ActivityState,
-		&i.ActivityLastAt,
-		&i.IsTerminated,
-		&i.Branch,
-		&i.WorkspacePath,
-		&i.RuntimeHandleID,
-		&i.AgentSessionID,
-		&i.Prompt,
-		&i.SwitchPendingJson,
-		&i.PauseJson,
-		&i.CreatedAt,
-		&i.UpdatedAt,
-		&i.DisplayName,
-		&i.FirstSignalAt,
-		&i.PreviewURL,
-		&i.PreviewRevision,
-		&i.CleanupGeneration,
-		&i.RuntimeLaunchID,
-		&i.WorkspaceRepoPath,
-		&i.TerminateOnPRMerge,
-		&i.DiffBaseSha,
-		&i.DiffBaseRef,
-		&i.RoleID,
-		&i.RoleMapSchemaVersion,
-		&i.RoleMapSha256,
-		&i.RoleConfigRevision,
-		&i.TemplateArtifactID,
-		&i.TemplateSha256,
-		&i.ResolvedModel,
-		&i.ResolvedWorkspaceWrites,
-		&i.ResolvedCanSpawn,
-		&i.SpawnCapabilityHash,
+		&i.Session.ID,
+		&i.Session.ProjectID,
+		&i.Session.Num,
+		&i.Session.IssueID,
+		&i.Session.Kind,
+		&i.Session.Harness,
+		&i.Session.ActivityState,
+		&i.Session.ActivityLastAt,
+		&i.Session.IsTerminated,
+		&i.Session.Branch,
+		&i.Session.WorkspacePath,
+		&i.Session.RuntimeHandleID,
+		&i.Session.AgentSessionID,
+		&i.Session.Prompt,
+		&i.Session.CreatedAt,
+		&i.Session.UpdatedAt,
+		&i.Session.DisplayName,
+		&i.Session.FirstSignalAt,
+		&i.Session.PreviewURL,
+		&i.Session.PreviewRevision,
+		&i.Session.CleanupGeneration,
+		&i.Session.RuntimeLaunchID,
+		&i.Session.WorkspaceRepoPath,
+		&i.Session.TerminateOnPRMerge,
+		&i.Session.DiffBaseSha,
+		&i.Session.DiffBaseRef,
+		&i.Session.RoleID,
+		&i.Session.RoleMapSchemaVersion,
+		&i.Session.RoleMapSha256,
+		&i.Session.RoleConfigRevision,
+		&i.Session.TemplateArtifactID,
+		&i.Session.TemplateSha256,
+		&i.Session.ResolvedModel,
+		&i.Session.ResolvedWorkspaceWrites,
+		&i.Session.ResolvedCanSpawn,
+		&i.Session.SpawnCapabilityHash,
+		&i.Session.SwitchPendingJson,
+		&i.Session.PauseJson,
 	)
 	return i, err
 }
@@ -419,57 +284,12 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 }
 
 const listAllSessions = `-- name: ListAllSessions :many
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
-    template_artifact_id, template_sha256, resolved_model,
-    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions ORDER BY project_id, num
 `
 
 type ListAllSessionsRow struct {
-	ID                      domain.SessionID
-	ProjectID               domain.ProjectID
-	Num                     int64
-	IssueID                 domain.IssueID
-	Kind                    domain.SessionKind
-	Harness                 domain.AgentHarness
-	ActivityState           domain.ActivityState
-	ActivityLastAt          time.Time
-	IsTerminated            bool
-	Branch                  string
-	WorkspacePath           string
-	RuntimeHandleID         string
-	AgentSessionID          string
-	Prompt                  string
-	SwitchPendingJson       string
-	PauseJson               string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
-	DisplayName             string
-	FirstSignalAt           sql.NullTime
-	PreviewURL              string
-	PreviewRevision         int64
-	CleanupGeneration       int64
-	RuntimeLaunchID         string
-	WorkspaceRepoPath       string
-	TerminateOnPRMerge      bool
-	DiffBaseSha             string
-	DiffBaseRef             string
-	RoleID                  string
-	RoleMapSchemaVersion    int64
-	RoleMapSha256           string
-	RoleConfigRevision      int64
-	TemplateArtifactID      string
-	TemplateSha256          string
-	ResolvedModel           string
-	ResolvedWorkspaceWrites int64
-	ResolvedCanSpawn        int64
-	SpawnCapabilityHash     string
+	Session Session
 }
 
 func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, error) {
@@ -482,44 +302,44 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 	for rows.Next() {
 		var i ListAllSessionsRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.Num,
-			&i.IssueID,
-			&i.Kind,
-			&i.Harness,
-			&i.ActivityState,
-			&i.ActivityLastAt,
-			&i.IsTerminated,
-			&i.Branch,
-			&i.WorkspacePath,
-			&i.RuntimeHandleID,
-			&i.AgentSessionID,
-			&i.Prompt,
-			&i.SwitchPendingJson,
-			&i.PauseJson,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.DisplayName,
-			&i.FirstSignalAt,
-			&i.PreviewURL,
-			&i.PreviewRevision,
-			&i.CleanupGeneration,
-			&i.RuntimeLaunchID,
-			&i.WorkspaceRepoPath,
-			&i.TerminateOnPRMerge,
-			&i.DiffBaseSha,
-			&i.DiffBaseRef,
-			&i.RoleID,
-			&i.RoleMapSchemaVersion,
-			&i.RoleMapSha256,
-			&i.RoleConfigRevision,
-			&i.TemplateArtifactID,
-			&i.TemplateSha256,
-			&i.ResolvedModel,
-			&i.ResolvedWorkspaceWrites,
-			&i.ResolvedCanSpawn,
-			&i.SpawnCapabilityHash,
+			&i.Session.ID,
+			&i.Session.ProjectID,
+			&i.Session.Num,
+			&i.Session.IssueID,
+			&i.Session.Kind,
+			&i.Session.Harness,
+			&i.Session.ActivityState,
+			&i.Session.ActivityLastAt,
+			&i.Session.IsTerminated,
+			&i.Session.Branch,
+			&i.Session.WorkspacePath,
+			&i.Session.RuntimeHandleID,
+			&i.Session.AgentSessionID,
+			&i.Session.Prompt,
+			&i.Session.CreatedAt,
+			&i.Session.UpdatedAt,
+			&i.Session.DisplayName,
+			&i.Session.FirstSignalAt,
+			&i.Session.PreviewURL,
+			&i.Session.PreviewRevision,
+			&i.Session.CleanupGeneration,
+			&i.Session.RuntimeLaunchID,
+			&i.Session.WorkspaceRepoPath,
+			&i.Session.TerminateOnPRMerge,
+			&i.Session.DiffBaseSha,
+			&i.Session.DiffBaseRef,
+			&i.Session.RoleID,
+			&i.Session.RoleMapSchemaVersion,
+			&i.Session.RoleMapSha256,
+			&i.Session.RoleConfigRevision,
+			&i.Session.TemplateArtifactID,
+			&i.Session.TemplateSha256,
+			&i.Session.ResolvedModel,
+			&i.Session.ResolvedWorkspaceWrites,
+			&i.Session.ResolvedCanSpawn,
+			&i.Session.SpawnCapabilityHash,
+			&i.Session.SwitchPendingJson,
+			&i.Session.PauseJson,
 		); err != nil {
 			return nil, err
 		}
@@ -535,57 +355,12 @@ func (q *Queries) ListAllSessions(ctx context.Context) ([]ListAllSessionsRow, er
 }
 
 const listSessionsByProject = `-- name: ListSessionsByProject :many
-SELECT id, project_id, num, issue_id, kind, harness,
-    activity_state, activity_last_at, is_terminated, branch, workspace_path,
-    runtime_handle_id, agent_session_id, prompt, switch_pending_json, pause_json,
-    created_at, updated_at, display_name, first_signal_at, preview_url,
-    preview_revision, cleanup_generation, runtime_launch_id,
-    workspace_repo_path, terminate_on_pr_merge, diff_base_sha, diff_base_ref,
-    role_id, role_map_schema_version, role_map_sha256, role_config_revision,
-    template_artifact_id, template_sha256, resolved_model,
-    resolved_workspace_writes, resolved_can_spawn, spawn_capability_hash
+SELECT sessions.id, sessions.project_id, sessions.num, sessions.issue_id, sessions.kind, sessions.harness, sessions.activity_state, sessions.activity_last_at, sessions.is_terminated, sessions.branch, sessions.workspace_path, sessions.runtime_handle_id, sessions.agent_session_id, sessions.prompt, sessions.created_at, sessions.updated_at, sessions.display_name, sessions.first_signal_at, sessions.preview_url, sessions.preview_revision, sessions.cleanup_generation, sessions.runtime_launch_id, sessions.workspace_repo_path, sessions.terminate_on_pr_merge, sessions.diff_base_sha, sessions.diff_base_ref, sessions.role_id, sessions.role_map_schema_version, sessions.role_map_sha256, sessions.role_config_revision, sessions.template_artifact_id, sessions.template_sha256, sessions.resolved_model, sessions.resolved_workspace_writes, sessions.resolved_can_spawn, sessions.spawn_capability_hash, sessions.switch_pending_json, sessions.pause_json
 FROM sessions WHERE project_id = ? ORDER BY num
 `
 
 type ListSessionsByProjectRow struct {
-	ID                      domain.SessionID
-	ProjectID               domain.ProjectID
-	Num                     int64
-	IssueID                 domain.IssueID
-	Kind                    domain.SessionKind
-	Harness                 domain.AgentHarness
-	ActivityState           domain.ActivityState
-	ActivityLastAt          time.Time
-	IsTerminated            bool
-	Branch                  string
-	WorkspacePath           string
-	RuntimeHandleID         string
-	AgentSessionID          string
-	Prompt                  string
-	SwitchPendingJson       string
-	PauseJson               string
-	CreatedAt               time.Time
-	UpdatedAt               time.Time
-	DisplayName             string
-	FirstSignalAt           sql.NullTime
-	PreviewURL              string
-	PreviewRevision         int64
-	CleanupGeneration       int64
-	RuntimeLaunchID         string
-	WorkspaceRepoPath       string
-	TerminateOnPRMerge      bool
-	DiffBaseSha             string
-	DiffBaseRef             string
-	RoleID                  string
-	RoleMapSchemaVersion    int64
-	RoleMapSha256           string
-	RoleConfigRevision      int64
-	TemplateArtifactID      string
-	TemplateSha256          string
-	ResolvedModel           string
-	ResolvedWorkspaceWrites int64
-	ResolvedCanSpawn        int64
-	SpawnCapabilityHash     string
+	Session Session
 }
 
 func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.ProjectID) ([]ListSessionsByProjectRow, error) {
@@ -598,44 +373,44 @@ func (q *Queries) ListSessionsByProject(ctx context.Context, projectID domain.Pr
 	for rows.Next() {
 		var i ListSessionsByProjectRow
 		if err := rows.Scan(
-			&i.ID,
-			&i.ProjectID,
-			&i.Num,
-			&i.IssueID,
-			&i.Kind,
-			&i.Harness,
-			&i.ActivityState,
-			&i.ActivityLastAt,
-			&i.IsTerminated,
-			&i.Branch,
-			&i.WorkspacePath,
-			&i.RuntimeHandleID,
-			&i.AgentSessionID,
-			&i.Prompt,
-			&i.SwitchPendingJson,
-			&i.PauseJson,
-			&i.CreatedAt,
-			&i.UpdatedAt,
-			&i.DisplayName,
-			&i.FirstSignalAt,
-			&i.PreviewURL,
-			&i.PreviewRevision,
-			&i.CleanupGeneration,
-			&i.RuntimeLaunchID,
-			&i.WorkspaceRepoPath,
-			&i.TerminateOnPRMerge,
-			&i.DiffBaseSha,
-			&i.DiffBaseRef,
-			&i.RoleID,
-			&i.RoleMapSchemaVersion,
-			&i.RoleMapSha256,
-			&i.RoleConfigRevision,
-			&i.TemplateArtifactID,
-			&i.TemplateSha256,
-			&i.ResolvedModel,
-			&i.ResolvedWorkspaceWrites,
-			&i.ResolvedCanSpawn,
-			&i.SpawnCapabilityHash,
+			&i.Session.ID,
+			&i.Session.ProjectID,
+			&i.Session.Num,
+			&i.Session.IssueID,
+			&i.Session.Kind,
+			&i.Session.Harness,
+			&i.Session.ActivityState,
+			&i.Session.ActivityLastAt,
+			&i.Session.IsTerminated,
+			&i.Session.Branch,
+			&i.Session.WorkspacePath,
+			&i.Session.RuntimeHandleID,
+			&i.Session.AgentSessionID,
+			&i.Session.Prompt,
+			&i.Session.CreatedAt,
+			&i.Session.UpdatedAt,
+			&i.Session.DisplayName,
+			&i.Session.FirstSignalAt,
+			&i.Session.PreviewURL,
+			&i.Session.PreviewRevision,
+			&i.Session.CleanupGeneration,
+			&i.Session.RuntimeLaunchID,
+			&i.Session.WorkspaceRepoPath,
+			&i.Session.TerminateOnPRMerge,
+			&i.Session.DiffBaseSha,
+			&i.Session.DiffBaseRef,
+			&i.Session.RoleID,
+			&i.Session.RoleMapSchemaVersion,
+			&i.Session.RoleMapSha256,
+			&i.Session.RoleConfigRevision,
+			&i.Session.TemplateArtifactID,
+			&i.Session.TemplateSha256,
+			&i.Session.ResolvedModel,
+			&i.Session.ResolvedWorkspaceWrites,
+			&i.Session.ResolvedCanSpawn,
+			&i.Session.SpawnCapabilityHash,
+			&i.Session.SwitchPendingJson,
+			&i.Session.PauseJson,
 		); err != nil {
 			return nil, err
 		}

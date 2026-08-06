@@ -2,6 +2,7 @@ package sessionmanager
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -314,5 +315,41 @@ func TestReconcile_FailedExitObservationIsBootFatal(t *testing.T) {
 	if got := st.sessions["mer-1"]; got.Activity.State != domain.ActivityActive || got.Metadata.Pause == nil {
 		t.Fatalf("fixture drifted: activity=%q paused=%v; the point is that the row still reads paused+working",
 			got.Activity.State, got.Metadata.Pause != nil)
+	}
+}
+
+// Switch errors carry their CAUSE now (%w rather than %v), which makes the
+// inner error matchable by errors.Is. That is the point — but it is also the
+// risk, because Reconcile and the daemon route on error identity. A cause that
+// newly satisfied ErrBootUnsafe would silently turn a logged switch failure
+// into a refusal to boot.
+//
+// So both directions are pinned: the classification sentinel still matches, the
+// cause now matches too, and neither drags in a boot-safety sentinel.
+func TestSwitchErrorsCarryTheirCauseWithoutBecomingBootUnsafe(t *testing.T) {
+	cause := errors.New("database is locked")
+	for _, tc := range []struct {
+		name     string
+		err      error
+		sentinel error
+	}{
+		{"post-stop", fmt.Errorf("switch mer-1: %w: target ack ledger: %w", ErrSwitchPostStop, cause), ErrSwitchPostStop},
+		{"uncertain", fmt.Errorf("switch mer-1: %w: probe: %w", ErrSwitchUncertain, cause), ErrSwitchUncertain},
+		{"read-only", fmt.Errorf("switch mer-1: %w: %w", ErrReadOnlyUnsupported, cause), ErrReadOnlyUnsupported},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if !errors.Is(tc.err, tc.sentinel) {
+				t.Fatal("the classification sentinel no longer matches; toAPIError and recovery both route on it")
+			}
+			if !errors.Is(tc.err, cause) {
+				t.Fatal("the cause is not matchable; wrapping it is the whole reason for %w")
+			}
+			if errors.Is(tc.err, ErrBootUnsafe) {
+				t.Fatal("a switch failure became boot-unsafe; the daemon would refuse to serve on an ordinary store error")
+			}
+			if errors.Is(tc.err, ErrLaunchCleanupUnresolved) {
+				t.Fatal("a switch failure became a launch-cleanup failure; Reconcile would abort boot on it")
+			}
+		})
 	}
 }

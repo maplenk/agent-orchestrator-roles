@@ -128,7 +128,7 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	}
 	if rec.Metadata.Role.RoleID != "" && !rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites {
 		if err := capabilities.RequireReadOnly(toHarness); err != nil {
-			return SwitchResult{}, fmt.Errorf("switch %s: %w: %v", req.SessionID, ErrReadOnlyUnsupported, err)
+			return SwitchResult{}, fmt.Errorf("switch %s: %w: %w", req.SessionID, ErrReadOnlyUnsupported, err)
 		}
 	}
 
@@ -241,7 +241,7 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		// Confirmed alive: restore exact pre-switch usability (clear pending + prompt).
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", payload)
 		if rbErr := m.rollbackSwitchPending(ctx, rec, preSwitchPrompt, preSwitchAgentSession, preSwitchHandle, preSwitchLaunch); rbErr != nil {
-			return SwitchResult{}, fmt.Errorf("switch %s: pre-stop source alive; rollback pending failed: %w: %v", req.SessionID, ErrSwitchUncertain, rbErr)
+			return SwitchResult{}, fmt.Errorf("switch %s: pre-stop source alive; rollback pending failed: %w: %w", req.SessionID, ErrSwitchUncertain, rbErr)
 		}
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
 	}
@@ -253,11 +253,11 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	rec.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, rec); err != nil {
 		// Source is dead with pending set — recovery can still continue.
-		return SwitchResult{}, fmt.Errorf("switch %s: %w: clear source handle: %v", req.SessionID, ErrSwitchPostStop, err)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: clear source handle: %w", req.SessionID, ErrSwitchPostStop, err)
 	}
 
 	if err := m.ensurePostStopLedger(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payload); err != nil {
-		return SwitchResult{}, fmt.Errorf("switch %s: %w: %v", req.SessionID, ErrSwitchPostStop, err)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: %w", req.SessionID, ErrSwitchPostStop, err)
 	}
 
 	return m.finishSwitchTarget(ctx, rec, project, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payload, compiled)
@@ -470,7 +470,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	// Revalidate RO before launching/acking a target (capability may have changed).
 	if rec.Metadata.Role.RoleID != "" && !rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites {
 		if err := capabilities.RequireReadOnly(toHarness); err != nil {
-			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %v", sessionID, ErrReadOnlyUnsupported, err)
+			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %w", sessionID, ErrReadOnlyUnsupported, err)
 		}
 	}
 
@@ -481,20 +481,28 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	if hid := strings.TrimSpace(rec.Metadata.RuntimeHandleID); hid != "" {
 		alive, probeErr := m.runtime.IsAlive(ctx, ports.RuntimeHandle{ID: hid})
 		if probeErr != nil {
-			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: probe: %v", sessionID, ErrSwitchUncertain, probeErr)
+			return SwitchResult{}, fmt.Errorf("recover switch %s: %w: probe: %w", sessionID, ErrSwitchUncertain, probeErr)
 		}
 		if alive {
 			if rec.Metadata.RuntimeLaunchID == targetGen {
 				if err := m.ensurePostStopLedger(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw); err != nil {
-					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: post_stop before ack: %v", sessionID, ErrSwitchPostStop, err)
+					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: post_stop before ack: %w", sessionID, ErrSwitchPostStop, err)
 				}
 				return m.ackLiveTarget(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw, compiledText, sem, obs)
 			}
 			// Retry source stop when pending recorded this handle as the pre-stop source.
 			if pending != nil && pending.SourceRuntimeHandleID == hid {
 				dead, dErr := m.destroyRuntimeProbed(ctx, hid)
-				if dErr != nil || !dead {
-					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: source still live: %v", sessionID, ErrSwitchUncertain, dErr)
+				if dErr != nil {
+					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: source still live: %w", sessionID, ErrSwitchUncertain, dErr)
+				}
+				if !dead {
+					// Split from the error case on purpose: destroy returning
+					// (false, nil) is "the probe says it is still there", and
+					// folding it into the branch above rendered a cause of
+					// <nil> — and would render %!w(<nil>) once wrapped.
+					return SwitchResult{}, fmt.Errorf("recover switch %s: %w: source still live after destroy reported no error",
+						sessionID, ErrSwitchUncertain)
 				}
 				// Source now dead; fall through to post_stop + relaunch.
 			} else {
@@ -509,7 +517,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 
 	// Source is dead (or never had a handle). Require durable post_stop before target launch.
 	if err := m.ensurePostStopLedger(ctx, rec, kind, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, payloadRaw); err != nil {
-		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: post_stop before launch: %v", sessionID, ErrSwitchPostStop, err)
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: post_stop before launch: %w", sessionID, ErrSwitchPostStop, err)
 	}
 
 	if compiledText == "" && (sem.Objective != "" || obs.Head != "" || obs.Branch != "") {
@@ -623,13 +631,13 @@ func (m *Manager) finishSwitchTarget(
 		}
 	}
 	if err := m.store.UpdateSession(ctx, live); err != nil {
-		return SwitchResult{}, fmt.Errorf("switch %s: %w: re-pin pending after launch: %v", rec.ID, ErrSwitchPostStop, err)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: re-pin pending after launch: %w", rec.ID, ErrSwitchPostStop, err)
 	}
 
 	if err := m.appendSwitchLedger(ctx, live, kind, domain.LifecyclePhaseTargetAck, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, "", live.Metadata.AgentSessionID, payload); err != nil {
 		// Target is live but ack not durable — keep pending so input stays gated
 		// and recovery only retries ack (alive gen match).
-		return SwitchResult{}, fmt.Errorf("switch %s: %w: target ack ledger: %v", rec.ID, ErrSwitchPostStop, err)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: target ack ledger: %w", rec.ID, ErrSwitchPostStop, err)
 	}
 
 	// Promote current identity only after durable ack.
@@ -671,7 +679,7 @@ func (m *Manager) ackLiveTarget(
 		payload = string(b)
 	}
 	if err := m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseTargetAck, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, "", rec.Metadata.AgentSessionID, payload); err != nil {
-		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: ack: %v", rec.ID, ErrSwitchPostStop, err)
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: ack: %w", rec.ID, ErrSwitchPostStop, err)
 	}
 	rec.Harness = toHarness
 	if rec.Metadata.Role.RoleID != "" || roleID != "" {
