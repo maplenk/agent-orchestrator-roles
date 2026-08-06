@@ -131,6 +131,7 @@ unexplained ledger failures:    0
 | 2 | `relaunchSession` stamped an ephemeral `ResolvedHarness` onto an **empty** role binding, manufacturing a partial pin that restore correctly refused — *after* the source had stopped, so it failed identically on every boot | Stamp only applies when a pin exists |
 | 3 | `EnsureOrchestrator`'s non-`clean` path never discharged the replacement intent, so a project rescued by an ordinary spawn kept a durable record claiming it was still owed one | Both non-clean branches discharge |
 | 4 | Desktop bundles shipped **no role templates at all**, so a clean install could not launch a strict role-pinned orchestrator | Profiles staged and shipped as an `extraResource`; `AO_ROLE_PROFILES_DIR` passed explicitly. Re-dogfooded from an empty data dir |
+| 4b | The staging fix ran from `prepackage`, which **no release workflow invokes** — CI builds with `make`/`publish`, so bundles stayed template-less | Staged from Forge's shared `prePackage` hook; tests pin the real entrypoints |
 | 5 | The five role-resolution sentinels were unmapped, so configuration errors surfaced as **opaque 500s** | Stable actionable 400s with wrapped-error coverage |
 
 ### Follow-ups from review — both closed
@@ -143,11 +144,41 @@ shipped no role templates**, and `profileRoots` only searches
 which exist for a packaged daemon running with cwd `~/.ao`. A fresh install
 therefore could not launch a strict role-pinned orchestrator at all.
 
-Fixed by staging `profiles/` into the bundle (`scripts/stage-profiles.mjs`, run
-from both `predev` and `prepackage`, failing closed on a missing or empty
-source), shipping it via `extraResource`, and passing `AO_ROLE_PROFILES_DIR`
-explicitly on every platform in both dev and packaged launches
-(`resolveRoleProfilesDir`).
+Fixed by staging `profiles/` into the bundle (`scripts/stage-profiles.mjs`,
+failing closed on a missing or empty source), shipping it via `extraResource`,
+and passing `AO_ROLE_PROFILES_DIR` explicitly on every platform in both dev and
+packaged launches (`resolveRoleProfilesDir`).
+
+**The first fix wired staging to the wrong entrypoint** — caught by review. npm
+runs only the pre-hook matching the script you invoked, so `prepackage` fires
+for `npm run package` alone, and **no workflow uses it**: releases publish with
+`npm run publish` (`frontend-release.yml`, `feature-release.yml`) and build
+artifacts with `npm run make` (`build-artifacts.yml`, `desktop-testing.yml`,
+`testing-build.yml`). A left-over, gitignored `frontend/profiles` hid this on
+developer machines; a clean CI checkout has none, so every release path would
+still have shipped a template-less bundle. Staging now runs from Forge's
+`prePackage` hook — the one step `package`, `make` and `publish` all share.
+
+Proven through the real CI entrypoint, starting from a **deleted**
+`frontend/profiles`:
+
+```
+$ rm -rf frontend/profiles && npm run make -- --targets @electron-forge/maker-zip
+  Running prePackage hook from forgeConfig
+  Staged 4 role template(s) into …/frontend/profiles
+  Making a zip distributable for darwin/arm64
+
+out/make/zip/darwin/arm64/Agent Orchestrator-darwin-arm64-0.10.3.zip
+  Agent Orchestrator.app/Contents/Resources/profiles/orchestrator.md    1464
+  Agent Orchestrator.app/Contents/Resources/profiles/reviewer.md         802
+  Agent Orchestrator.app/Contents/Resources/profiles/implementor.md     1171
+  Agent Orchestrator.app/Contents/Resources/profiles/ui-implementor.md   884
+```
+
+`diff -r` against the repository `profiles/` reports the bundled copies
+identical. Still a **non-claim**: no signed, installed `.app` was launched — the
+packaged *runtime* resolution (`resourcesPath/profiles`) is covered by unit test
+and by construction, not by an installed-app run.
 
 **Clean-install re-dogfood**, with `~/.ao/dev` moved aside and nothing copied by
 hand:

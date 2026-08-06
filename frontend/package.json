@@ -15,10 +15,10 @@
 	"scripts": {
 		"build:daemon": "node ./scripts/build-daemon.mjs",
 		"stage:profiles": "node ./scripts/stage-profiles.mjs",
-		"predev": "npm run build:daemon && npm run stage:profiles",
+		"predev": "npm run build:daemon",
 		"dev": "electron-forge start",
 		"dev:web": "VITE_NO_ELECTRON=1 vite --config vite.renderer.config.ts",
-		"prepackage": "npm run build:daemon && npm run stage:profiles",
+		"prepackage": "npm run build:daemon",
 		"package": "electron-forge package",
 		"premake": "npm run build:daemon",
 		"make": "electron-forge make",

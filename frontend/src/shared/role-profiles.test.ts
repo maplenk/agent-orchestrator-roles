@@ -35,24 +35,41 @@ describe("resolveRoleProfilesDir", () => {
 });
 
 describe("desktop packaging", () => {
+	const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
+	const forge = readFileSync(join(frontendRoot, "forge.config.ts"), "utf8");
+
+	// The body of Forge's prePackage hook, which runs for package, make and
+	// publish alike — unlike npm's `prepackage`, which fires only for
+	// `npm run package`.
+	const prePackage = forge.match(/prePackage:\s*async\s*\([^)]*\)\s*=>\s*\{([\s\S]*?)\n\t\t\},/)?.[1] ?? "";
+
+	// Does `npm run <entry>` end up staging profiles? npm runs `pre<entry>` then
+	// `<entry>`; Forge's hook additionally covers any command that runs Forge.
+	function stagesProfiles(entry: string): boolean {
+		const chain = [pkg.scripts[`pre${entry}`], pkg.scripts[entry]].filter(Boolean).join(" && ");
+		if (chain.includes("stage:profiles")) return true;
+		return chain.includes("electron-forge") && prePackage.includes("stage-profiles.mjs");
+	}
+
 	it("lists profiles as an extraResource", () => {
 		// A clean desktop install with no profiles resource cannot launch a strict
 		// role-pinned orchestrator at all. This is the packaging half of that
 		// guarantee; resolveRoleProfilesDir is the runtime half, and both are
 		// required.
-		const forge = readFileSync(join(frontendRoot, "forge.config.ts"), "utf8");
 		const match = forge.match(/extraResource:\s*\[([^\]]*)\]/);
 		expect(match, "forge.config.ts has no extraResource array").toBeTruthy();
 		expect(match?.[1]).toContain('"profiles"');
 	});
 
-	it("stages profiles before dev and before packaging", () => {
-		// Staging only on one of the two hooks would leave dev and packaged
-		// disagreeing about whether templates exist.
-		const pkg = JSON.parse(readFileSync(join(frontendRoot, "package.json"), "utf8"));
-		expect(pkg.scripts["stage:profiles"]).toBeTruthy();
-		expect(pkg.scripts.predev).toContain("stage:profiles");
-		expect(pkg.scripts.prepackage).toContain("stage:profiles");
+	// The real release entrypoints, not the convenient one. CI publishes with
+	// `npm run publish` (frontend-release.yml, feature-release.yml) and builds
+	// artifacts with `npm run make` (build-artifacts.yml, desktop-testing.yml,
+	// testing-build.yml). No workflow runs `npm run package`, so staging wired
+	// only into `prepackage` shipped a template-less bundle from every release
+	// path — masked locally by a left-over, gitignored frontend/profiles.
+	it.each(["package", "make", "publish"])("stages profiles for `npm run %s`", (entry) => {
+		expect(pkg.scripts[entry], `no ${entry} script to release with`).toBeTruthy();
+		expect(stagesProfiles(entry)).toBe(true);
 	});
 
 	it("has role templates in the repository to stage", () => {

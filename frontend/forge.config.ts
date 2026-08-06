@@ -4,6 +4,8 @@ import MakerNSIS from "./makers/maker-nsis";
 import MakerDMG, { sealDmg, verifyDmg } from "./makers/maker-dmg";
 import MakerAppImage from "./makers/maker-appimage";
 import { writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
 
 // Default GitHub release target (production). aoagents was the temporary rewrite
 // home; releases land on AgentWrapper (spec §1.1).
@@ -38,7 +40,7 @@ const config: ForgeConfig = {
 		// (.icns on macOS, .ico on Windows); Linux menu icons come from the
 		// deb/rpm makers below, and the runtime window icon from src/main.ts.
 		icon: "assets/icon",
-		// "profiles" is staged by scripts/stage-profiles.mjs. Without it a clean
+		// "profiles" is staged by the prePackage hook below. Without it a clean
 		// install ships no role templates and strict role-pinned launches fail.
 		extraResource: ["daemon", "profiles", "assets/icon.png", "assets/icon.ico", "app-update.yml"],
 		// Notarization. Two paths:
@@ -64,15 +66,31 @@ const config: ForgeConfig = {
 				: undefined,
 	},
 	hooks: {
-		// electron-forge does not generate app-update.yml (electron-builder does);
-		// electron-updater reads it from the app's Resources dir at runtime to know
-		// which GitHub repo to pull from, else it throws ENOENT during download.
-		// Generate it in prePackage (BEFORE osxSign) and ship it via extraResource
-		// above, so it is copied into the bundle and SIGNED as part of the seal.
-		// Writing it after signing (a postPackage hook) adds an unsealed resource
-		// and macOS reports the app as "damaged". owner/repo are baked from
-		// AO_RELEASE_REPO at build time.
+		// Produces everything extraResource expects to find in the project dir,
+		// BEFORE the packager copies it and BEFORE osxSign seals the bundle.
 		prePackage: async () => {
+			// Role templates are staged HERE, not from an npm pre-script. npm only
+			// runs the hook matching the script you invoked, so `prepackage` fires
+			// for `npm run package` alone — which no release path uses: CI ships
+			// with `npm run make` (premake) and `npm run publish` (its own body).
+			// Forge runs prePackage for package, make and publish alike, so this is
+			// the one place staging cannot silently miss an entrypoint. A locally
+			// left-over frontend/profiles hid that gap on developer machines; a
+			// clean CI checkout has none.
+			const staged = spawnSync(process.execPath, [resolve("scripts/stage-profiles.mjs")], { stdio: "inherit" });
+			if (staged.error || staged.status !== 0) {
+				// Fail the build rather than ship a bundle with no role templates.
+				throw new Error(`staging role profiles failed: ${staged.error?.message ?? `exit ${staged.status}`}`);
+			}
+
+			// electron-forge does not generate app-update.yml (electron-builder does);
+			// electron-updater reads it from the app's Resources dir at runtime to
+			// know which GitHub repo to pull from, else it throws ENOENT during
+			// download. Generating it here (BEFORE osxSign) and shipping it via
+			// extraResource means it is copied into the bundle and SIGNED as part of
+			// the seal. Writing it after signing (a postPackage hook) adds an
+			// unsealed resource and macOS reports the app as "damaged". owner/repo
+			// are baked from AO_RELEASE_REPO at build time.
 			const { owner, name } = parseReleaseRepo(process.env.AO_RELEASE_REPO);
 			const yml = [
 				"provider: github",
