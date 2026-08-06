@@ -16,6 +16,21 @@ var ErrRoleUnknown = fmt.Errorf("unknown role")
 // ErrHarnessOverrideForbidden is returned when strict spawn forbids free-form harness.
 var ErrHarnessOverrideForbidden = fmt.Errorf("harness override forbidden under strictDelegation; use --role only")
 
+// ErrModelOverrideForbidden is returned when a caller supplies a model (or the
+// mode that stands in for one on mode-based adapters) alongside a role.
+//
+// Silently accepting it was worse than it looks: the role patch overwrites
+// Model unconditionally, so the request SUCCEEDED while the caller's selection
+// was discarded — a client could believe it had pinned a model for the life of
+// the session. Mode is the same field by another spelling and is NOT
+// overwritten, so it actually steered a role-pinned session.
+var ErrModelOverrideForbidden = fmt.Errorf("model override forbidden under a role binding; the role map decides the model")
+
+// ErrTemplateUnavailable wraps every loader failure (missing, unreadable,
+// unparseable) so callers can map it to one actionable API code instead of
+// letting a missing profile surface as an internal error.
+var ErrTemplateUnavailable = fmt.Errorf("role template unavailable")
+
 // Resolved is the daemon-authoritative spawn plan for a role.
 type Resolved struct {
 	RoleID   string
@@ -34,6 +49,11 @@ type ResolveInput struct {
 	Kind   domain.SessionKind
 	// ExplicitHarness is the free-form --agent/--harness from the client.
 	ExplicitHarness domain.AgentHarness
+	// ExplicitModel and ExplicitMode are the caller's execution selection,
+	// BEFORE project/kind defaults are merged in. They must stay caller-only:
+	// rejecting a project default here would make every strict spawn fail.
+	ExplicitModel string
+	ExplicitMode  string
 	// Loader loads templates; required when RoleID is set.
 	Loader *Loader
 }
@@ -93,6 +113,9 @@ func Resolve(in ResolveInput) (Resolved, error) {
 	if in.ExplicitHarness != "" {
 		return Resolved{}, ErrHarnessOverrideForbidden
 	}
+	if strings.TrimSpace(in.ExplicitModel) != "" || strings.TrimSpace(in.ExplicitMode) != "" {
+		return Resolved{}, ErrModelOverrideForbidden
+	}
 
 	mapSHA, err := m.SHA256()
 	if err != nil {
@@ -103,7 +126,11 @@ func Resolve(in ResolveInput) (Resolved, error) {
 	if in.Loader != nil {
 		tmpl, err = in.Loader.Load(b.Template)
 		if err != nil {
-			return Resolved{}, fmt.Errorf("role %q template: %w", roleID, err)
+			// Wrapped, not bare: mapRoleError keys on the sentinel to reach
+			// ROLE_TEMPLATE_UNAVAILABLE. A bare error fell through to the
+			// default branch, so a clean install with no profiles installed
+			// reported itself as a 500 daemon bug.
+			return Resolved{}, fmt.Errorf("%w: role %q template %q: %w", ErrTemplateUnavailable, roleID, b.Template, err)
 		}
 	}
 

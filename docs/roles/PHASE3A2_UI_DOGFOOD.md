@@ -42,9 +42,11 @@ The strict map could not be persisted at first, and the refusals were correct:
 
 (2) and (3) together mean a strict map is only expressible today with a harness
 that can actually enforce read-only. **Codex can** (`--sandbox read-only`);
-Claude Code cannot yet, which is the 2B-3 blocker. So the map used
+Claude Code cannot yet — that capability is **1-B (Claude RO)**; 2B-3 is
+downstream of it rather than the blocker itself. So the map used
 `orchestrator: codex, workspaceWrites=false`. This is worth recording: a strict
-project is not reachable at all on a Claude-only install until 2B-3 lands.
+project is not reachable at all on a Claude-only install until **1-B Claude RO**
+lands.
 
 ## The three shapes the composer must not send
 
@@ -113,14 +115,25 @@ renders that code and message verbatim in a `role="alert"`
 (`SessionPausePanel.test.tsx`), which is why it submits the incident it is
 *displaying* rather than re-reading one at click time.
 
-## Gaps found, not fixed here
+## Gaps found here, fixed in the follow-up
 
-- A missing role template surfaces as `500 INTERNAL_ERROR`
-  (`open …/implementor.md.md: no such file`) rather than a mapped code. Every
-  other role failure has one. Worth a `ROLE_TEMPLATE_MISSING`.
-- `template: "implementor.md"` in a role map silently becomes
-  `implementor.md.md`. The loader appends the extension; the config does not
-  reject a name that already has one.
+Both were found by this run and closed in the review-response commit:
+
+- A missing role template surfaced as `500 INTERNAL_ERROR`
+  (`open …/implementor.md.md: no such file`) rather than a mapped code, because
+  the loader error arrived at `mapRoleError` bare and fell through to the
+  default branch. It is now wrapped in `roles.ErrTemplateUnavailable` and
+  reaches the existing `ROLE_TEMPLATE_UNAVAILABLE` mapping.
+- `template: "implementor.md"` silently became `implementor.md.md` — the loader
+  appends the extension. `RoleMap.Validate` now refuses a template that carries
+  an extension or a path separator, at the point the config is authored rather
+  than at spawn.
+
+## Scope: no role-map editor
+
+This slice *consumes* a role map. Adding or editing roles is still API/CLI only
+(`ao project set-config --config-json`), which is how the map in this run was
+installed. A desktop role-map editor is not started.
 
 ## Not covered
 

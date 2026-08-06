@@ -30,7 +30,16 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 2B-0a/0b (ownership + uniqueness) | **Complete** — project gate, migration 0057, fail-closed boot chain, constraint mapping, launch-cleanup hardening, **and boot restore now gated with deterministic survivor selection + marker neutralization + a single ownership resolver** |
 | Phase 2B-1 (orchestrator in-place fresh) | **Landed + live-dogfooded** (`PHASE2B1_LIVE_DOGFOOD.md`) — first *product-visible* 2B behaviour. `FreshOrchestratorConversation` gates the project **before** the switch fence, keeps session id/worktree/branch, and compiles `ObservedOrchestratorV1` (the project's live+terminated worker fleet, read from AO's session table) into the handoff. Cross-harness explicitly refused (2B-3) |
 | Phase 2B-2 (replacement recoverability) | **Landed** — migration 0058 persists replacement intent **before** retirement, so a zero-owner interval is never terminal; boot recovery re-drives stranded projects under the project gate. `finalizeRetirement` reordered so a crash leaves the recoverable residue, and both residues are repaired at boot |
-| Phase 2B-3 (cross-harness orchestrator switch) | **BLOCKED / DEFERRED on 1-F (Claude RO)** — not merely unstarted. A strict orchestrator must be `workspaceWrites:false`, which requires `read_only_enforced`, which only Codex advertises. Until Claude RO lands this slice cannot be built for strict projects, and it is deliberately refused for non-strict ones too rather than ship a capability strict projects can never have. **Phase 2B is therefore NOT complete** |
+| Phase 2B-3 (cross-harness orchestrator switch) | **BLOCKED / DEFERRED on 1-B (Claude RO)** — not merely unstarted. A strict orchestrator must be `workspaceWrites:false`, which requires `read_only_enforced`, which only Codex advertises. Until Claude RO lands this slice cannot be built for strict projects, and it is deliberately refused for non-strict ones too rather than ship a capability strict projects can never have. **Phase 2B is therefore NOT complete** |
+
+> **Claude-only installs cannot use a strict role map at all.** A strict map's
+> orchestrator role must be `workspaceWrites:false`, which `RequireReadOnly`
+> only grants to a harness advertising `read_only_enforced` — today just Codex.
+> The blocker is **1-B (Claude RO)** itself, the capability; 2B-3 is downstream
+> of it, not the thing in the way. Confirmed live on 2026-08-06 while seeding
+> the 3A-2 UI dogfood: the map was refused until its orchestrator role was
+> moved to Codex (`PHASE3A2_UI_DOGFOOD.md`).
+
 | Phase 3A-1 (durable pause primitive) | **Landed** @ `506467f5`, **hardened after review**. Migration 0060 pins `domain.SessionPause`. Three enforcement points, not one: (a) `sessionguard` fences AO-initiated pane writes; (b) **boot** skips paused sessions in post-stop recovery, the live pass's save-and-teardown, and `RestoreAll`'s worker loop + orchestrator election — a pause that let boot relaunch the agent would only have been quiet until the next restart; (c) `LimitEnvelopeV1` — versioned, size-bounded, object-only, unknown fields rejected — so `"I hit a limit"` cannot masquerade as structured evidence. Persistence is **column-owned** (`SetSessionPauseIfAbsent` / `ClearSessionPauseIfIncident`), never a read-modify-write, so a stale full-row writer cannot clear the pin. Incident ids are **caller-supplied and required**, which is what makes a retry after a failed pin write idempotent. **No scheduler, no timer, no auto-resume**; `RetryAfter` is recorded but never scheduled against. *(At the time this landed there was no caller; 3A-2a added the operator endpoints and 3A-2b the detection seam — see those rows.)* |
 | Phase 3A-2a (pause/resume surface) | **Backend/API: landed + accepted.** Operator-owned endpoints (LAN or operator credential; agent principals refused), contract in `PHASE3A_PAUSE_CONTRACT.md`, read-model pause view, four sentinels mapped. **Desktop UX: NOT started** — see the completion-axis note below |
 | **Upstream integration** | **BLOCKING 3A-2b** — 51 behind, 4 migration collisions, 9 hand-merge files (13 conflicts, 4 of them generated). `UPSTREAM_SYNC_PLAN.md`. Renumbering alone is **not sufficient**: goose keys on version number, so on any database that ran this branch upstream's 0042/0043/0044/0047 would be silently SKIPPED |
@@ -54,7 +63,7 @@ four migration-number collisions (0042/0043/0044/0047) and upstream already at
 0052, so a direct merge is unsafe. Building 3A-2b against the pre-sync
 architecture would create a second event path alongside upstream's event-driven
 usage plumbing. **Phase 3A-2b resumes after the sync and a re-run of the 2A/2B
-live dogfood.** **2B-3** (cross-harness orchestrator switch) stays blocked on **Phase 1-F / Claude RO**, which remains parallel; 2B-1 deliberately refuses cross-harness today.
+live dogfood.** **2B-3** (cross-harness orchestrator switch) stays blocked on **Phase 1-B / Claude RO**, which remains parallel; 2B-1 deliberately refuses cross-harness today.
 
 ---
 
@@ -339,7 +348,7 @@ Still open:
 14. [x] Worker switch saga + fresh-conversation (manager + service/API/CLI)
 15. [x] Lifecycle ledger (switch/fresh)
 16. [~] Orchestrator switch protocol — in-place fresh conversation (2B-1) + durable replacement recoverability (2B-2) landed; **cross-harness switch (2B-3) blocked on Claude RO**; successor-session handoff and live-worker rebind deferred
-17. [~] Limit pause — **backend/API done, desktop UX not started.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), and the structured detection seam with every harness unsupported (3A-2b). No renderer surface, and no harness detector
+17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Still missing: a harness detector (needs captured vendor fixtures) and any **desktop role-map editor** — the composer *consumes* a role map, but adding or editing roles remains API/CLI-only
 18. [ ] Manual continue + opt-in auto-failover
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
 

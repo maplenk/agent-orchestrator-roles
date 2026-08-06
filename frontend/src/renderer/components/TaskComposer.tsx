@@ -143,7 +143,15 @@ export function TaskComposer({
 	// Until the config has loaded, strictness is unknown. Submitting a free-form
 	// agent in that window is exactly the request a strict map rejects, so the
 	// composer waits rather than guessing.
+	//
+	// A FAILED read is the same situation wearing different clothes: isPending
+	// goes false and data stays undefined, so `strictDelegation` reads false and
+	// the free-form form would come back — treating "we could not find out" as
+	// "not strict". Unknown has to stay unknown, and the human needs to see why.
 	const configPending = Boolean(projectId) && projectQuery.isPending;
+	const configUnavailable = Boolean(projectId) && projectQuery.isError;
+	const configError =
+		projectQuery.error instanceof Error ? projectQuery.error.message : undefined;
 	const noDelegatableRole = strictDelegation && roleOptions.length === 0;
 	const binding = strictDelegation && role ? roleMap?.roles?.[role] : undefined;
 
@@ -183,6 +191,12 @@ export function TaskComposer({
 				: undefined;
 		if (!cleanPrompt) {
 			setError(t("newTask.taskRequired"));
+			return;
+		}
+		if (configUnavailable) {
+			// The disabled button is an affordance; this is the gate. A form
+			// submitted by Enter, or by a test, must hit the same rule.
+			setError(t("newTask.configUnavailable"));
 			return;
 		}
 		if (strictDelegation && !role) {
@@ -243,6 +257,22 @@ export function TaskComposer({
 
 			{configPending ? (
 				<p className="text-caption text-muted-foreground">{t("newTask.configLoading")}</p>
+			) : configUnavailable ? (
+				<div
+					role="alert"
+					className="space-y-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+				>
+					<p>{t("newTask.configUnavailable")}</p>
+					{configError ? <p className="font-mono break-all">{configError}</p> : null}
+					<button
+						type="button"
+						className="underline underline-offset-2 hover:no-underline disabled:pointer-events-none disabled:opacity-50"
+						disabled={projectQuery.isFetching}
+						onClick={() => void projectQuery.refetch()}
+					>
+						{t("newTask.configRetry")}
+					</button>
+				</div>
 			) : noDelegatableRole ? (
 				<p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
 					{t("newTask.noWorkerRole")}
@@ -339,7 +369,7 @@ export function TaskComposer({
 						{t("newTask.cancel")}
 					</Button>
 				)}
-				<Button type="submit" variant="footer-primary" disabled={isSubmitting || !projectId || configPending || noDelegatableRole}>
+				<Button type="submit" variant="footer-primary" disabled={isSubmitting || !projectId || configPending || configUnavailable || noDelegatableRole}>
 					{isSubmitting ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
 					{isSubmitting ? t("newTask.starting") : t("newTask.start")}
 				</Button>

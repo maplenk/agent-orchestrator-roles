@@ -3,9 +3,11 @@ package session
 import (
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
+	roleslib "github.com/aoagents/agent-orchestrator/backend/internal/roles"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 )
 
@@ -26,6 +28,7 @@ func TestToAPIError_RoleFamily(t *testing.T) {
 		{"role required", sessionmanager.ErrRoleRequired, "ROLE_REQUIRED"},
 		{"role unknown", sessionmanager.ErrRoleUnknown, "ROLE_UNKNOWN"},
 		{"harness override forbidden", sessionmanager.ErrHarnessOverrideForbidden, "HARNESS_OVERRIDE_FORBIDDEN"},
+		{"model override forbidden", sessionmanager.ErrModelOverrideForbidden, "MODEL_OVERRIDE_FORBIDDEN"},
 		{"template unavailable", sessionmanager.ErrRolePromptRequired, "ROLE_TEMPLATE_UNAVAILABLE"},
 		{"read-only unsupported", sessionmanager.ErrReadOnlyUnsupported, "READ_ONLY_UNSUPPORTED"},
 	} {
@@ -80,5 +83,25 @@ func TestRoleErrorCodesAreDistinct(t *testing.T) {
 			t.Errorf("code %q shared by %v and %v", apiErr.Code, prev, err)
 		}
 		seen[apiErr.Code] = err
+	}
+}
+
+// The path a real template failure takes: roles.Resolve wraps the loader error
+// in ErrTemplateUnavailable, mapRoleError re-wraps it as ErrRolePromptRequired,
+// and the caller wraps that again. Testing the sentinel alone would not have
+// caught the original defect — the sentinel mapping was always fine, it was
+// never reached, because the loader error arrived bare.
+func TestToAPIError_TemplateUnavailableThroughTheFullWrapping(t *testing.T) {
+	fromResolve := fmt.Errorf("%w: role %q template %q: %w",
+		roleslib.ErrTemplateUnavailable, "implementor", "implementor", os.ErrNotExist)
+	fromManager := fmt.Errorf("spawn: %w: %w", sessionmanager.ErrRolePromptRequired, fromResolve)
+	wrapped := fmt.Errorf("spawn mer-1: %w", fromManager)
+
+	var apiErr *apierr.Error
+	if !errors.As(toAPIError(wrapped), &apiErr) {
+		t.Fatal("a missing role template surfaced as a 500, not an actionable API error")
+	}
+	if apiErr.Code != "ROLE_TEMPLATE_UNAVAILABLE" {
+		t.Fatalf("code = %q, want ROLE_TEMPLATE_UNAVAILABLE", apiErr.Code)
 	}
 }

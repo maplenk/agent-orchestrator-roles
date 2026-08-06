@@ -167,3 +167,78 @@ func TestDelegationContractMarkdown(t *testing.T) {
 		t.Fatal("required spawn section must not teach --agent/--harness")
 	}
 }
+
+// MASTER_PLAN's rule is that a role-pinned session's execution fields belong to
+// the host, and the doc comment on Resolve has always claimed "any explicit
+// harness/model execution field is rejected". Only harness was checked.
+//
+// The two fields fail differently, which is why both are pinned here. An
+// explicit MODEL was silently overwritten by the role patch and the request
+// still reported success — the caller could believe it had pinned a model for
+// the life of the session. An explicit MODE is not overwritten at all, so it
+// survived into launch and actually steered a role-pinned session.
+func TestResolveRejectsExecutionOverridesAlongsideARole(t *testing.T) {
+	base := func() ResolveInput {
+		return ResolveInput{
+			Map: domain.RoleMap{
+				SchemaVersion:    domain.RoleMapSchemaVersion,
+				StrictDelegation: true,
+				OrchestratorRole: "orchestrator",
+				Roles: map[string]domain.RoleBinding{
+					"orchestrator": {Harness: domain.HarnessCodex, Template: "orchestrator",
+						Permissions: domain.RoleExecutionPolicy{CanSpawn: true}},
+					"implementor": {Harness: domain.HarnessCodex, Model: "gpt-5.6-codex", Template: "implementor",
+						Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true}},
+				},
+			},
+			RoleID: "implementor",
+			Kind:   domain.KindWorker,
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		mutate func(*ResolveInput)
+		want   error
+	}{
+		{"explicit model", func(in *ResolveInput) { in.ExplicitModel = "gpt-4" }, ErrModelOverrideForbidden},
+		// Even the binding's own value: routing must never depend on what the
+		// client supplied, or the client's copy of the map becomes load-bearing.
+		{"model that matches the binding", func(in *ResolveInput) { in.ExplicitModel = "gpt-5.6-codex" }, ErrModelOverrideForbidden},
+		{"explicit mode", func(in *ResolveInput) { in.ExplicitMode = "ultra" }, ErrModelOverrideForbidden},
+		{"explicit harness", func(in *ResolveInput) { in.ExplicitHarness = domain.HarnessCursor }, ErrHarnessOverrideForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := base()
+			tc.mutate(&in)
+			_, err := Resolve(in)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("Resolve = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+// Whitespace is not a selection. Rejecting it would refuse requests that chose
+// nothing, which is what a client sends when the user left the field alone.
+func TestResolveAllowsBlankExecutionFieldsAlongsideARole(t *testing.T) {
+	in := ResolveInput{
+		Map: domain.RoleMap{
+			SchemaVersion:    domain.RoleMapSchemaVersion,
+			OrchestratorRole: "orchestrator",
+			Roles: map[string]domain.RoleBinding{
+				"orchestrator": {Harness: domain.HarnessCodex, Template: "orchestrator",
+					Permissions: domain.RoleExecutionPolicy{CanSpawn: true}},
+				"implementor": {Harness: domain.HarnessCodex, Template: "implementor",
+					Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true}},
+			},
+		},
+		RoleID:        "implementor",
+		Kind:          domain.KindWorker,
+		ExplicitModel: "   ",
+		ExplicitMode:  "\t",
+	}
+	if _, err := Resolve(in); err != nil {
+		t.Fatalf("Resolve rejected a request that selected nothing: %v", err)
+	}
+}

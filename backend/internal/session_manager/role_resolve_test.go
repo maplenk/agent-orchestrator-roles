@@ -366,3 +366,115 @@ func TestApplyRoleMap_ReadOnly_OnlyCodexAllowed(t *testing.T) {
 		}
 	}
 }
+
+// applyRoleMap is the ONE place /sessions and delegation both reach, which is
+// why the execution-override rule is enforced here and not in either caller.
+// Two callers enforcing it separately is how one of them ends up not.
+func TestApplyRoleMap_RejectsExecutionOverrides(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"implementor.md":  "---\nid: implementor\nname: Implementor\nroleReminder: do it\n---\n# Impl body\n",
+		"orchestrator.md": "---\nid: orchestrator\nname: Orch\nroleReminder: coord\n---\n# Orch body\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	project := domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{RoleMap: domain.RoleMap{
+			SchemaVersion:    domain.RoleMapSchemaVersion,
+			StrictDelegation: true,
+			OrchestratorRole: "orchestrator",
+			Roles: map[string]domain.RoleBinding{
+				"orchestrator": {Template: "orchestrator", Harness: domain.HarnessCodex,
+					Permissions: domain.RoleExecutionPolicy{CanSpawn: true}},
+				"implementor": {Template: "implementor", Harness: domain.HarnessCodex, Model: "role-model-id",
+					Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true}},
+			},
+		}},
+	}
+
+	for _, tc := range []struct {
+		name string
+		cfg  ports.SpawnConfig
+		want error
+	}{
+		{
+			// The /sessions shape: POST body carries agentConfig.model.
+			name: "spawn with a model",
+			cfg: ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RoleID: "implementor",
+				AgentConfig: ports.AgentConfig{Model: "gpt-4"}},
+			want: ErrModelOverrideForbidden,
+		},
+		{
+			// The delegation shape: DelegateTaskRequest.model lands in the same
+			// field via DelegateTask, so it is the same boundary or none at all.
+			name: "delegation with a model",
+			cfg: ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RoleID: "implementor",
+				DisplayName: "task", Prompt: "do it",
+				AgentConfig: ports.AgentConfig{Model: "gpt-4"}},
+			want: ErrModelOverrideForbidden,
+		},
+		{
+			name: "mode instead of model",
+			cfg: ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RoleID: "implementor",
+				AgentConfig: ports.AgentConfig{Mode: "ultra"}},
+			want: ErrModelOverrideForbidden,
+		},
+		{
+			name: "harness",
+			cfg: ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RoleID: "implementor",
+				Harness: domain.HarnessCursor},
+			want: ErrHarnessOverrideForbidden,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			_, err := applyRoleMap(&cfg, project, dir)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("applyRoleMap = %v, want %v", err, tc.want)
+			}
+			// And it must be classified, not fall through to the default
+			// branch, or the client sees a 500 for a request it can fix.
+			if mapped := mapRoleError(err); !errors.Is(mapped, tc.want) {
+				t.Fatalf("mapRoleError = %v, want %v", mapped, tc.want)
+			}
+		})
+	}
+}
+
+// A missing profile is an install problem with an actionable fix, not a daemon
+// bug. Unwrapped it fell to mapRoleError's default branch and surfaced as
+// INTERNAL_ERROR — which is how a clean install with no profiles installed
+// reported itself as broken software.
+func TestApplyRoleMap_MissingTemplateIsClassified(t *testing.T) {
+	dir := t.TempDir() // deliberately empty: no profiles installed
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	project := domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{RoleMap: domain.RoleMap{
+			SchemaVersion:    domain.RoleMapSchemaVersion,
+			OrchestratorRole: "orchestrator",
+			Roles: map[string]domain.RoleBinding{
+				"orchestrator": {Template: "orchestrator", Harness: domain.HarnessCodex,
+					Permissions: domain.RoleExecutionPolicy{CanSpawn: true}},
+				"implementor": {Template: "implementor", Harness: domain.HarnessCodex,
+					Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true}},
+			},
+		}},
+	}
+	cfg := ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, RoleID: "implementor"}
+	_, err := applyRoleMap(&cfg, project, dir)
+	if err == nil {
+		t.Fatal("a role whose template does not exist resolved successfully")
+	}
+	if !errors.Is(mapRoleError(err), ErrRolePromptRequired) {
+		t.Fatalf("mapRoleError = %v, want ErrRolePromptRequired (which maps to ROLE_TEMPLATE_UNAVAILABLE)", mapRoleError(err))
+	}
+}

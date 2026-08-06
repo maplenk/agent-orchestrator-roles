@@ -188,8 +188,19 @@ func (m RoleMap) Validate() error {
 		if err := validateRoleID(id); err != nil {
 			return err
 		}
-		if strings.TrimSpace(b.Template) == "" {
+		tmpl := strings.TrimSpace(b.Template)
+		if tmpl == "" {
 			return fmt.Errorf("roles[%s].template: required", id)
+		}
+		// A profile id, not a filename. The loader appends the extension, so
+		// "implementor.md" resolved to "implementor.md.md" and failed at SPAWN
+		// time with a path nobody wrote — long after the config was accepted.
+		// Refuse it where it is authored instead.
+		if strings.HasSuffix(strings.ToLower(tmpl), ".md") {
+			return fmt.Errorf("roles[%s].template: %q is a profile id, not a filename — drop the .md", id, b.Template)
+		}
+		if strings.ContainsAny(tmpl, `/\`) {
+			return fmt.Errorf("roles[%s].template: %q is a profile id, not a path", id, b.Template)
 		}
 		if b.Harness == "" || !b.Harness.IsKnown() {
 			return fmt.Errorf("roles[%s].harness: unknown harness %q", id, b.Harness)

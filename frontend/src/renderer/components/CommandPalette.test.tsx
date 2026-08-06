@@ -372,7 +372,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 
 		await screen.findByPlaceholderText(/search actions/i);
-		expect(screen.getByText("Resume agent")).toBeInTheDocument();
+		expect(screen.getByText("Restart agent")).toBeInTheDocument();
 		expect(screen.getByText("Jump to session")).toBeInTheDocument();
 
 		pressEscape();
@@ -393,7 +393,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 
 		await screen.findByPlaceholderText(/search actions/i);
-		expect(screen.queryByText("Resume agent")).toBeNull();
+		expect(screen.queryByText("Restart agent")).toBeNull();
 		expect(screen.getByText("Copy branch name")).toBeInTheDocument();
 	});
 
@@ -411,7 +411,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 		await screen.findByPlaceholderText(/search actions/i);
 
-		fireEvent.click(screen.getByText("Resume agent"));
+		fireEvent.click(screen.getByText("Restart agent"));
 		await waitFor(() => expect(restoreMock).toHaveBeenCalledWith("w-archived"));
 		await waitFor(() =>
 			expect(navigateMock).toHaveBeenCalledWith({
@@ -436,7 +436,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 		await screen.findByPlaceholderText(/search actions/i);
 
-		fireEvent.click(screen.getByText("Resume agent"));
+		fireEvent.click(screen.getByText("Restart agent"));
 		expect(await screen.findByRole("alert")).toHaveTextContent(/no saved agent session or prompt/i);
 		expect(navigateMock).not.toHaveBeenCalled();
 	});
@@ -455,7 +455,7 @@ describe("CommandPalette drill-in + Enter", () => {
 		fireEvent.keyDown(input, { key: "Enter" });
 		await screen.findByPlaceholderText(/search actions/i);
 
-		fireEvent.click(screen.getByText("Resume agent"));
+		fireEvent.click(screen.getByText("Restart agent"));
 		expect(await screen.findByRole("alert")).toHaveTextContent("not restorable");
 		expect(useUiStore.getState().isCommandPaletteOpen).toBe(true);
 	});
@@ -600,9 +600,9 @@ describe("CommandPalette back navigation", () => {
 		restoreMock.mockReturnValueOnce(new Promise<never>(() => {}));
 		ctx.params = {};
 		await drillIntoTest();
-		fireEvent.click(screen.getByText("Resume agent"));
+		fireEvent.click(screen.getByText("Restart agent"));
 		expect(restoreMock).toHaveBeenCalledTimes(1);
-		fireEvent.click(screen.getByText("Resume agent"));
+		fireEvent.click(screen.getByText("Restart agent"));
 		expect(restoreMock).toHaveBeenCalledTimes(1);
 	});
 
@@ -611,7 +611,7 @@ describe("CommandPalette back navigation", () => {
 		restoreMock.mockReturnValueOnce(new Promise<never>((_resolve, r) => (reject = r)));
 		ctx.params = {};
 		await drillIntoTest();
-		fireEvent.click(screen.getByText("Resume agent"));
+		fireEvent.click(screen.getByText("Restart agent"));
 
 		pressEscape();
 		expect(await screen.findByPlaceholderText(/search projects/i)).toBeInTheDocument();

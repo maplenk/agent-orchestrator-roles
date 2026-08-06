@@ -304,3 +304,61 @@ describe("TaskComposer under a strict role map", () => {
 		expect(h.post.mock.calls[0][1].body.roleId).toBeUndefined();
 	});
 });
+
+// A failed config read is not a non-strict project. isPending goes false and
+// data stays undefined, which reads as "not strict" unless something says
+// otherwise — and then the composer offers the free-form form to a project that
+// may well refuse it.
+describe("TaskComposer when the project config cannot be read", () => {
+	function mockRejectedConfig() {
+		h.get.mockImplementation(async (path: string) => {
+			if (path.includes("/models")) {
+				return { data: { agent: "codex", selectionMode: "text", models: [], allowCustom: true, refreshRecommended: false } };
+			}
+			return { data: undefined, error: { code: "PROJECT_UNAVAILABLE", message: "daemon unreachable" } };
+		});
+	}
+
+	function renderComposer() {
+		return render(
+			<Wrap>
+				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+			</Wrap>,
+		);
+	}
+
+	it("does not fall back to the free-form agent and model form", async () => {
+		mockRejectedConfig();
+		renderComposer();
+
+		await screen.findByRole("alert");
+		expect(screen.queryByTestId("agent-field")).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Role" })).not.toBeInTheDocument();
+	});
+
+	it("blocks submission and says why, rather than letting the daemon refuse it", async () => {
+		mockRejectedConfig();
+		renderComposer();
+
+		const alert = await screen.findByRole("alert");
+		expect(alert).toHaveTextContent(/delegation rules could not be read/);
+		expect(screen.getByText("Start task").closest("button")).toBeDisabled();
+
+		// Enter-to-submit bypasses the disabled button, so the rule has to live
+		// in submit() too.
+		fireEvent.change(task(), { target: { value: "Do the thing" } });
+		fireEvent.submit(task().closest("form") as HTMLFormElement);
+		await waitFor(() => expect(screen.getAllByRole("alert").length).toBeGreaterThan(0));
+		expect(h.post).not.toHaveBeenCalled();
+	});
+
+	it("offers a retry that refetches the config", async () => {
+		mockRejectedConfig();
+		renderComposer();
+
+		await screen.findByRole("alert");
+		const before = h.get.mock.calls.length;
+		fireEvent.click(screen.getByText("Try again"));
+		await waitFor(() => expect(h.get.mock.calls.length).toBeGreaterThan(before));
+	});
+});

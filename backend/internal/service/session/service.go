@@ -736,6 +736,9 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrHarnessOverrideForbidden):
 		return apierr.Invalid("HARNESS_OVERRIDE_FORBIDDEN",
 			"The role map decides the harness for a role-pinned session; remove the harness override", nil)
+	case errors.Is(err, sessionmanager.ErrModelOverrideForbidden):
+		return apierr.Invalid("MODEL_OVERRIDE_FORBIDDEN",
+			"The role map decides the model for a role-pinned session; remove the model override", nil)
 	case errors.Is(err, sessionmanager.ErrRolePromptRequired):
 		return apierr.Invalid("ROLE_TEMPLATE_UNAVAILABLE",
 			"The role's system prompt template could not be loaded. Check that role templates are installed "+

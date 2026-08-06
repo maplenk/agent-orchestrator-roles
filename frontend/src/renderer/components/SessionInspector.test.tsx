@@ -526,7 +526,7 @@ describe("SessionInspector Activity section", () => {
 			/>,
 		);
 
-		await userEvent.click(activitySection().getByRole("button", { name: "Resume agent" }));
+		await userEvent.click(activitySection().getByRole("button", { name: "Restart agent" }));
 
 		await waitFor(() =>
 			expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume-agent", {
@@ -545,7 +545,7 @@ describe("SessionInspector Activity section", () => {
 			/>,
 		);
 
-		expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Restart agent" })).not.toBeInTheDocument();
 
 		live.unmount();
 		renderWithQuery(
@@ -557,7 +557,7 @@ describe("SessionInspector Activity section", () => {
 				})}
 			/>,
 		);
-		expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Restart agent" })).not.toBeInTheDocument();
 	});
 
 	it("keeps resume failures visible beside the action", async () => {
@@ -571,7 +571,7 @@ describe("SessionInspector Activity section", () => {
 			/>,
 		);
 
-		await userEvent.click(activitySection().getByRole("button", { name: "Resume agent" }));
+		await userEvent.click(activitySection().getByRole("button", { name: "Restart agent" }));
 
 		expect(await activitySection().findByText("agent restart failed")).toBeInTheDocument();
 	});
@@ -1758,5 +1758,64 @@ describe("SessionInspector summary reviews", () => {
 
 		await screen.findByRole("tab", { name: /Summary/ });
 		expect(screen.queryByRole("tab", { name: /Reviews/ })).not.toBeInTheDocument();
+	});
+});
+
+// The paused-and-dead cell is the whole reason the pause contract insists on
+// two controls. Boot deliberately does not relaunch a paused session, so one
+// whose agent exits sits there pinned AND stopped, and the two things a person
+// might want — lift the pause, start the process — are different operations on
+// different endpoints with different durable effects.
+//
+// This is asserted at the inspector level, not inside either component, because
+// the defect being guarded is that they render TOGETHER and read as the same
+// action. Neither component can see that on its own.
+describe("SessionInspector paused-dead cell", () => {
+	const pausedDead = () =>
+		session([], {
+			status: "exited",
+			activity: { state: "exited", lastActivityAt: "2026-06-15T10:00:00Z" },
+			pause: {
+				incidentId: "limit-abc123",
+				reason: "usage_limit",
+				detectedBy: "structured_envelope",
+				harness: "codex",
+				pausedAt: "2026-06-15T09:00:00Z",
+			},
+		});
+
+	it("shows both controls, distinctly named", async () => {
+		renderWithQuery(<SessionInspector session={pausedDead()} />);
+
+		// Distinct names, not two Resumes.
+		expect(await screen.findByRole("button", { name: /Resume this session/ })).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Restart agent" })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
+
+		// And the panel says the agent is stopped, so the pause control is not
+		// mistaken for one that will start it.
+		expect(screen.getByText("Agent stopped")).toBeInTheDocument();
+		expect(screen.getByText(/restarting it is a separate step/)).toBeInTheDocument();
+	});
+
+	it("sends each control to its own endpoint", async () => {
+		postMock.mockResolvedValue({ error: undefined, response: { status: 200 } });
+		renderWithQuery(<SessionInspector session={pausedDead()} />);
+
+		await userEvent.click(await screen.findByRole("button", { name: /Resume this session/ }));
+		await waitFor(() =>
+			expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume", {
+				params: { path: { sessionId: "sess-1" } },
+				body: { incidentId: "limit-abc123" },
+			}),
+		);
+
+		postMock.mockClear();
+		await userEvent.click(screen.getByRole("button", { name: "Restart agent" }));
+		await waitFor(() =>
+			expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/resume-agent", {
+				params: { path: { sessionId: "sess-1" } },
+			}),
+		);
 	});
 });

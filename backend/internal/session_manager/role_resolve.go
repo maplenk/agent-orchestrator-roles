@@ -20,6 +20,7 @@ var (
 	ErrRoleRequired             = roles.ErrRoleRequired
 	ErrRoleUnknown              = roles.ErrRoleUnknown
 	ErrHarnessOverrideForbidden = roles.ErrHarnessOverrideForbidden
+	ErrModelOverrideForbidden   = roles.ErrModelOverrideForbidden
 	// ErrRolePromptRequired means a role was resolved but its system prompt
 	// sections could not be built (template missing/empty). Spawn must fail closed.
 	ErrRolePromptRequired = errors.New("session: role system prompt required but unavailable")
@@ -100,11 +101,17 @@ func applyRoleMap(cfg *ports.SpawnConfig, project domain.ProjectRecord, dataDir 
 	}
 
 	loader := templateLoader(dataDir)
+	// cfg.AgentConfig is still purely caller-supplied here: project and kind
+	// defaults are merged later (effectiveAgentConfig, at launch). That
+	// ordering is what makes it safe to reject these outright — a project
+	// default model would otherwise fail every strict spawn.
 	resolved, err := roles.Resolve(roles.ResolveInput{
 		Map:             m,
 		RoleID:          cfg.RoleID,
 		Kind:            cfg.Kind,
 		ExplicitHarness: cfg.Harness,
+		ExplicitModel:   cfg.AgentConfig.Model,
+		ExplicitMode:    cfg.AgentConfig.Mode,
 		Loader:          loader,
 	})
 	if err != nil {
@@ -351,6 +358,13 @@ func mapRoleError(err error) error {
 		return fmt.Errorf("spawn: %w", ErrRoleUnknown)
 	case errors.Is(err, roles.ErrHarnessOverrideForbidden):
 		return fmt.Errorf("spawn: %w", ErrHarnessOverrideForbidden)
+	case errors.Is(err, roles.ErrModelOverrideForbidden):
+		return fmt.Errorf("spawn: %w", ErrModelOverrideForbidden)
+	// A loader failure is a template failure: reuse the sentinel that already
+	// maps to ROLE_TEMPLATE_UNAVAILABLE rather than minting a second code for
+	// the same actionable problem.
+	case errors.Is(err, roles.ErrTemplateUnavailable):
+		return fmt.Errorf("spawn: %w: %w", ErrRolePromptRequired, err)
 	case errors.Is(err, ErrRolePromptRequired):
 		return fmt.Errorf("spawn: %w", ErrRolePromptRequired)
 	case errors.Is(err, ErrReadOnlyUnsupported):

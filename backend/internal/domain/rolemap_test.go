@@ -127,3 +127,49 @@ func TestRoleMapIsZero(t *testing.T) {
 		t.Fatal("sample should not be zero")
 	}
 }
+
+// template is a PROFILE ID; the loader appends the extension. A map that said
+// "implementor.md" was accepted here and then failed at spawn time looking for
+// "implementor.md.md" — a path nobody wrote, reported long after the config was
+// authored, and (before the sentinel wrapping) as an internal error. Refusing
+// it where it is written turns a confusing runtime failure into a config
+// message naming the exact fix.
+func TestRoleMapValidate_RejectsTemplateFilenamesAndPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		template string
+		want     string
+	}{
+		{"markdown extension", "implementor.md", "profile id"},
+		{"uppercase extension", "Implementor.MD", "profile id"},
+		{"relative path", "profiles/implementor", "not a path"},
+		{"traversal", "../implementor", "not a path"},
+		{"windows separator", `profiles\implementor`, "not a path"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sampleStrictMap()
+			b := m.Roles["implementor"]
+			b.Template = tc.template
+			m.Roles["implementor"] = b
+			err := m.Validate()
+			if err == nil {
+				t.Fatalf("Validate accepted template %q", tc.template)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error %q does not say %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// "readme" is a legitimate profile id that merely contains the letters. The
+// check must key on the suffix, not on a substring.
+func TestRoleMapValidate_AllowsProfileIdsContainingMd(t *testing.T) {
+	m := sampleStrictMap()
+	b := m.Roles["implementor"]
+	b.Template = "mdx-implementor"
+	m.Roles["implementor"] = b
+	if err := m.Validate(); err != nil {
+		t.Fatalf("Validate rejected a legitimate profile id: %v", err)
+	}
+}
