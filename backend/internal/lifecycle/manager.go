@@ -315,11 +315,38 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	finalizeSessionUsage(ctx, id, terminationLaunch, terminationRevision, finalizer)
 
 	terminated := false
+	pausedDeath := false
 	err := m.mutate(ctx, id, func(cur domain.SessionRecord, now time.Time) (domain.SessionRecord, bool) {
 		if cur.IsTerminated || !cur.UpdatedAt.Equal(terminationRevision) ||
 			cur.Metadata.RuntimeLaunchID != terminationLaunch || !matchesLaunch(cur) ||
 			!runtimeClearlyDead(f, cur.Activity, now, m.window) {
 			return cur, false
+		}
+		// A PAUSED session records the death without dying.
+		//
+		// The pause contract's whole state model is that a paused session whose
+		// agent goes away stays active-with-a-dead-runtime, so the UI can offer
+		// "Restart agent" rather than "Resume" (PHASE3A_PAUSE_CONTRACT §1-2).
+		// Terminating it here would also do something worse for an
+		// ORCHESTRATOR: terminating releases migration 0057's partial-unique
+		// active slot, so a replacement could be spawned while the paused owner
+		// is still restartable — two claimants on one canonical worktree, which
+		// is the ownership ambiguity 2B-0b exists to make unrepresentable.
+		//
+		// Everything else that death implies still happens: usage was finalized
+		// above, tool-flight state is released below, and containers are reaped
+		// by the caller. No restore marker is written on this path at all, so
+		// nothing here makes the session eligible for an automatic relaunch.
+		//
+		// The pause is re-read HERE, inside the fence, not carried from the
+		// first pass: a resume landing between the two passes must terminate
+		// normally, and a pause landing between them must not.
+		if cur.Metadata.Pause != nil {
+			next := cur
+			next.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: timeOr(f.ObservedAt, now)}
+			delete(m.flights, id)
+			pausedDeath = true
+			return next, next.Activity.State != cur.Activity.State
 		}
 		next := cur
 		next.IsTerminated = true
@@ -336,7 +363,7 @@ func (m *Manager) ApplyRuntimeObservation(ctx context.Context, id domain.Session
 	if err != nil {
 		return err
 	}
-	if terminated {
+	if terminated || pausedDeath {
 		// Route reaper-observed death through the same container-reap hook as
 		// every other terminal path (#2652): a crash/SIGKILL detected by the
 		// runtime reaper must not leave the session's Docker containers behind

@@ -22,7 +22,11 @@ type fakeStore struct {
 
 	listPRsErr        error
 	signatureWriteErr error
-	signatureWrites   int
+	// onGetSession lets a test mutate what a re-read sees, so a concurrent
+	// resume landing between ApplyRuntimeObservation's two passes can be
+	// reproduced deterministically.
+	onGetSession    func(domain.SessionRecord) domain.SessionRecord
+	signatureWrites int
 }
 
 func newFakeStore() *fakeStore {
@@ -31,6 +35,9 @@ func newFakeStore() *fakeStore {
 
 func (f *fakeStore) GetSession(_ context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
 	r, ok := f.sessions[id]
+	if ok && f.onGetSession != nil {
+		r = f.onGetSession(r)
+	}
 	return r, ok, nil
 }
 
