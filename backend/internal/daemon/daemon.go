@@ -262,7 +262,7 @@ func Run() error {
 	// continues, which is the wrong contract here. A queue entry means a
 	// superseded orchestrator's process may still be live inside the canonical
 	// workspace its successor now owns, and doing ANY reconciliation or serving
-	// in that state is exactly what migration 0046's constraint exists to
+	// in that state is exactly what migration 0057's constraint exists to
 	// prevent. A missing queue table is likewise fatal rather than read as
 	// "nothing is owed".
 	//
@@ -321,7 +321,7 @@ func Run() error {
 	}
 
 	// Re-drive replacements interrupted mid retire→spawn, so a project is never
-	// stuck with zero orchestrators (migration 0047).
+	// stuck with zero orchestrators (migration 0058).
 	//
 	// Runs AFTER Reconcile deliberately: that pass adopts crash-surviving
 	// runtimes, so an orchestrator that is actually alive is recognised as the

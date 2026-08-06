@@ -62,7 +62,7 @@ CREATE INDEX idx_lifecycle_ledger_project_created
 -- +goose Down
 -- +goose StatementBegin
 -- Reversible only while no orchestrator_fresh_conversation rows exist; those
--- would violate the narrower constraint. Dev-only, like 0046's Down.
+-- would violate the narrower constraint. Dev-only, like 0057's Down.
 DELETE FROM lifecycle_ledger WHERE kind = 'orchestrator_fresh_conversation';
 
 CREATE TABLE lifecycle_ledger_old (

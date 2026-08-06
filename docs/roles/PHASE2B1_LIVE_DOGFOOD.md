@@ -18,6 +18,14 @@ i.e. the only orchestrator binding strict delegation permits, since
 
 ## 1. Migration 0048 on the upgraded dev database
 
+> **Numbers here are as-run and deliberately NOT renumbered.** This is dated
+> evidence. The fork's migrations were later moved `0042–0049 → 0053–0060` for
+> the upstream sync, so what ran as 0048 now ships as 0059 and the
+> `orchestrator_replacement_intent` 0047 is now 0058. See
+> `UPSTREAM_SYNC_PLAN.md`. **This evidence must be re-captured against the
+> merged tree** — a renumber can reintroduce exactly the CHECK-constraint class
+> this run caught.
+
 Upgraded in place from an existing populated database, not a fresh one.
 
 ```

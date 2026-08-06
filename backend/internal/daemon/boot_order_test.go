@@ -74,7 +74,7 @@ func parseRunFunc(t *testing.T) (*token.FileSet, *ast.FuncDecl) {
 //
 // DrainOrchestratorReapQueue is the only FATAL step in boot: a queue entry means
 // a superseded orchestrator's process may still be executing inside the
-// canonical workspace its successor now owns, and migration 0046's constraint
+// canonical workspace its successor now owns, and migration 0057's constraint
 // exists to prevent AO running in that state at all. Session and runtime
 // reconciliation, and every client-facing surface, must therefore sit behind
 // it — the earlier arrangement ran the best-effort shell sweep, started the

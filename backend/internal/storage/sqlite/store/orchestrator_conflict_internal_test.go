@@ -9,7 +9,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// isActiveOrchestratorConflict has to identify migration 0046's index from an
+// isActiveOrchestratorConflict has to identify migration 0057's index from an
 // error message alone: SQLite reports "UNIQUE constraint failed:
 // sessions.project_id (2067)" and never names the index. The predicate is
 // therefore keyed on the reported COLUMN LIST, and it must be an EXACT match —
@@ -36,7 +36,7 @@ func TestIsActiveOrchestratorConflict_IsScopedToTheSessionsIndex(t *testing.T) {
 			t.Fatalf("exec %q: %v", query, err)
 		}
 	}
-	// Both sessions constraints: 0001's composite and 0046's partial index.
+	// Both sessions constraints: 0001's composite and 0057's partial index.
 	mustExec(`CREATE TABLE sessions (
 		id TEXT PRIMARY KEY, project_id TEXT NOT NULL, num INTEGER NOT NULL,
 		kind TEXT NOT NULL, is_terminated INTEGER NOT NULL,
@@ -57,7 +57,7 @@ func TestIsActiveOrchestratorConflict_IsScopedToTheSessionsIndex(t *testing.T) {
 		t.Fatalf("first orchestrator: %v", err)
 	}
 
-	// 0046's index: a second ACTIVE orchestrator, distinct num.
+	// 0057's index: a second ACTIVE orchestrator, distinct num.
 	orchestratorErr := insert("mer-2", 2, "orchestrator")
 	if orchestratorErr == nil {
 		t.Fatal("second active orchestrator was accepted; the fixture index is wrong")

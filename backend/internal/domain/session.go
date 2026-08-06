@@ -6,7 +6,7 @@ import (
 )
 
 // ErrActiveOrchestratorExists is returned by the session store when a write
-// would leave a project with two active orchestrators, which migration 0046's
+// would leave a project with two active orchestrators, which migration 0057's
 // partial unique index (idx_sessions_one_active_orchestrator) forbids.
 //
 // The index is a backstop, not the primary mechanism: ownership is normally
@@ -60,7 +60,7 @@ type SessionMetadata struct {
 	PreviewRevision int64 `json:"previewRevision,omitempty"`
 
 	// Role is the durable multi-sub role identity pinned at spawn (optional).
-	// Persisted in session metadata columns once migration 0042 is applied;
+	// Persisted in session metadata columns once migration 0053 is applied;
 	// until then it is carried in-memory for the spawn path and tests.
 	Role SessionRoleBinding `json:"role,omitempty"`
 

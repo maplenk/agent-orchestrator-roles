@@ -120,12 +120,12 @@ func (l *lifecycleStack) Stop() {
 type sessionLifecycle interface {
 	Reconcile(ctx context.Context) error
 	RestoreAll(ctx context.Context) error
-	// DrainOrchestratorReapQueue discharges migration 0046's obligations to
+	// DrainOrchestratorReapQueue discharges migration 0057's obligations to
 	// confirm superseded orchestrators are dead. Fail-closed and FATAL at boot,
 	// unlike Reconcile — so it is listed separately rather than folded into it.
 	DrainOrchestratorReapQueue(ctx context.Context) error
 	// RecoverOrchestratorReplacements re-drives replacements interrupted mid
-	// retire→spawn (migration 0047), so a project is never stuck with zero
+	// retire→spawn (migration 0058), so a project is never stuck with zero
 	// orchestrators. Deliberately NOT boot-fatal: a project without a
 	// coordinator is inert, and stopping a daemon that is fine for every other
 	// project would be the worse outcome.

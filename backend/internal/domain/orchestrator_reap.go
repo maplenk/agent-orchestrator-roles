@@ -5,7 +5,7 @@ import "time"
 // OrchestratorReapEntry is one outstanding obligation to confirm the death of a
 // superseded orchestrator's execution surfaces.
 //
-// Rows are created by migration 0046, which reconciles databases holding more
+// Rows are created by migration 0057, which reconciles databases holding more
 // than one active orchestrator per project. Reconciliation terminates the
 // losers and clears their workspace claim, which erases the only authoritative
 // probe target — so the migration captures each loser's exact pre-reconciliation

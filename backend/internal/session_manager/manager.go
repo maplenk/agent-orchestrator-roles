@@ -244,7 +244,7 @@ type Store interface {
 	// incident, so a stale resume cannot lift a newer pause.
 	ClearSessionPauseIfIncident(ctx context.Context, id domain.SessionID, incidentID string, updatedAt time.Time) (bool, error)
 	// ListOrchestratorReapQueue returns outstanding obligations to confirm the
-	// death of superseded orchestrators (migration 0046). A missing table must
+	// death of superseded orchestrators (migration 0057). A missing table must
 	// surface as an error, never as an empty queue.
 	ListOrchestratorReapQueue(ctx context.Context) ([]domain.OrchestratorReapEntry, error)
 	// DeleteOrchestratorReapEntry discharges one obligation. Only ever called
@@ -980,7 +980,7 @@ func sessionPrefix(project domain.ProjectRecord) string {
 // rollbackSpawnSeedRow.
 // markSpawnFailedTerminated parks a failed spawn terminated. Post-runtime
 // callers must surface its error: an active row that could not be terminated
-// holds the project's orchestrator slot (migration 0046) with nothing behind
+// holds the project's orchestrator slot (migration 0057) with nothing behind
 // it. Pre-runtime seed rollbacks fail the whole spawn anyway and ignore it.
 func (m *Manager) markSpawnFailedTerminated(ctx context.Context, id domain.SessionID) error {
 	m.cleanupSystemPromptDir(id)
@@ -1056,7 +1056,7 @@ var ErrPausedLivenessUnresolved = fmt.Errorf("%w: paused session liveness not re
 // value (destroyRuntimeProbed, switch.go). And a runtime that is NOT confirmed
 // dead has its identity written to the row anyway, so it stays reapable — a
 // write that deliberately leaves is_terminated alone, which matters because the
-// motivating failure is migration 0046's index rejecting the activation, and
+// motivating failure is migration 0057's index rejecting the activation, and
 // that write would fail again.
 // UNCONFIRMED DEATH IS ALWAYS AN ERROR, recorded or not. Recording the survivor
 // makes it reapable *eventually*; it does not make it gone. The distinction that
@@ -1519,7 +1519,7 @@ func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id dom
 //
 // The reverse order looks tidier and is worse. Releasing the claim first leaves
 // an ACTIVE orchestrator with no workspace: it still occupies the project's
-// single active slot under migration 0046, so no successor can be created,
+// single active slot under migration 0057, so no successor can be created,
 // while EnsureOrchestrator's idempotent path happily returns it and hands the
 // caller a coordinator that owns nothing. That state is both more damaging and
 // less obviously wrong than a stale path on a dead row.
@@ -2344,7 +2344,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 // project ownership gate, so it can resurrect more than one orchestrator per
 // project. Gating alone would not fix that — the loop also needs deterministic
 // survivor selection and restore-marker neutralization, which land together
-// with migration 0046. It runs at boot before the daemon serves, so it does not
+// with migration 0057. It runs at boot before the daemon serves, so it does not
 // currently race API-driven restores.
 func (m *Manager) RestoreAll(ctx context.Context) error {
 	recs, err := m.store.ListAllSessions(ctx)
@@ -2371,7 +2371,7 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 // restoreProjectOrchestrators restores at most ONE orchestrator per project,
 // under that project's ownership gate.
 //
-// This is the half of boot restore that migration 0046 could not cover. The
+// This is the half of boot restore that migration 0057 could not cover. The
 // migration reconciles rows that were already duplicated; this prevents the
 // loop from *creating* duplicates in the first place, which it previously could
 // in two distinct ways:
@@ -2508,7 +2508,7 @@ func (m *Manager) restoreOneOrchestrator(ctx context.Context, projectID domain.P
 		return m.neutralizeRestoreMarkers(ctx, restorable, "a live orchestrator already owns the project")
 	}
 
-	// Same rule as newestOrchestratorRecord and migration 0046: newest
+	// Same rule as newestOrchestratorRecord and migration 0057: newest
 	// CreatedAt, then UpdatedAt, then lexically greatest id. The database and
 	// this loop must never disagree about who owns a project.
 	survivor := newestOrchestratorRecord(restorable)
@@ -3711,11 +3711,11 @@ func (m *Manager) workspaceProjectPrompt(ctx context.Context, kind domain.Sessio
 // a worker's system prompt names as its coordinator.
 //
 // It applies newestOrchestratorRecord — the SAME rule as EnsureOrchestrator and
-// migration 0046 — rather than taking the first match in ListSessions order.
+// migration 0057 — rather than taking the first match in ListSessions order.
 // That order is insertion order, so the old first-match returned the OLDEST
 // active orchestrator while ownership resolved to the newest: with two rows
 // briefly active, every worker spawned in that window was told to report to the
-// one being superseded. Migration 0046's index now makes two active rows
+// one being superseded. Migration 0057's index now makes two active rows
 // unreachable, but a second resolver that disagrees by construction is a trap
 // waiting for the next path that predates the index, so there is exactly one.
 func (m *Manager) activeOrchestratorSessionID(ctx context.Context, project domain.ProjectID) (domain.SessionID, bool, error) {

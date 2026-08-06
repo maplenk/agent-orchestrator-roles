@@ -15,7 +15,7 @@ import (
 // obligations stay queued and the daemon must not serve.
 var ErrReapUnconfirmed = errors.New("orchestrator reap: execution death not confirmed")
 
-// DrainOrchestratorReapQueue discharges the obligations migration 0046 created
+// DrainOrchestratorReapQueue discharges the obligations migration 0057 created
 // when it reconciled duplicate orchestrators.
 //
 // This is FAIL-CLOSED and must run before the generic reconcile/reap passes and

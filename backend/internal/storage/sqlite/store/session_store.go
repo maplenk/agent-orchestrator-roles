@@ -45,7 +45,7 @@ func (s *Store) CreateSession(ctx context.Context, rec domain.SessionRecord) (do
 // UpdateSession writes the full mutable state of an existing session. The
 // id/project/num/created_at are immutable and not touched here.
 //
-// Clearing is_terminated on an orchestrator re-enters migration 0046's partial
+// Clearing is_terminated on an orchestrator re-enters migration 0057's partial
 // unique index, so a restore/resume that races another active orchestrator
 // fails here. That is surfaced as domain.ErrActiveOrchestratorExists rather
 // than a raw driver error: the caller has usually just created a runtime and
@@ -62,7 +62,7 @@ func (s *Store) UpdateSession(ctx context.Context, rec domain.SessionRecord) err
 	return nil
 }
 
-// isActiveOrchestratorConflict reports whether err is migration 0046's
+// isActiveOrchestratorConflict reports whether err is migration 0057's
 // one-active-orchestrator index rejecting a write.
 //
 // SQLite names the COLUMNS, not the index — "UNIQUE constraint failed:
