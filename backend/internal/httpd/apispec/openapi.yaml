@@ -3677,6 +3677,9 @@ components:
           type: string
         projectId:
           type: string
+        roleId:
+          maxLength: 64
+          type: string
       required:
       - projectId
       - brief

@@ -18,7 +18,11 @@ type DelegateTaskInput struct {
 	ProjectID      domain.ProjectID
 	Brief          string
 	RequestedAgent domain.AgentHarness
-	Model          string
+	// RoleID is passed through untouched. Whether it is required, permitted
+	// alongside RequestedAgent, or known at all is the role map's decision,
+	// resolved in the manager — never here, and never in the client.
+	RoleID string
+	Model  string
 }
 
 // DelegateTaskOutcome identifies the spawned worker and, when present, the
@@ -46,6 +50,7 @@ func (s *Service) DelegateTask(ctx context.Context, in DelegateTaskInput) (Deleg
 		ProjectID:   in.ProjectID,
 		Kind:        domain.KindWorker,
 		Harness:     in.RequestedAgent,
+		RoleID:      in.RoleID,
 		Prompt:      in.Brief,
 		DisplayName: delegatedTaskDisplayName(in.Brief),
 		AgentConfig: ports.AgentConfig{Model: strings.TrimSpace(in.Model)},

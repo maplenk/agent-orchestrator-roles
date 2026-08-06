@@ -1110,6 +1110,7 @@ func (c *SessionsController) delegateTask(w http.ResponseWriter, r *http.Request
 		ProjectID:      in.ProjectID,
 		Brief:          domain.SanitizeControlChars(in.Brief),
 		RequestedAgent: in.Agent,
+		RoleID:         strings.TrimSpace(in.RoleID),
 		Model:          domain.SanitizeControlChars(strings.TrimSpace(in.Model)),
 	})
 	if err != nil {

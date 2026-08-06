@@ -1241,6 +1241,7 @@ export interface components {
             brief: string;
             model?: string;
             projectId: string;
+            roleId?: string;
         };
         DelegateTaskResponse: {
             ok: boolean;

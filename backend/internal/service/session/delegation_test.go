@@ -163,3 +163,43 @@ func TestDelegateTaskAddressesTheManagersOwnerNotTheStoresNewest(t *testing.T) {
 		t.Fatalf("orchestrator = %q, want orch-owner: the service re-derived ownership from the store", out.OrchestratorID)
 	}
 }
+
+// Without this passthrough the desktop composer cannot delegate at all on a
+// strictDelegation project: roles.Resolve refuses a KindWorker spawn with no
+// role, so every delegation from the UI would fail ROLE_REQUIRED.
+func TestDelegateTaskPassesTheRoleThroughToSpawn(t *testing.T) {
+	st := newFakeStore()
+	st.projects["ao"] = domain.ProjectRecord{ID: "ao"}
+	cmd := &fakeCommander{}
+	svc := &Service{store: st, manager: cmd}
+
+	if _, err := svc.DelegateTask(context.Background(), DelegateTaskInput{
+		ProjectID: "ao", Brief: "ship it", RoleID: "implementor",
+	}); err != nil {
+		t.Fatalf("DelegateTask: %v", err)
+	}
+	if cmd.spawnedCfg.RoleID != "implementor" {
+		t.Fatalf("spawn role = %q, want implementor", cmd.spawnedCfg.RoleID)
+	}
+}
+
+// The service must not second-guess the map. Role and harness together are
+// exactly what HARNESS_OVERRIDE_FORBIDDEN exists to refuse under a strict map —
+// and exactly what a NON-strict map is allowed to accept. Deciding that here
+// would be a second policy engine disagreeing with the manager's, so the pair
+// is forwarded verbatim and the manager rules on it.
+func TestDelegateTaskDoesNotAdjudicateRoleAndHarnessItself(t *testing.T) {
+	st := newFakeStore()
+	st.projects["ao"] = domain.ProjectRecord{ID: "ao"}
+	cmd := &fakeCommander{}
+	svc := &Service{store: st, manager: cmd}
+
+	if _, err := svc.DelegateTask(context.Background(), DelegateTaskInput{
+		ProjectID: "ao", Brief: "ship it", RoleID: "implementor", RequestedAgent: domain.HarnessCursor,
+	}); err != nil {
+		t.Fatalf("DelegateTask rejected a pair the map may legitimately allow: %v", err)
+	}
+	if cmd.spawnedCfg.RoleID != "implementor" || cmd.spawnedCfg.Harness != domain.HarnessCursor {
+		t.Fatalf("spawn cfg = %#v; both fields must reach the manager unaltered", cmd.spawnedCfg)
+	}
+}

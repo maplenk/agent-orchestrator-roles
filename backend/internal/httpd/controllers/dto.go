@@ -492,10 +492,15 @@ type FreshConversationRequest struct {
 // the string-only guarded messenger and cannot safely hand image bytes to a
 // worker that does not exist yet without a durable attachment store.
 type DelegateTaskRequest struct {
-	ProjectID domain.ProjectID    `json:"projectId"`
-	Brief     string              `json:"brief" maxLength:"4096"`
-	Agent     domain.AgentHarness `json:"agent,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,kiro,kilocode,vibe,pi,autohand,fake"`
-	Model     string              `json:"model,omitempty" maxLength:"256"`
+	ProjectID domain.ProjectID `json:"projectId"`
+	Brief     string           `json:"brief" maxLength:"4096"`
+	// RoleID selects a semantic role from the project role map, exactly as
+	// POST /sessions does. A strictDelegation map REQUIRES it and refuses a
+	// free-form Agent alongside it; without this field the desktop composer
+	// could not delegate on a strict project at all.
+	RoleID string              `json:"roleId,omitempty" maxLength:"64"`
+	Agent  domain.AgentHarness `json:"agent,omitempty" enum:"claude-code,codex,aider,opencode,grok,droid,amp,agy,crush,cursor,qwen,copilot,goose,auggie,continue,devin,cline,kimi,kiro,kilocode,vibe,pi,autohand,fake"`
+	Model  string              `json:"model,omitempty" maxLength:"256"`
 }
 
 // DelegateTaskResponse confirms which worker was spawned and, when available,
