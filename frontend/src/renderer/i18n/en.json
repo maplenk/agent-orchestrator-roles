@@ -1001,5 +1001,11 @@
 	"newTask.task": "Task",
 	"newTask.taskPlaceholder": "Describe the change, constraints, and expected verification.",
 	"newTask.model": "Model",
+	"newTask.role": "Role",
+	"newTask.rolePlaceholder": "Choose a role",
+	"newTask.roleRequired": "Choose a role before delegating.",
+	"newTask.roleLocked": "This project delegates by role. The role fixes the agent and model, so neither can be overridden here.",
+	"newTask.noWorkerRole": "This project's role map defines no role a worker may be delegated to.",
+	"newTask.configLoading": "Loading project delegation rules…",
 	"newTask.taskRequired": "Task is required."
 }

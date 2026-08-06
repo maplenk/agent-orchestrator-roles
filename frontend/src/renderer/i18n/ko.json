@@ -1019,5 +1019,11 @@
 	"newTask.task": "Task",
 	"newTask.taskPlaceholder": "Describe the change, constraints, and expected verification.",
 	"newTask.model": "Model",
+	"newTask.role": "역할",
+	"newTask.rolePlaceholder": "역할 선택",
+	"newTask.roleRequired": "위임하기 전에 역할을 선택하세요.",
+	"newTask.roleLocked": "이 프로젝트는 역할 단위로 위임합니다. 역할이 에이전트와 모델을 결정하므로 여기서는 변경할 수 없습니다.",
+	"newTask.noWorkerRole": "이 프로젝트의 역할 맵에는 작업자를 위임할 수 있는 역할이 없습니다.",
+	"newTask.configLoading": "프로젝트 위임 규칙을 불러오는 중…",
 	"newTask.taskRequired": "Task is required."
 }

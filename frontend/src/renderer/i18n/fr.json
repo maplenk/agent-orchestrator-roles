@@ -1035,5 +1035,11 @@
 	"newTask.task": "Task",
 	"newTask.taskPlaceholder": "Describe the change, constraints, and expected verification.",
 	"newTask.model": "Model",
+	"newTask.role": "Rôle",
+	"newTask.rolePlaceholder": "Choisissez un rôle",
+	"newTask.roleRequired": "Choisissez un rôle avant de déléguer.",
+	"newTask.roleLocked": "Ce projet délègue par rôle. Le rôle fixe l’agent et le modèle ; aucun des deux ne peut être remplacé ici.",
+	"newTask.noWorkerRole": "La carte des rôles de ce projet ne définit aucun rôle auquel déléguer un worker.",
+	"newTask.configLoading": "Chargement des règles de délégation du projet…",
 	"newTask.taskRequired": "Task is required."
 }

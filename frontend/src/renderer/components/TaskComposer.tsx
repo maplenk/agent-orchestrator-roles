@@ -22,12 +22,30 @@ import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 type Project = components["schemas"]["Project"];
 type DelegateAgent = components["schemas"]["DelegateTaskRequest"]["agent"];
 
+type RoleMap = NonNullable<components["schemas"]["ProjectConfig"]["roleMap"]>;
+
 type CreateTaskInput = {
 	projectId: string;
 	brief: string;
 	agent?: DelegateAgent;
 	model?: string;
+	roleId?: string;
 };
+
+/**
+ * Roles a worker may be delegated to, in a stable order.
+ *
+ * The orchestrator role is excluded: delegation spawns a worker, and a strict
+ * map auto-binds the orchestrator role for KindOrchestrator only — offering it
+ * here would be offering a target the daemon would refuse.
+ */
+export function delegatableRoles(map: RoleMap | undefined): string[] {
+	if (!map?.roles) return [];
+	const orchestratorRole = map.orchestratorRole ?? "orchestrator";
+	return Object.keys(map.roles)
+		.filter((id) => id !== orchestratorRole)
+		.sort((a, b) => a.localeCompare(b));
+}
 
 const newTaskSelectSurfaceClass =
 	"h-control-form w-full flex-1 justify-between rounded-md border border-transparent bg-input/50 px-3 py-2 text-control text-foreground transition-[color,box-shadow,background-color,border-color] hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30";
@@ -58,6 +76,7 @@ export function TaskComposer({
 	const [model, setModel] = useState("");
 	const [mode, setMode] = useState("");
 	const [agent, setAgent] = useState("");
+	const [role, setRole] = useState("");
 	const [agentTouched, setAgentTouched] = useState(false);
 	const [modelTouched, setModelTouched] = useState(false);
 	const [isSubmitting, setIsSubmitting] = useState(false);
@@ -72,6 +91,7 @@ export function TaskComposer({
 						brief: input.brief,
 						agent: input.agent,
 						model: input.model,
+						roleId: input.roleId,
 					},
 				});
 				if (error) throw new Error(apiErrorMessage(error, t("newTask.unableToStart")));
@@ -114,9 +134,24 @@ export function TaskComposer({
 	const defaultModeForSelectedAgent = selectedAgent === defaultWorkerAgent ? defaultWorkerMode : "";
 	const agentCatalog = agentsQuery.data;
 
+	// Strict delegation is the daemon's rule, read here only to stop offering
+	// inputs it would refuse. The composer never decides that a spawn is legal —
+	// it declines to send a shape already known to be rejected.
+	const roleMap = projectQuery.data?.config?.roleMap;
+	const strictDelegation = roleMap?.strictDelegation === true;
+	const roleOptions = delegatableRoles(roleMap);
+	// Until the config has loaded, strictness is unknown. Submitting a free-form
+	// agent in that window is exactly the request a strict map rejects, so the
+	// composer waits rather than guessing.
+	const configPending = Boolean(projectId) && projectQuery.isPending;
+	const noDelegatableRole = strictDelegation && roleOptions.length === 0;
+	const binding = strictDelegation && role ? roleMap?.roles?.[role] : undefined;
+
 	useEffect(() => {
 		if (!agentTouched) setAgent(defaultWorkerAgent);
 	}, [agentTouched, defaultWorkerAgent]);
+	// A role id is only meaningful inside one project's map.
+	useEffect(() => setRole(""), [projectId]);
 	useEffect(() => {
 		if (!modelTouched) {
 			setModel(defaultModelForSelectedAgent);
@@ -150,16 +185,27 @@ export function TaskComposer({
 			setError(t("newTask.taskRequired"));
 			return;
 		}
+		if (strictDelegation && !role) {
+			setError(t("newTask.roleRequired"));
+			return;
+		}
 
 		setIsSubmitting(true);
 		setError(undefined);
 		try {
-			const sessionId = await createTask({
-				projectId,
-				brief: prompt,
-				agent: agentTouched && agent ? (agent as CreateTaskInput["agent"]) : undefined,
-				model: requestedModel,
-			});
+			// Under a strict map the role carries the harness and the model, and
+			// sending either alongside it is HARNESS_OVERRIDE_FORBIDDEN. So they
+			// are not merely hidden in the UI — they are not sent.
+			const sessionId = await createTask(
+				strictDelegation
+					? { projectId, brief: prompt, roleId: role }
+					: {
+							projectId,
+							brief: prompt,
+							agent: agentTouched && agent ? (agent as CreateTaskInput["agent"]) : undefined,
+							model: requestedModel,
+					  },
+			);
 			onCreated(sessionId);
 		} catch (err) {
 			setError(err instanceof Error ? err.message : t("newTask.unableToStart"));
@@ -195,55 +241,83 @@ export function TaskComposer({
 				<p className="text-caption text-muted-foreground">{t("newTask.enterHint")}</p>
 			</div>
 
-			<div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
+			{configPending ? (
+				<p className="text-caption text-muted-foreground">{t("newTask.configLoading")}</p>
+			) : noDelegatableRole ? (
+				<p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
+					{t("newTask.noWorkerRole")}
+				</p>
+			) : strictDelegation ? (
 				<div className="space-y-1.5">
-					<RequiredAgentField
-						id={agentId}
-						label={t("newTask.agent")}
-						placeholder={t("newTask.projectDefault")}
-						value={agent}
-						authorized={agentCatalog?.authorized}
-						installed={agentCatalog?.installed}
-						supported={agentCatalog?.supported}
-						disabled={agentsQuery.isFetching && agentCatalog === undefined}
-						onChange={(value) => {
-							setAgent(value);
-							setAgentTouched(true);
-							setModelTouched(false);
-						}}
+					<Label className="text-xs font-medium text-muted-foreground">{t("newTask.role")}</Label>
+					<SettingsOptionMenu
+						aria-label={t("newTask.role")}
+						value={role || "__none__"}
+						options={[
+							{ value: "__none__", label: t("newTask.rolePlaceholder") },
+							...roleOptions.map((id) => ({ value: id, label: id })),
+						]}
+						triggerClassName={newTaskSelectSurfaceClass}
+						onChange={(next) => setRole(next === "__none__" ? "" : next)}
 					/>
-					<button
-						type="button"
-						className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50"
-						disabled={refreshAgentsMutation.isPending}
-						onClick={() => refreshAgentsMutation.mutate()}
-					>
-						{refreshAgentsMutation.isPending ? t("newTask.refreshingAgents") : t("newTask.refreshAgents")}
-					</button>
+					{/* The binding is shown, never edited: it is what the daemon will
+					    launch, and an editable copy of it would be a target the map
+					    could reject. */}
+					<p className="text-caption text-muted-foreground">
+						{binding ? `${binding.harness}${binding.model ? ` · ${binding.model}` : ""}` : t("newTask.roleLocked")}
+					</p>
 				</div>
-				<div className="space-y-1.5">
-					<Label className="text-xs font-medium text-muted-foreground" htmlFor={modelId}>
-						{t("newTask.model")}
-					</Label>
-					<TaskModelPicker
-						id={modelId}
-						agentId={selectedAgent}
-						projectId={projectId ?? ""}
-						value={model}
-						mode={mode}
-						onModelChange={(value) => {
-							setModel(value);
-							setMode("");
-							setModelTouched(true);
-						}}
-						onModeChange={(value) => {
-							setMode(value);
-							setModel("");
-							setModelTouched(true);
-						}}
-					/>
+			) : (
+				<div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
+					<div className="space-y-1.5">
+						<RequiredAgentField
+							id={agentId}
+							label={t("newTask.agent")}
+							placeholder={t("newTask.projectDefault")}
+							value={agent}
+							authorized={agentCatalog?.authorized}
+							installed={agentCatalog?.installed}
+							supported={agentCatalog?.supported}
+							disabled={agentsQuery.isFetching && agentCatalog === undefined}
+							onChange={(value) => {
+								setAgent(value);
+								setAgentTouched(true);
+								setModelTouched(false);
+							}}
+						/>
+						<button
+							type="button"
+							className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50"
+							disabled={refreshAgentsMutation.isPending}
+							onClick={() => refreshAgentsMutation.mutate()}
+						>
+							{refreshAgentsMutation.isPending ? t("newTask.refreshingAgents") : t("newTask.refreshAgents")}
+						</button>
+					</div>
+					<div className="space-y-1.5">
+						<Label className="text-xs font-medium text-muted-foreground" htmlFor={modelId}>
+							{t("newTask.model")}
+						</Label>
+						<TaskModelPicker
+							id={modelId}
+							agentId={selectedAgent}
+							projectId={projectId ?? ""}
+							value={model}
+							mode={mode}
+							onModelChange={(value) => {
+								setModel(value);
+								setMode("");
+								setModelTouched(true);
+							}}
+							onModeChange={(value) => {
+								setMode(value);
+								setModel("");
+								setModelTouched(true);
+							}}
+						/>
+					</div>
 				</div>
-			</div>
+			)}
 
 			{error && (
 				<div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
@@ -265,7 +339,7 @@ export function TaskComposer({
 						{t("newTask.cancel")}
 					</Button>
 				)}
-				<Button type="submit" variant="footer-primary" disabled={isSubmitting || !projectId}>
+				<Button type="submit" variant="footer-primary" disabled={isSubmitting || !projectId || configPending || noDelegatableRole}>
 					{isSubmitting ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
 					{isSubmitting ? t("newTask.starting") : t("newTask.start")}
 				</Button>

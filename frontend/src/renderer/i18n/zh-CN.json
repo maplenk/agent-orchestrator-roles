@@ -1001,5 +1001,11 @@
 	"newTask.task": "Task",
 	"newTask.taskPlaceholder": "Describe the change, constraints, and expected verification.",
 	"newTask.model": "Model",
+	"newTask.role": "角色",
+	"newTask.rolePlaceholder": "选择角色",
+	"newTask.roleRequired": "委派前请选择角色。",
+	"newTask.roleLocked": "该项目按角色委派。角色已确定代理与模型，因此此处无法覆盖。",
+	"newTask.noWorkerRole": "该项目的角色映射未定义可委派工作代理的角色。",
+	"newTask.configLoading": "正在加载项目委派规则…",
 	"newTask.taskRequired": "Task is required."
 }

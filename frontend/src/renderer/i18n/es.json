@@ -1035,5 +1035,11 @@
 	"newTask.task": "Task",
 	"newTask.taskPlaceholder": "Describe the change, constraints, and expected verification.",
 	"newTask.model": "Model",
+	"newTask.role": "Rol",
+	"newTask.rolePlaceholder": "Elige un rol",
+	"newTask.roleRequired": "Elige un rol antes de delegar.",
+	"newTask.roleLocked": "Este proyecto delega por rol. El rol fija el agente y el modelo, así que ninguno puede anularse aquí.",
+	"newTask.noWorkerRole": "El mapa de roles de este proyecto no define ningún rol al que delegar un trabajador.",
+	"newTask.configLoading": "Cargando las reglas de delegación del proyecto…",
 	"newTask.taskRequired": "Task is required."
 }

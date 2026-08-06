@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -71,6 +72,9 @@ describe("TaskComposer", () => {
 		);
 
 		fireEvent.change(task(), { target: { value: "Do the thing" } });
+		// The composer will not submit until it knows whether the project's role
+		// map is strict, so the button is disabled for that first tick.
+		await waitFor(() => expect(screen.getByText("Start task").closest("button")).toBeEnabled());
 		fireEvent.click(screen.getByText("Start task"));
 
 		await waitFor(() => expect(onSubmittingChange).toHaveBeenLastCalledWith(true));
@@ -97,6 +101,7 @@ describe("TaskComposer", () => {
 		);
 
 		fireEvent.change(task(), { target: { value: "B" } });
+		await waitFor(() => expect(screen.getByText("Start task").closest("button")).toBeEnabled());
 		fireEvent.click(screen.getByText("Start task"));
 
 		await waitFor(() => expect(screen.getByText("nope")).toBeInTheDocument());
@@ -159,5 +164,143 @@ describe("TaskComposer", () => {
 				}),
 			),
 		);
+	});
+});
+
+// Strict delegation is the daemon's rule; these pin that the composer stops
+// offering shapes the role map would refuse, rather than discovering the
+// refusal after a person has typed a brief.
+describe("TaskComposer under a strict role map", () => {
+	const strictConfig = {
+		status: "ok",
+		project: {
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					strictDelegation: true,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: { harness: "claude-code", template: "o.md", permissions: { canSpawn: true, workspaceWrites: false } },
+						reviewer: { harness: "codex", template: "r.md", permissions: { canSpawn: false, workspaceWrites: false } },
+						implementor: { harness: "codex", model: "gpt-5.6", template: "i.md", permissions: { canSpawn: false, workspaceWrites: true } },
+					},
+				},
+			},
+		},
+	};
+
+	function mockProject(project: unknown) {
+		h.get.mockImplementation(async (path: string) => {
+			if (path.includes("/models")) {
+				return { data: { agent: "codex", selectionMode: "text", models: [], allowCustom: true, refreshRecommended: false } };
+			}
+			return { data: project };
+		});
+	}
+
+	function renderComposer() {
+		return render(
+			<Wrap>
+				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+			</Wrap>,
+		);
+	}
+
+	it("replaces the free-form agent field with the map's roles", async () => {
+		mockProject(strictConfig);
+		renderComposer();
+
+		await screen.findByRole("button", { name: "Role" });
+		// The harness picker is the free-form target: sending one alongside a
+		// role is HARNESS_OVERRIDE_FORBIDDEN, so it is not offered at all.
+		expect(screen.queryByTestId("agent-field")).not.toBeInTheDocument();
+	});
+
+	it("does not offer the orchestrator role as a delegation target", async () => {
+		mockProject(strictConfig);
+		renderComposer();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Role" }));
+		expect(screen.getByRole("menuitem", { name: "implementor" })).toBeInTheDocument();
+		expect(screen.getByRole("menuitem", { name: "reviewer" })).toBeInTheDocument();
+		// Delegation spawns a worker; a strict map binds the orchestrator role to
+		// KindOrchestrator only, so offering it would offer a refused target.
+		expect(screen.queryByRole("menuitem", { name: "orchestrator" })).not.toBeInTheDocument();
+	});
+
+	it("refuses to submit without a role instead of letting the daemon reject it", async () => {
+		mockProject(strictConfig);
+		renderComposer();
+
+		await screen.findByRole("button", { name: "Role" });
+		fireEvent.change(task(), { target: { value: "Do the thing" } });
+		fireEvent.click(screen.getByText("Start task"));
+
+		await waitFor(() => expect(screen.getByText("Choose a role before delegating.")).toBeInTheDocument());
+		expect(h.post).not.toHaveBeenCalled();
+	});
+
+	it("sends the role and NEITHER agent nor model", async () => {
+		mockProject(strictConfig);
+		h.post.mockResolvedValue({ data: { workerId: "sess-1" } });
+		renderComposer();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Role" }));
+		await userEvent.click(screen.getByRole("menuitem", { name: "implementor" }));
+		fireEvent.change(task(), { target: { value: "Do the thing" } });
+		fireEvent.click(screen.getByText("Start task"));
+
+		await waitFor(() => expect(h.post).toHaveBeenCalled());
+		const body = h.post.mock.calls[0][1].body;
+		expect(body.roleId).toBe("implementor");
+		// Absent, not empty: the daemon refuses a harness or model sent with a
+		// role under a strict map.
+		expect(body.agent).toBeUndefined();
+		expect(body.model).toBeUndefined();
+	});
+
+	it("shows the role's binding as a fact rather than an editable field", async () => {
+		mockProject(strictConfig);
+		renderComposer();
+
+		await userEvent.click(await screen.findByRole("button", { name: "Role" }));
+		await userEvent.click(screen.getByRole("menuitem", { name: "implementor" }));
+		expect(await screen.findByText("codex · gpt-5.6")).toBeInTheDocument();
+	});
+
+	it("blocks delegation when the map defines no worker role", async () => {
+		mockProject({
+			status: "ok",
+			project: {
+				config: {
+					roleMap: {
+						role_map_schema_version: 1,
+						strictDelegation: true,
+						roles: { orchestrator: { harness: "claude-code", template: "o.md", permissions: { canSpawn: true, workspaceWrites: false } } },
+					},
+				},
+			},
+		});
+		renderComposer();
+
+		expect(await screen.findByText(/defines no role a worker may be delegated to/)).toBeInTheDocument();
+		expect(screen.getByText("Start task").closest("button")).toBeDisabled();
+	});
+
+	it("leaves a non-strict project on the free-form path", async () => {
+		mockProject({
+			status: "ok",
+			project: { config: { roleMap: { role_map_schema_version: 1, roles: { implementor: { harness: "codex", template: "i.md", permissions: { canSpawn: false, workspaceWrites: true } } } } } },
+		});
+		h.post.mockResolvedValue({ data: { workerId: "sess-1" } });
+		renderComposer();
+
+		expect(await screen.findByTestId("agent-field")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Role" })).not.toBeInTheDocument();
+
+		fireEvent.change(task(), { target: { value: "Do the thing" } });
+		fireEvent.click(screen.getByText("Start task"));
+		await waitFor(() => expect(h.post).toHaveBeenCalled());
+		expect(h.post.mock.calls[0][1].body.roleId).toBeUndefined();
 	});
 });
