@@ -480,6 +480,14 @@ func (l *fakeLCM) MarkSpawned(_ context.Context, id domain.SessionID, metadata d
 	if metadata.DiffBaseRef != "" {
 		base.DiffBaseRef = metadata.DiffBaseRef
 	}
+	// The chat controller's resume handle and generation. This fake mirrors
+	// lifecycle.mergeMetadata by hand, which is exactly how it drifts: the real
+	// merge carries these two and the mirror did not, so a chat spawn stored no
+	// conversation id and a restart could not resume.
+	if metadata.ProviderConversationID != "" {
+		base.ProviderConversationID = metadata.ProviderConversationID
+	}
+	base.ControllerGeneration = metadata.ControllerGeneration
 	rec.Metadata = base
 	rec.FirstSignalAt = time.Now()
 	l.store.sessions[id] = rec

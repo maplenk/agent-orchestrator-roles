@@ -63,6 +63,17 @@ func TestProjectConversationRebindsAcrossOrchestratorReplacement(t *testing.T) {
 		t.Fatalf("create project conversation: %v", err)
 	}
 
+	// This fork allows ONE active orchestrator per project (migration 9004), so
+	// a replacement retires its predecessor first — which is what the product
+	// flow does. Upstream's version of this test creates the second one
+	// alongside the first, a state the index refuses.
+	// `first`, not `firstRecord`: CreateSession assigns the id, so the local
+	// seed copy has none and would update nothing.
+	first.IsTerminated = true
+	if err := s.UpdateSession(ctx, first); err != nil {
+		t.Fatalf("retire first orchestrator: %v", err)
+	}
+
 	secondRecord := sampleRecord("project-chat")
 	secondRecord.Kind = domain.KindOrchestrator
 	secondRecord.Mode = domain.SessionModeChat

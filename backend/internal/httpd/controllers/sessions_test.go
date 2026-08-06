@@ -450,7 +450,10 @@ func newSessionTestServerWithPreview(
 ) *httptest.Server {
 	t.Helper()
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	deps := httpd.APIDeps{Sessions: svc}
+	// The fork gates spawn on an operator credential; doRequest sends the
+	// matching token. Upstream's helper has no OperatorSpawn, so its new tests
+	// arrive at a 403 that says the gate works, not that the test is wrong.
+	deps := httpd.APIDeps{Sessions: svc, OperatorSpawn: allowOperatorSpawn{}}
 	if managed != nil {
 		deps.PreviewServer = managed
 		deps.SessionCapabilities = allowSessionCapability{}

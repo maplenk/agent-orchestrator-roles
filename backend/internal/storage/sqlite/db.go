@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -148,6 +150,23 @@ func migrate(db *sql.DB) error {
 	}
 	if err := repairRenumberedChatMigrationHistory(db); err != nil {
 		return fmt.Errorf("repair renumbered chat migration history: %w", err)
+	}
+	// Burned-profile columns are added BEFORE goose as well as after.
+	//
+	// A burned profile (#3475) records versions it never ran, so a column like
+	// sessions.is_pinned is missing while later migrations still create CDC
+	// triggers that reference it. SQLite accepts such a trigger and only fails
+	// when the next DDL forces a schema reparse — which upstream never reaches,
+	// because its own migrations are the last ones to run and reconcileSchema
+	// then adds the column. The fork's migrations run AFTER upstream's, so they
+	// land squarely in that window and fail on a statement that has nothing to
+	// do with the missing column.
+	//
+	// Adding the columns first closes the window. Only the ALTERs run here; the
+	// postAdd replays stay in reconcileSchema, which is after the migrations
+	// whose state they assume.
+	if err := addMissingRepairColumns(db); err != nil {
+		return err
 	}
 	// Builds can advance a database past a migration that is added or
 	// renumbered later (notably across fast-moving Nightly releases). Apply
@@ -352,6 +371,100 @@ END`,
 // repaired by hand or a previous startup) is left untouched. Failures surface
 // as a specific, actionable startup error instead of an opaque INTERNAL_ERROR
 // on the first session list.
+// addMissingRepairColumns adds a burned-profile column BEFORE goose runs, and
+// only when the migration that would add it is recorded as already applied.
+//
+// "Missing column" alone is not the condition. A database can legitimately be
+// missing a column that goose is about to add on this very pass (allow-missing
+// applies out-of-order history), and adding it first makes that migration fail
+// with "duplicate column". The burned case is the other one: the version is
+// recorded, so goose will SKIP the migration and the column never arrives.
+//
+// The version that adds each column is derived from the embedded migrations
+// rather than hand-listed, so the two cannot drift.
+func addMissingRepairColumns(db *sql.DB) error {
+	adders, err := columnAddingVersions()
+	if err != nil {
+		return err
+	}
+	for _, rc := range schemaRepairs {
+		var table int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, rc.table,
+		).Scan(&table); err != nil {
+			return fmt.Errorf("pre-migration schema check: inspect %s: %w", rc.table, err)
+		}
+		if table == 0 {
+			continue // fresh database: goose is about to create it
+		}
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, rc.table, rc.column,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("pre-migration schema check: inspect %s.%s: %w", rc.table, rc.column, err)
+		}
+		if count > 0 {
+			continue
+		}
+		version, ok := adders[rc.table+"."+rc.column]
+		if !ok {
+			continue // no embedded migration adds it; reconcileSchema still will
+		}
+		var applied int
+		if err := db.QueryRow(`
+SELECT COALESCE((
+    SELECT is_applied FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1
+), 0)`, version).Scan(&applied); err != nil {
+			return fmt.Errorf("pre-migration schema check: ledger for %s.%s: %w", rc.table, rc.column, err)
+		}
+		if applied == 0 {
+			continue // goose will apply it on this pass; adding it here would collide
+		}
+		if _, err := db.Exec(rc.addDDL); err != nil {
+			return fmt.Errorf("pre-migration schema repair: add %s.%s: %w", rc.table, rc.column, err)
+		}
+	}
+	return nil
+}
+
+var addColumnPattern = regexp.MustCompile(`(?is)ALTER\s+TABLE\s+([A-Za-z0-9_]+)\s+ADD\s+COLUMN\s+([A-Za-z0-9_]+)`)
+
+// columnAddingVersions maps "table.column" to the migration version that adds
+// it, read from the embedded SQL.
+func columnAddingVersions() (map[string]int64, error) {
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		return nil, fmt.Errorf("read migrations: %w", err)
+	}
+	out := map[string]int64{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		cut := strings.IndexByte(e.Name(), '_')
+		if cut <= 0 {
+			continue
+		}
+		version, err := strconv.ParseInt(e.Name()[:cut], 10, 64)
+		if err != nil {
+			continue
+		}
+		body, err := migrationsFS.ReadFile("migrations/" + e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read migration %s: %w", e.Name(), err)
+		}
+		for _, m := range addColumnPattern.FindAllStringSubmatch(string(body), -1) {
+			key := m[1] + "." + m[2]
+			// First (lowest) version wins: that is the one whose skip leaves
+			// the column missing.
+			if prev, ok := out[key]; !ok || version < prev {
+				out[key] = version
+			}
+		}
+	}
+	return out, nil
+}
+
 func reconcileSchema(db *sql.DB) error {
 	for _, rc := range schemaRepairs {
 		var count int

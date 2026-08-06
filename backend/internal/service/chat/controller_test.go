@@ -447,6 +447,18 @@ func TestFreshProjectControllerRecordsNativeContextBoundary(t *testing.T) {
 	}
 
 	const replacement = domain.SessionID("p1-2")
+	// Retire the predecessor first: this fork allows ONE active orchestrator
+	// per project (migration 9004), so a replacement that arrives alongside a
+	// live one is a state the index refuses — and the product's replacement
+	// flow retires before it spawns.
+	if prev, ok, err := st.GetSession(ctx, testSession); err != nil {
+		t.Fatalf("read seeded orchestrator: %v", err)
+	} else if ok {
+		prev.IsTerminated = true
+		if err := st.UpdateSession(ctx, prev); err != nil {
+			t.Fatalf("retire seeded orchestrator: %v", err)
+		}
+	}
 	if _, err := st.CreateSession(ctx, domain.SessionRecord{
 		ID: replacement, ProjectID: testProject, Kind: domain.KindOrchestrator,
 		Harness: domain.HarnessCodex, Mode: domain.SessionModeChat,
