@@ -148,9 +148,9 @@ sentinel wrapped as the manager wraps it. Fixed, rebuilt, data dir wiped, and
 
 ---
 
-## Open finding — NOT fixed, needs a decision
+## Finding — CLOSED at `84582db6`
 
-**The runtime reaper terminates a paused session whose runtime died.**
+**The runtime reaper terminated a paused session whose runtime died.**
 
 `observe/reaper.Tick` probes every non-terminated session and applies a dead
 observation, which terminates the row. It has no pause awareness, so after the
@@ -171,23 +171,72 @@ offer "Restart agent". In reality the row is terminated, and because
 `reconcileLive` deliberately skips writing a restore marker for paused
 sessions, it is terminated *without* one.
 
-Two coherent resolutions, and this needs a decision rather than a late patch:
+**Resolved (1): the lifecycle sink is now pause-aware**, in
+`ApplyRuntimeObservation` rather than `reaper.Tick` — the sink re-reads under
+the mutation fence, so a resume landing between the usage-finalize pass and the
+decision pass is handled instead of being decided from a stale snapshot. A
+confirmed-dead paused session keeps `IsTerminated=false` and its incident,
+records `ActivityExited`, releases tool-flight state, has usage finalized and
+containers reaped, and writes no restore marker.
 
-1. **Make the reaper pause-aware** — skip paused sessions, matching the
-   contract. Keeps the documented "active but dead" cell real.
-2. **Amend the contract** — accept that paused + dead becomes terminated, and
-   specify that the UI reads `terminated + pause != null` as the restart case.
+The orchestrator case is why it had to be (1): terminating a paused
+orchestrator releases migration 0057's partial-unique active slot, so a
+replacement could be spawned while the paused owner is still restartable — two
+claimants on one canonical worktree.
 
-(1) preserves the state model the 3A-2 UI was designed against; (2) is less
-code but makes "paused" and "terminated" overlap, which the three-control
-contract was written to avoid.
+### Re-run from clean state, both kinds paused (`84582db6`)
 
-## Not covered by this run
+```
+BEFORE   syncproj-1 orchestrator paused=inc-orch  activity=idle    terminated=0 launch=93733c3b
+         syncproj-2 worker       paused=inc-worker activity=exited terminated=0 launch=450b64df
+         (both runtimes killed while paused, daemon restarted)
 
-- Terminal-level (tmux/PTY) input fencing during a switch — only the API fence
-  was exercised here; the API fence and automatic-send fence are covered by
-  `sessionguard` tests, not by this run.
-- Post-stop crash recovery **mid-switch** using the original generation: the
-  switch sagas above all completed, so no post-stop residue existed to recover.
-  The paused-session skip of post-stop recovery *was* observed (§5).
-- Live structured limit detection — 3A-2b, deliberately unbuilt.
+AFTER    syncproj-1 orchestrator paused=inc-orch  activity=exited  terminated=0 launch=93733c3b
+         syncproj-2 worker       paused=inc-worker activity=exited terminated=0 launch=450b64df
+         markers=0  reap_queue=0  intents=0  tmux relaunched=0  boot ERRORs=0
+```
+
+Both stay **active** with the pin retained and the death **recorded**; the
+orchestrator keeps its ownership slot; nothing relaunched.
+
+## Post-stop recovery — original generation reaches target_ack, no dual launch
+
+A durable post-stop window was injected (pending pinned to generation
+`postop-gen-1`, `requested`/`pre_stop`/`post_stop` ledgered, source handle
+cleared) and the source runtime destroyed, then the daemon restarted.
+
+```
+ledger after boot:   requested / pre_stop / post_stop / target_ack   all gen=postop-gen-1
+session:             harness=codex  runtime_launch_id=postop-gen-1  pending=CLEARED  terminated=0
+distinct generations reaching target_ack: 1
+tmux sessions for the worker:             1
+boot ERRORs:                              0
+```
+
+Recovery completed **the original generation** rather than minting a new one,
+and exactly one runtime exists — no dual launch.
+
+## Final residues
+
+```
+reap_queue=0  replacement_intents=0  pending=0  paused=0  failed_phases=0
+preserved ~/.ao/dev/data/ao.db: md5 unchanged
+```
+
+## Still not covered — one blocker remains open
+
+**Terminal/tmux keystroke suppression during a held switch was NOT exercised
+live.** `AllowTerminalInput` is the gate (wired at `daemon.go` via
+`termMgr.SetInputGate`), and it resolves a terminal three ways — session id,
+live runtime handle, and `json_extract` on the pending pin's
+`sourceRuntimeHandleId`, which is the case that matters after the source is
+destroyed. But terminal input arrives over a **websocket**, not an HTTP route,
+so exercising it end-to-end needs a websocket client this run did not build.
+The gate has unit coverage; what is missing is a live keystroke against a
+daemon holding a real pending pin.
+
+This is the one remaining blocker on the complete gate. It should be closed
+before `roles/upstream-sync` merges back.
+
+Also unexercised, and deliberately so: live structured limit detection (3A-2b,
+unbuilt).
