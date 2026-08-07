@@ -77,6 +77,7 @@ frontend/test-results/
 frontend/daemon/
 # role templates staged into the frontend bundle dir (source of truth: /profiles)
 frontend/profiles/
+frontend/resources/acp-runtime/
 
 # Locally-added agent skills (not for the team), except curated project skills
 .agents/

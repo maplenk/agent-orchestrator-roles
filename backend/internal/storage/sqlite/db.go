@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/pressly/goose/v3"
@@ -130,6 +133,41 @@ func migrate(db *sql.DB) error {
 	if err := goose.SetDialect("sqlite3"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
+	// Two pre-goose ledger repairs, and the ORDER between them is load-bearing.
+	//
+	// This fork's own renumber, from 0053-0060 into the 9000 range, has to land
+	// in the ledger BEFORE goose looks at it — see migrate_fork_range.go.
+	// Running it after would mean goose had already re-applied migrations the
+	// database has, against tables that already carry their effects.
+	//
+	// It also has to run before upstream's chat repair, whose loop reads
+	// versions 52-65 and shifts each applied one by +14. That range overlaps
+	// the fork's abandoned 53-60. Upstream's guard (chat columns present) means
+	// no fork database reaches that loop today, but the guard is theirs to
+	// change; clearing 53-60 first means the overlap can never be read.
+	if err := repairForkMigrationVersions(db); err != nil {
+		return err
+	}
+	if err := repairRenumberedChatMigrationHistory(db); err != nil {
+		return fmt.Errorf("repair renumbered chat migration history: %w", err)
+	}
+	// Burned-profile columns are added BEFORE goose as well as after.
+	//
+	// A burned profile (#3475) records versions it never ran, so a column like
+	// sessions.is_pinned is missing while later migrations still create CDC
+	// triggers that reference it. SQLite accepts such a trigger and only fails
+	// when the next DDL forces a schema reparse — which upstream never reaches,
+	// because its own migrations are the last ones to run and reconcileSchema
+	// then adds the column. The fork's migrations run AFTER upstream's, so they
+	// land squarely in that window and fail on a statement that has nothing to
+	// do with the missing column.
+	//
+	// Adding the columns first closes the window. Only the ALTERs run here; the
+	// postAdd replays stay in reconcileSchema, which is after the migrations
+	// whose state they assume.
+	if err := addMissingRepairColumns(db); err != nil {
+		return err
+	}
 	// Builds can advance a database past a migration that is added or
 	// renumbered later (notably across fast-moving Nightly releases). Apply
 	// those embedded migrations instead of permanently wedging daemon startup
@@ -138,6 +176,93 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 	return reconcileSchema(db)
+}
+
+// repairRenumberedChatMigrationHistory preserves databases opened by this
+// feature branch before its Chat migrations moved from 0052-0065 to 0066-0079.
+// The files are byte-for-byte identical after the rename, so recording the new
+// numbers is safer than replaying their ALTER/CREATE statements over an already
+// upgraded schema. Version 0052 now belongs to model usage on main; if that
+// physical schema is absent, release the burned ledger entry so goose can apply
+// the real 0052 migration below.
+func repairRenumberedChatMigrationHistory(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var gooseTable, chatColumn, conversationsTable int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'goose_db_version'`,
+	).Scan(&gooseTable); err != nil {
+		return err
+	}
+	if gooseTable == 0 {
+		return tx.Commit()
+	}
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'session_mode'`,
+	).Scan(&chatColumn); err != nil {
+		return err
+	}
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversations'`,
+	).Scan(&conversationsTable); err != nil {
+		return err
+	}
+	if chatColumn == 0 || conversationsTable == 0 {
+		return tx.Commit()
+	}
+
+	legacyApplied := false
+	for oldVersion := int64(52); oldVersion <= 65; oldVersion++ {
+		var applied int
+		if err := tx.QueryRow(`
+SELECT COALESCE((
+    SELECT is_applied FROM goose_db_version
+    WHERE version_id = ? ORDER BY id DESC LIMIT 1
+), 0)`, oldVersion).Scan(&applied); err != nil {
+			return err
+		}
+		if applied == 0 {
+			continue
+		}
+		legacyApplied = true
+		newVersion := oldVersion + 14
+		var alreadyMapped int
+		if err := tx.QueryRow(`
+SELECT COALESCE((
+    SELECT is_applied FROM goose_db_version
+    WHERE version_id = ? ORDER BY id DESC LIMIT 1
+), 0)`, newVersion).Scan(&alreadyMapped); err != nil {
+			return err
+		}
+		if alreadyMapped == 0 {
+			if _, err := tx.Exec(
+				`INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`,
+				newVersion,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if !legacyApplied {
+		return tx.Commit()
+	}
+
+	var modelUsageTable int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'model_usage_events'`,
+	).Scan(&modelUsageTable); err != nil {
+		return err
+	}
+	if modelUsageTable == 0 {
+		if _, err := tx.Exec(`DELETE FROM goose_db_version WHERE version_id = 52`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // schemaRepairs lists the column-level effects of migrations that real
@@ -228,6 +353,16 @@ BEGIN
         NEW.updated_at);
 END`,
 		}},
+	// A pre-renumbered chat-mode branch created conversations before the
+	// current_session_id controller binding existed, then later builds recorded
+	// 0052 as applied. Generated chat queries require the column on startup.
+	{table: "conversations", column: "current_session_id",
+		addDDL: `ALTER TABLE conversations ADD COLUMN current_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL`,
+		postAdd: []string{
+			`UPDATE conversations SET current_session_id = session_id WHERE current_session_id IS NULL AND session_id IS NOT NULL`,
+			`CREATE INDEX IF NOT EXISTS idx_conversations_current_session ON conversations(current_session_id)
+    WHERE current_session_id IS NOT NULL`,
+		}},
 }
 
 // reconcileSchema verifies that the columns in schemaRepairs physically exist
@@ -236,6 +371,100 @@ END`,
 // repaired by hand or a previous startup) is left untouched. Failures surface
 // as a specific, actionable startup error instead of an opaque INTERNAL_ERROR
 // on the first session list.
+// addMissingRepairColumns adds a burned-profile column BEFORE goose runs, and
+// only when the migration that would add it is recorded as already applied.
+//
+// "Missing column" alone is not the condition. A database can legitimately be
+// missing a column that goose is about to add on this very pass (allow-missing
+// applies out-of-order history), and adding it first makes that migration fail
+// with "duplicate column". The burned case is the other one: the version is
+// recorded, so goose will SKIP the migration and the column never arrives.
+//
+// The version that adds each column is derived from the embedded migrations
+// rather than hand-listed, so the two cannot drift.
+func addMissingRepairColumns(db *sql.DB) error {
+	adders, err := columnAddingVersions()
+	if err != nil {
+		return err
+	}
+	for _, rc := range schemaRepairs {
+		var table int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, rc.table,
+		).Scan(&table); err != nil {
+			return fmt.Errorf("pre-migration schema check: inspect %s: %w", rc.table, err)
+		}
+		if table == 0 {
+			continue // fresh database: goose is about to create it
+		}
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, rc.table, rc.column,
+		).Scan(&count); err != nil {
+			return fmt.Errorf("pre-migration schema check: inspect %s.%s: %w", rc.table, rc.column, err)
+		}
+		if count > 0 {
+			continue
+		}
+		version, ok := adders[rc.table+"."+rc.column]
+		if !ok {
+			continue // no embedded migration adds it; reconcileSchema still will
+		}
+		var applied int
+		if err := db.QueryRow(`
+SELECT COALESCE((
+    SELECT is_applied FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1
+), 0)`, version).Scan(&applied); err != nil {
+			return fmt.Errorf("pre-migration schema check: ledger for %s.%s: %w", rc.table, rc.column, err)
+		}
+		if applied == 0 {
+			continue // goose will apply it on this pass; adding it here would collide
+		}
+		if _, err := db.Exec(rc.addDDL); err != nil {
+			return fmt.Errorf("pre-migration schema repair: add %s.%s: %w", rc.table, rc.column, err)
+		}
+	}
+	return nil
+}
+
+var addColumnPattern = regexp.MustCompile(`(?is)ALTER\s+TABLE\s+([A-Za-z0-9_]+)\s+ADD\s+COLUMN\s+([A-Za-z0-9_]+)`)
+
+// columnAddingVersions maps "table.column" to the migration version that adds
+// it, read from the embedded SQL.
+func columnAddingVersions() (map[string]int64, error) {
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		return nil, fmt.Errorf("read migrations: %w", err)
+	}
+	out := map[string]int64{}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		cut := strings.IndexByte(e.Name(), '_')
+		if cut <= 0 {
+			continue
+		}
+		version, err := strconv.ParseInt(e.Name()[:cut], 10, 64)
+		if err != nil {
+			continue
+		}
+		body, err := migrationsFS.ReadFile("migrations/" + e.Name())
+		if err != nil {
+			return nil, fmt.Errorf("read migration %s: %w", e.Name(), err)
+		}
+		for _, m := range addColumnPattern.FindAllStringSubmatch(string(body), -1) {
+			key := m[1] + "." + m[2]
+			// First (lowest) version wins: that is the one whose skip leaves
+			// the column missing.
+			if prev, ok := out[key]; !ok || version < prev {
+				out[key] = version
+			}
+		}
+	}
+	return out, nil
+}
+
 func reconcileSchema(db *sql.DB) error {
 	for _, rc := range schemaRepairs {
 		var count int
@@ -258,6 +487,60 @@ func reconcileSchema(db *sql.DB) error {
 				return fmt.Errorf("schema repair: replay skipped migration effects for %s.%s: %w", rc.table, rc.column, err)
 			}
 		}
+	}
+	if err := reconcileHarnessConstraint(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+const (
+	sessionsHarnessCheckWithoutMuse   = `CHECK (harness IN ('', 'claude-code', 'codex', 'aider', 'opencode', 'grok', 'droid', 'amp', 'agy', 'crush', 'cursor', 'qwen', 'copilot', 'goose', 'auggie', 'continue', 'devin', 'cline', 'kimi', 'kiro', 'kilocode', 'vibe', 'pi', 'autohand', 'fake'))`
+	sessionsHarnessCheckWithMuse      = `CHECK (harness IN ('', 'claude-code', 'codex', 'aider', 'opencode', 'grok', 'droid', 'amp', 'agy', 'crush', 'cursor', 'qwen', 'copilot', 'goose', 'auggie', 'continue', 'devin', 'cline', 'kimi', 'muse', 'kiro', 'kilocode', 'vibe', 'pi', 'autohand', 'fake'))`
+	sessionsHarnessCheckWithoutMuseQM = `CHECK (harness IN ('', 'claude-code', 'codex', 'aider', 'opencode', 'grok', 'droid', 'amp', 'agy', 'crush', 'cursor', 'qwen', 'copilot', 'goose', 'auggie', 'continue', 'devin', 'cline', 'kimi', 'kiro', 'kilocode', 'vibe', 'pi', 'autohand', 'qm', 'fake'))`
+	sessionsHarnessCheckWithMuseQM    = `CHECK (harness IN ('', 'claude-code', 'codex', 'aider', 'opencode', 'grok', 'droid', 'amp', 'agy', 'crush', 'cursor', 'qwen', 'copilot', 'goose', 'auggie', 'continue', 'devin', 'cline', 'kimi', 'muse', 'kiro', 'kilocode', 'vibe', 'pi', 'autohand', 'qm', 'fake'))`
+)
+
+func reconcileHarnessConstraint(db *sql.DB) error {
+	var schema string
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'`,
+	).Scan(&schema); err != nil {
+		return fmt.Errorf("schema verification: inspect sessions harness constraint: %w", err)
+	}
+	if strings.Contains(schema, "'muse'") {
+		return nil
+	}
+	if _, err := db.Exec(`PRAGMA writable_schema = ON`); err != nil {
+		return fmt.Errorf("schema repair: enable writable_schema for sessions harness constraint: %w", err)
+	}
+	for _, replacement := range []struct {
+		old string
+		new string
+	}{
+		{sessionsHarnessCheckWithoutMuse, sessionsHarnessCheckWithMuse},
+		{sessionsHarnessCheckWithoutMuseQM, sessionsHarnessCheckWithMuseQM},
+	} {
+		if _, err := db.Exec(
+			`UPDATE sqlite_master
+SET sql = replace(sql, ?, ?)
+WHERE type = 'table' AND name = 'sessions'`,
+			replacement.old,
+			replacement.new,
+		); err != nil {
+			return fmt.Errorf("schema repair: widen sessions harness constraint for Muse: %w", err)
+		}
+	}
+	if _, err := db.Exec(`PRAGMA writable_schema = RESET`); err != nil {
+		return fmt.Errorf("schema repair: reparse sessions harness constraint: %w", err)
+	}
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sessions'`,
+	).Scan(&schema); err != nil {
+		return fmt.Errorf("schema verification: inspect repaired sessions harness constraint: %w", err)
+	}
+	if !strings.Contains(schema, "'muse'") {
+		return fmt.Errorf("schema repair: sessions harness constraint is missing Muse and did not match known pre-Muse schema")
 	}
 	return nil
 }

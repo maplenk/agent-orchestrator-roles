@@ -617,6 +617,88 @@ func TestCreateDestroysAndReturnsErrorWhenNotAlive(t *testing.T) {
 	}
 }
 
+// The whole composed launch command travels to the tmux server as ONE
+// shell-quoted word of the new-session argv, and tmux drops a client message
+// larger than MAX_IMSGSIZE with a bare exit 1 and no session. Create must
+// measure before spending that call, and must not refuse an ordinary spawn —
+// a preflight that rejects everything is indistinguishable from one that works.
+// A role-pinned spawn is what reaches this size: the harness inlines the
+// composed system prompt into argv, and role templates are the bulk of it.
+func TestCreatePreflightsLaunchCommandSize(t *testing.T) {
+	t.Run("oversized refuses before tmux is invoked", func(t *testing.T) {
+		r, fr := newTestRuntime(0)
+
+		_, err := r.Create(context.Background(), ports.RuntimeConfig{
+			SessionID:     "sess-1",
+			WorkspacePath: "/tmp/ws",
+			Argv:          []string{"codex", "-c", "developer_instructions=" + strings.Repeat("x", tmuxMaxCommandBytes)},
+		})
+		if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+			t.Fatalf("Create err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong", err)
+		}
+		// The budget belongs in the message: without it nobody can tell how much
+		// prompt to cut.
+		if !strings.Contains(err.Error(), strconv.Itoa(tmuxMaxCommandBytes-launchCommandArgvAllowance)) {
+			t.Fatalf("Create err = %v, want the allowed size named", err)
+		}
+		if len(fr.calls) != 0 {
+			t.Fatalf("tmux was invoked %d times; the preflight must refuse before any tmux call", len(fr.calls))
+		}
+	})
+
+	t.Run("ordinary launch command still reaches tmux", func(t *testing.T) {
+		r, fr := newTestRuntime(0)
+		fr.outputs = [][]byte{nil, []byte("/tmp/ws\n"), nil, nil, nil, nil}
+
+		if _, err := r.Create(context.Background(), ports.RuntimeConfig{
+			SessionID:     "sess-1",
+			WorkspacePath: "/tmp/ws",
+			Argv:          []string{"codex", "-c", "developer_instructions=" + strings.Repeat("x", 4096)},
+		}); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+		if countCalls(fr, "new-session") != 1 {
+			t.Fatalf("new-session calls = %d, want 1", countCalls(fr, "new-session"))
+		}
+	})
+}
+
+// checkLaunchCommandSize is an off-by-one hazard: refusing a command that fits
+// costs a spawn that would have worked, so pin both sides of the budget.
+func TestCheckLaunchCommandSizeBoundary(t *testing.T) {
+	allowed := tmuxMaxCommandBytes - launchCommandArgvAllowance
+	if err := checkLaunchCommandSize(strings.Repeat("x", allowed)); err != nil {
+		t.Fatalf("a launch command exactly at the budget was refused: %v", err)
+	}
+	err := checkLaunchCommandSize(strings.Repeat("x", allowed+1))
+	if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong one byte over the budget", err)
+	}
+}
+
+// The preflight is a bound, not a guarantee: tmux versions differ in where they
+// enforce the cap and what they print, so a tmux that refuses a command the
+// preflight let through must still yield the typed sentinel instead of an
+// opaque runtime fault that collapses to a 500. The argv here is small on
+// purpose, so only the stderr classification can produce the sentinel.
+func TestCreateClassifiesTmuxCommandTooLong(t *testing.T) {
+	r, _ := newTestRuntime(0)
+	fr := &fakeRunnerSelectiveErr{
+		exitErrOn: "new-session",
+		errOutput: []byte("command too long"),
+	}
+	r.runner = fr
+
+	_, err := r.Create(context.Background(), ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"myagent"},
+	})
+	if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("Create err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong", err)
+	}
+}
+
 // fakeRunnerSelectiveErr returns an exec.ExitError (carrying errOutput) for the
 // call whose tmux subcommand is exitErrOn, and succeeds for every other call.
 // Matching on the subcommand rather than a call index is deliberate: Create's

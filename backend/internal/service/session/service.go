@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -61,6 +63,16 @@ type commander interface {
 	Send(ctx context.Context, id domain.SessionID, message string) error
 	Cleanup(ctx context.Context, project domain.ProjectID) (sessionmanager.CleanupResult, error)
 	RollbackSpawn(ctx context.Context, id domain.SessionID) (deleted, killed bool, err error)
+	StageAttachments(ctx context.Context, id domain.SessionID, attachments []ports.SpawnAttachment) ([]string, error)
+}
+
+// interfaceTransitionCommander is an optional command capability. Keeping it
+// separate avoids widening every focused session-service fake while production
+// can expose the feature through the concrete Session Manager.
+type interfaceTransitionCommander interface {
+	InterfaceTransitionStatus(context.Context, domain.SessionID) (sessionmanager.InterfaceTransitionStatus, error)
+	StartInterfaceTransition(context.Context, domain.SessionID, domain.SessionMode, domain.SessionInterfaceTransitionPolicy) (domain.SessionInterfaceTransition, error)
+	CancelInterfaceTransition(context.Context, domain.SessionID) error
 }
 
 // RollbackOutcome reports what happened in a rollback: either the seed row was
@@ -106,6 +118,16 @@ type RestoreOutcome struct {
 type ResumeAgentOutcome struct {
 	Session domain.Session  `json:"session"`
 	Mode    RestoreModeView `json:"resumeMode"`
+}
+
+// InterfaceTransitionStatus describes whether this session can cross between
+// its TUI and Chat controllers and includes the latest durable handoff attempt.
+type InterfaceTransitionStatus struct {
+	Supported  bool
+	TargetMode domain.SessionMode
+	ReasonCode string
+	Reason     string
+	Transition *domain.SessionInterfaceTransition
 }
 
 type scmProvider interface {
@@ -324,10 +346,35 @@ func (s *Service) emitSpawnFailed(cfg ports.SpawnConfig, err error, durationMs i
 // one is the only live coordinator. When clean is false it is idempotent: if an
 // active orchestrator already exists it is returned as-is. A business rule that
 // belongs here, not in the HTTP controller.
-func (s *Service) SpawnOrchestrator(ctx context.Context, projectID domain.ProjectID, clean bool) (domain.Session, error) {
+// SpawnOrchestrator ensures the project's single orchestrator.
+//
+// Upstream's version of this function lists active orchestrators here, picks
+// the newest, retires the rest and verifies the replacement — a SECOND
+// ownership resolver beside the manager's. That is the exact defect 2B-0a
+// removed: two resolvers disagree eventually, and the one-active-orchestrator
+// index (migration 9004) then rejects the loser after the work is done. So the
+// fork keeps delegating to the gated manager path and only threads the new
+// mode through it.
+func (s *Service) SpawnOrchestrator(
+	ctx context.Context,
+	projectID domain.ProjectID,
+	clean bool,
+	requestedMode domain.SessionMode,
+) (domain.Session, error) {
+	mode := requestedMode
+	if clean && mode == "" {
+		// A clean replacement inherits the retiring orchestrator's interface
+		// unless the caller chose one. The global default must not silently
+		// flip a project's coordinator from under it. Read through the
+		// manager's owner, never a second listing.
+		if current, ok, err := s.manager.ProjectOrchestrator(ctx, projectID); err == nil && ok {
+			mode = current.Mode
+		}
+	}
 	out, err := s.ensureOrchestrator(ctx, ports.SpawnConfig{
-		ProjectID: projectID,
-		Kind:      domain.KindOrchestrator,
+		ProjectID:     projectID,
+		Kind:          domain.KindOrchestrator,
+		RequestedMode: mode,
 	}, clean)
 	return out.session, err
 }
@@ -442,6 +489,60 @@ func (s *Service) ResumeAgent(ctx context.Context, id domain.SessionID) (ResumeA
 		return ResumeAgentOutcome{}, err
 	}
 	return ResumeAgentOutcome{Session: session, Mode: restoreModeView(res.Mode)}, nil
+}
+
+// InterfaceTransitionStatus returns capability and progress without launching
+// a provider process or mutating the session.
+func (s *Service) InterfaceTransitionStatus(ctx context.Context, id domain.SessionID) (InterfaceTransitionStatus, error) {
+	manager, ok := s.manager.(interfaceTransitionCommander)
+	if !ok {
+		return InterfaceTransitionStatus{}, apierr.Conflict(
+			"INTERFACE_HANDOFF_UNSUPPORTED", "This build cannot switch session interfaces", nil)
+	}
+	status, err := manager.InterfaceTransitionStatus(ctx, id)
+	if err != nil {
+		return InterfaceTransitionStatus{}, toAPIError(err)
+	}
+	return InterfaceTransitionStatus{
+		Supported: status.Supported, TargetMode: status.TargetMode,
+		ReasonCode: status.ReasonCode, Reason: status.Reason,
+		Transition: status.Transition,
+	}, nil
+}
+
+// StartInterfaceTransition begins a durable, asynchronous controller handoff.
+func (s *Service) StartInterfaceTransition(
+	ctx context.Context,
+	id domain.SessionID,
+	target domain.SessionMode,
+	policy domain.SessionInterfaceTransitionPolicy,
+) (domain.SessionInterfaceTransition, error) {
+	if !target.Valid() {
+		return domain.SessionInterfaceTransition{}, apierr.Invalid(
+			"INVALID_SESSION_MODE", "Target mode must be chat or tui", nil)
+	}
+	if !policy.Valid() {
+		return domain.SessionInterfaceTransition{}, apierr.Invalid(
+			"INVALID_TRANSITION_POLICY", "Policy must be drain or interrupt", nil)
+	}
+	manager, ok := s.manager.(interfaceTransitionCommander)
+	if !ok {
+		return domain.SessionInterfaceTransition{}, apierr.Conflict(
+			"INTERFACE_HANDOFF_UNSUPPORTED", "This build cannot switch session interfaces", nil)
+	}
+	transition, err := manager.StartInterfaceTransition(ctx, id, target, policy)
+	return transition, toAPIError(err)
+}
+
+// CancelInterfaceTransition cancels a handoff while its source controller is
+// still safe to reopen.
+func (s *Service) CancelInterfaceTransition(ctx context.Context, id domain.SessionID) error {
+	manager, ok := s.manager.(interfaceTransitionCommander)
+	if !ok {
+		return apierr.Conflict(
+			"INTERFACE_HANDOFF_UNSUPPORTED", "This build cannot switch session interfaces", nil)
+	}
+	return toAPIError(manager.CancelInterfaceTransition(ctx, id))
 }
 
 func restoreModeView(mode sessionmanager.RestoreMode) RestoreModeView {
@@ -692,6 +793,34 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrResumeInProgress):
 		return apierr.Conflict("AGENT_RESUME_IN_PROGRESS",
 			"The agent is already being resumed", nil)
+	case errors.Is(err, sessionmanager.ErrInterfaceTransitionInProgress):
+		return apierr.Conflict("INTERFACE_TRANSITION_IN_PROGRESS",
+			"This session is already switching interfaces", nil)
+	case errors.Is(err, sessionmanager.ErrInterfaceHandoffUnsupported):
+		return apierr.Conflict("INTERFACE_HANDOFF_UNSUPPORTED", err.Error(), nil)
+	case errors.Is(err, sessionmanager.ErrNativeConversationMissing):
+		return apierr.Conflict("NATIVE_SESSION_MISSING",
+			"The agent has not exposed a native conversation that can resume in the other interface", nil)
+	case errors.Is(err, sessionmanager.ErrInterfaceTransitionNotCancellable):
+		return apierr.Conflict("INTERFACE_TRANSITION_NOT_CANCELLABLE",
+			"The source controller has already stopped; AO must finish or recover the switch", nil)
+	case errors.Is(err, sessionmanager.ErrInterfaceAlreadySelected):
+		return apierr.Conflict("INTERFACE_ALREADY_SELECTED",
+			"The session is already using the requested interface", nil)
+	case errors.Is(err, sessionmanager.ErrInterfaceTransitionNotFound):
+		return apierr.NotFound("INTERFACE_TRANSITION_NOT_FOUND", "No active interface switch exists")
+	case errors.Is(err, sessionmanager.ErrPromptNotReady):
+		// Deliberately not AWAITING_DECISION's "answer it in the session
+		// terminal first": there is no terminal left to answer in. Spawn tears
+		// the runtime and workspace down on this error and relaunch parks or
+		// terminates the session, so the honest answer names what happened to
+		// the task, what happened to the session, and what has to change before
+		// a retry is any different.
+		return apierr.Conflict("PROMPT_NOT_READY",
+			"The agent never reached its own input prompt, so the task was not sent and the "+
+				"launch was stopped. Nothing was typed into the agent. Resolve what the agent "+
+				"is waiting on — most often a trust or approval screen for this workspace — "+
+				"then start the session again", nil)
 	case errors.Is(err, sessionmanager.ErrAwaitingDecision):
 		return apierr.Conflict("SESSION_AWAITING_DECISION",
 			"Session is paused on a permission decision; answer it in the session terminal first", nil)
@@ -701,6 +830,9 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchNotSupported):
 		return apierr.Conflict("SWITCH_NOT_SUPPORTED",
 			"Harness does not support switching (switch_supported=false for this source or target)", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchChatUnsupported):
+		return apierr.Conflict("SWITCH_CHAT_UNSUPPORTED",
+			"Switching harness is not supported for chat sessions yet; move the session to terminal mode first", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)
@@ -736,6 +868,12 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrHarnessOverrideForbidden):
 		return apierr.Invalid("HARNESS_OVERRIDE_FORBIDDEN",
 			"The role map decides the harness for a role-pinned session; remove the harness override", nil)
+	case errors.Is(err, sessionmanager.ErrChatModeReadOnlyUnsupported):
+		// The composer treats this as a Chat-preflight code and offers the TUI
+		// fallback, which keeps the role.
+		return apierr.Invalid("SESSION_MODE_ROLE_FORBIDDEN",
+			"This role may not write to the workspace, and chat mode cannot enforce that. "+
+				"Start the session in terminal mode instead.", nil)
 	case errors.Is(err, sessionmanager.ErrModelOverrideForbidden):
 		return apierr.Invalid("MODEL_OVERRIDE_FORBIDDEN",
 			"The role map decides the model for a role-pinned session; remove the model override", nil)
@@ -768,6 +906,24 @@ func toAPIError(err error) error {
 		return apierr.Conflict("RUNTIME_SESSION_CONFLICT",
 			"Another AO instance already owns this session's terminal. Stop the other instance, "+
 				"or run this one with its own AO_DATA_DIR so it gets an isolated terminal server", nil)
+	case errors.Is(err, chatsvc.ErrNoController):
+		// The sentinel and this answer both existed already — the conversation
+		// routes have returned it all along — but /sessions/{id}/send reached
+		// toAPIError, which had no case, so the same fact arrived as a 500 on
+		// one route and an actionable 409 on the other. Message copied verbatim
+		// from writeConversationError so the two read identically.
+		return apierr.Conflict("CHAT_CONTROLLER_NOT_READY",
+			"the agent controller for this session is not running", nil)
+	// Also a size the caller controls, not a fault. AO bounds the task prompt
+	// but not the composed system prompt, and a harness that delivers its prompt
+	// in argv puts both into the terminal launch command — so a role-pinned
+	// spawn, whose role template is the bulk of that system prompt, is what
+	// pushes it past the terminal runtime's limit. Naming the two inputs is the
+	// remedy; INTERNAL_ERROR named nothing.
+	case errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong):
+		return apierr.Invalid("LAUNCH_COMMAND_TOO_LONG",
+			"The role's system prompt plus the task prompt are too large for the terminal runtime to launch. "+
+				"Shorten the task prompt, or trim the role's system prompt template", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):
@@ -791,6 +947,14 @@ func toAPIError(err error) error {
 		return apierr.Invalid("AGENT_BINARY_NOT_FOUND", err.Error(), nil)
 	case errors.Is(err, ports.ErrRuntimePrerequisite):
 		return apierr.Invalid("RUNTIME_PREREQUISITE_MISSING", err.Error(), nil)
+	case errors.Is(err, ports.ErrChatUnsupported):
+		return apierr.Conflict("SESSION_MODE_UNSUPPORTED", err.Error(), nil)
+	case errors.Is(err, ports.ErrChatDriverUnavailable):
+		return apierr.Conflict("CHAT_DRIVER_UNAVAILABLE", err.Error(), nil)
+	case errors.Is(err, ports.ErrChatDriverIncompatible):
+		return apierr.Conflict("CHAT_DRIVER_INCOMPATIBLE", err.Error(), nil)
+	case errors.Is(err, ports.ErrChatAuthRequired):
+		return apierr.Conflict("CHAT_AUTH_REQUIRED", "The agent is installed but not authenticated", nil)
 	case errors.Is(err, ports.ErrRuntimeWorkspaceCwdMismatch):
 		return apierr.Conflict("WORKSPACE_CWD_MISMATCH", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceLocked):

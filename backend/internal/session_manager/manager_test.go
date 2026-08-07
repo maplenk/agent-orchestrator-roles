@@ -480,9 +480,40 @@ func (l *fakeLCM) MarkSpawned(_ context.Context, id domain.SessionID, metadata d
 	if metadata.DiffBaseRef != "" {
 		base.DiffBaseRef = metadata.DiffBaseRef
 	}
+	// The chat controller's resume handle and generation. This fake mirrors
+	// lifecycle.mergeMetadata by hand, which is exactly how it drifts: the real
+	// merge carries these two and the mirror did not, so a chat spawn stored no
+	// conversation id and a restart could not resume.
+	if metadata.ProviderConversationID != "" {
+		base.ProviderConversationID = metadata.ProviderConversationID
+	}
+	base.ControllerGeneration = metadata.ControllerGeneration
 	rec.Metadata = base
+	rec.FirstSignalAt = time.Now()
 	l.store.sessions[id] = rec
 	return nil
+}
+
+func (l *fakeLCM) CommitControllerEpoch(
+	_ context.Context,
+	id domain.SessionID,
+	source, target domain.SessionMode,
+	nativeConversationID string,
+	_ bool,
+) (bool, error) {
+	rec, ok := l.store.sessions[id]
+	if !ok || rec.IsTerminated || domain.NormalizeSessionMode(rec.Mode) != source {
+		return false, nil
+	}
+	rec.Mode = target
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	rec.Metadata.AgentSessionID = nativeConversationID
+	rec.Metadata.ProviderConversationID = nativeConversationID
+	rec.Metadata.ControllerGeneration = ""
+	rec.Activity = domain.Activity{State: domain.ActivityIdle, LastActivityAt: time.Now()}
+	l.store.sessions[id] = rec
+	return true, nil
 }
 func (l *fakeLCM) MarkTerminated(_ context.Context, id domain.SessionID) error {
 	if l.terminated == nil {
@@ -1568,13 +1599,13 @@ func TestSpawn_ReturnsFinalPromptByteMetrics(t *testing.T) {
 func TestSpawn_DeliversPromptAfterStartWhenAgentRequestsIt(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{}
 	agent := &recordingAgent{}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -1631,7 +1662,10 @@ func TestSpawn_AfterStartPromptWaitsForReadinessHint(t *testing.T) {
 	}
 }
 
-func TestSpawn_AfterStartPromptFallsBackWhenReadinessTimesOut(t *testing.T) {
+// An expired readiness wait used to paste anyway. It cannot: AO then knows only
+// that the pane is NOT a prompt it recognizes, and the runtime appends Enter to
+// every paste, so the brief answers whatever is on screen.
+func TestSpawn_AfterStartPromptRefusesWhenReadinessTimesOut(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	rt := &fakeRuntime{outputs: []string{"still booting"}}
@@ -1657,38 +1691,280 @@ func TestSpawn_AfterStartPromptFallsBackWhenReadinessTimesOut(t *testing.T) {
 		Logger:    slog.New(slog.NewTextHandler(&logBuf, nil)),
 	})
 
-	if _, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Prompt: "fix the button"}); err != nil {
-		t.Fatal(err)
+	_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Prompt: "fix the button"})
+	if err == nil {
+		t.Fatal("Spawn err = nil, want refusal after the readiness wait expired")
+	}
+	if !errors.Is(err, ErrPromptNotReady) {
+		t.Fatalf("Spawn err = %v, want ErrPromptNotReady", err)
+	}
+	// The 409 the API already answers for "a human has to act in the terminal".
+	if !errors.Is(err, ErrPromptNotReady) {
+		t.Fatalf("Spawn err = %v, want it to carry ErrPromptNotReady", err)
 	}
 	if rt.outputCalls == 0 {
 		t.Fatal("GetOutput was not called")
 	}
-	if len(msg.msgs) != 1 || msg.msgs[0] != "fix the button" {
-		t.Fatalf("delivered prompts = %#v, want fallback prompt delivery", msg.msgs)
+	if len(msg.msgs) != 0 {
+		t.Fatalf("delivered prompts = %#v, want none: readiness was never proven", msg.msgs)
 	}
 	logText := logBuf.String()
 	if !strings.Contains(logText, "prompt readiness timed out") {
 		t.Fatalf("log = %q, want readiness timeout warning", logText)
 	}
-	if !strings.Contains(logText, "falling back to after-start prompt delivery") {
-		t.Fatalf("log = %q, want fallback delivery context", logText)
+	if !strings.Contains(logText, "refusing after-start prompt delivery") {
+		t.Fatalf("log = %q, want refusal context", logText)
 	}
 	if !strings.Contains(logText, "sessionID=mer-1") {
 		t.Fatalf("log = %q, want session id", logText)
 	}
 }
 
+// Panes the after-start paste has to judge, one per affected adapter. The
+// patterns are the ones that adapter's PromptReadinessHints ships (or shipped,
+// where the incident is the reason it no longer does).
+func TestSpawn_AfterStartPromptRefusesApprovalScreens(t *testing.T) {
+	// Grok Build 1.0.0, captured live: the trust screen carries the product
+	// banner the adapter used to match on, so positive AND negative evidence
+	// are on the same pane. The brief's "n" chose "No, quit" three times.
+	const grokTrustPane = `
+                              Do you trust the contents of this directory?
+                                    /private/tmp/ao-pelican-pedal
+
+                        Grok Build may run or modify contents in this directory,
+                                         posing security risks.
+
+                                     Yes, proceed                 y
+                                     No, quit                     n
+
+                                                              Grok Build  1.0.0
+`
+	const grokReadyPane = `
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────── Grok 4.5 (high) · always-approve ───────────╯
+`
+
+	tests := []struct {
+		name          string
+		patterns      []string
+		pane          string
+		wantDelivered bool
+	}{
+		{
+			name:     "grok trust screen still matching the old banner pattern",
+			patterns: []string{"Grok Build"},
+			pane:     grokTrustPane,
+		},
+		{
+			name:     "grok trust screen against the shipped composer pattern",
+			patterns: []string{"❯"},
+			pane:     grokTrustPane,
+		},
+		{
+			name:          "grok composer",
+			patterns:      []string{"❯"},
+			pane:          grokReadyPane,
+			wantDelivered: true,
+		},
+		{
+			name:     "amp/cline approval dialog under the removed bare-prompt pattern",
+			patterns: []string{"Type a message", "What can I help", ">"},
+			pane: `Run the following command?
+
+  > rm -rf build
+
+  1. Yes, proceed
+  2. No, exit
+`,
+		},
+		{
+			name:          "amp/cline composer",
+			patterns:      []string{"Type a message", "What can I help"},
+			pane:          "Type a message to get started\n",
+			wantDelivered: true,
+		},
+		{
+			name:          "crush ready status",
+			patterns:      []string{"Ready..."},
+			pane:          "crush\n\nReady...\n",
+			wantDelivered: true,
+		},
+		{
+			name:          "kimi composer",
+			patterns:      []string{"│ >"},
+			pane:          "╭────────────╮\n│ >          │\n╰────────────╯\n",
+			wantDelivered: true,
+		},
+		{
+			name:          "kiro composer",
+			patterns:      []string{"ask a question or describe a task"},
+			pane:          "kiro-cli\n\nask a question or describe a task\n",
+			wantDelivered: true,
+		},
+		{
+			name:     "kiro trust prompt drawn over its own composer copy",
+			patterns: []string{"ask a question or describe a task"},
+			pane: `ask a question or describe a task
+
+Do you trust the files in this folder? [y/n]
+`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			rt := &fakeRuntime{outputs: []string{tt.pane}}
+			msg := &fakeMessenger{}
+			m := New(Deps{
+				Runtime: rt,
+				Agents: singleAgent{agent: readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}},
+					hints: ports.PromptReadinessHints{
+						Patterns:     tt.patterns,
+						PollInterval: time.Millisecond,
+						Timeout:      20 * time.Millisecond,
+						Lines:        80,
+					},
+				}},
+				Workspace: &fakeWorkspace{},
+				Store:     st,
+				Messenger: msg,
+				Lifecycle: &fakeLCM{store: st},
+				LookPath:  func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Prompt: "fix the button, not the n key"})
+			if tt.wantDelivered {
+				if err != nil {
+					t.Fatalf("Spawn err = %v, want the task delivered", err)
+				}
+				if len(msg.msgs) != 1 || msg.msgs[0] != "fix the button, not the n key" {
+					t.Fatalf("delivered prompts = %#v, want the task", msg.msgs)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Spawn err = nil, want refusal: the pane is an approval screen")
+			}
+			if !errors.Is(err, ErrPromptNotReady) {
+				t.Fatalf("Spawn err = %v, want ErrPromptNotReady", err)
+			}
+			if len(msg.msgs) != 0 {
+				t.Fatalf("delivered prompts = %#v, want none: pasting answers the dialog", msg.msgs)
+			}
+		})
+	}
+}
+
+// workloadRuntime reports whether the agent process is still running under the
+// pane, which tmux keeps alive (and hands to an interactive shell) after the
+// agent exits.
+type workloadRuntime struct {
+	*fakeRuntime
+	workloadAlive func(call int) (bool, error)
+	workloadCalls int
+	lastRef       ports.SupervisedProcessRef
+}
+
+func (r *workloadRuntime) IsSupervisedProcessAlive(_ context.Context, _ ports.RuntimeHandle, ref ports.SupervisedProcessRef) (bool, error) {
+	r.workloadCalls++
+	r.lastRef = ref
+	return r.workloadAlive(r.workloadCalls)
+}
+
+// Readiness proves what the pane showed, not that anything is still behind it.
+// Grok exited on "No, quit" while AO was still polling, and the pane it left
+// behind was an interactive shell that would have run the brief as commands.
+func TestSpawn_AfterStartPromptRefusesWhenWorkloadDiedDuringWait(t *testing.T) {
+	tests := []struct {
+		name          string
+		workloadAlive func(call int) (bool, error)
+		wantDelivered bool
+		wantErr       error
+	}{
+		{
+			name:          "agent still running",
+			workloadAlive: func(int) (bool, error) { return true, nil },
+			wantDelivered: true,
+		},
+		{
+			name:          "agent exited during the readiness wait",
+			workloadAlive: func(int) (bool, error) { return false, nil },
+			wantErr:       ErrAgentExited,
+		},
+		{
+			// The launch shell forks the agent, so one process-table snapshot
+			// can be taken before the child exists. Only a second look refuses.
+			name:          "agent not forked yet on the first probe",
+			workloadAlive: func(call int) (bool, error) { return call > 1, nil },
+			wantDelivered: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			rt := &workloadRuntime{fakeRuntime: &fakeRuntime{outputs: []string{"agent Ready..."}}, workloadAlive: tt.workloadAlive}
+			msg := &fakeMessenger{}
+			m := New(Deps{
+				Runtime: rt,
+				Agents: singleAgent{agent: readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: &recordingAgent{}},
+					hints: ports.PromptReadinessHints{
+						Patterns:     []string{"Ready..."},
+						PollInterval: time.Millisecond,
+						Timeout:      20 * time.Millisecond,
+					},
+				}},
+				Workspace: &fakeWorkspace{},
+				Store:     st,
+				Messenger: msg,
+				Lifecycle: &fakeLCM{store: st},
+				LookPath:  func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			_, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindWorker, Prompt: "fix the button"})
+			if tt.wantDelivered {
+				if err != nil {
+					t.Fatalf("Spawn err = %v, want the task delivered", err)
+				}
+				if len(msg.msgs) != 1 {
+					t.Fatalf("delivered prompts = %#v, want the task", msg.msgs)
+				}
+			} else {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Spawn err = %v, want %v", err, tt.wantErr)
+				}
+				if len(msg.msgs) != 0 {
+					t.Fatalf("delivered prompts = %#v, want none: the pane is a shell", msg.msgs)
+				}
+			}
+			if rt.workloadCalls == 0 {
+				t.Fatal("workload liveness was never probed before the paste")
+			}
+			// Generation-scoped, so a probe cannot be answered by an older launch.
+			if rt.lastRef.SessionID != "mer-1" || strings.TrimSpace(rt.lastRef.LaunchID) == "" {
+				t.Fatalf("workload probe ref = %#v, want this session and launch", rt.lastRef)
+			}
+		})
+	}
+}
+
 func TestSpawn_AfterStartPromptFailureCleansUpSpawn(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{err: errors.New("pane unavailable")}
 	agent := &recordingAgent{}
 	lcm := &fakeLCM{store: st}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -1729,14 +2005,14 @@ func TestSpawn_AfterStartPromptFailureCleansUpWorkspaceProjectRows(t *testing.T)
 		Config: testRoleAgents(),
 	}
 	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "api"}}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{err: errors.New("pane unavailable")}
 	agent := &recordingAgent{}
 	lcm := &fakeLCM{store: st}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -1801,14 +2077,14 @@ func TestSpawn_AfterStartPromptSuppressedTerminationFailsSpawn(t *testing.T) {
 	base := newFakeStore()
 	base.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	st := &terminatedOnReReadStore{fakeStore: base}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{} // underlying messenger is fine; suppression comes from the guard's re-read
 	agent := &recordingAgent{}
 	lcm := &fakeLCM{store: base}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -3717,12 +3993,12 @@ func TestRestore_FallbackLaunchDeliversPromptAfterStartWhenAgentRequestsIt(t *te
 		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
 		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
 	}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	msg := &fakeMessenger{}
 	agent := &recordingAgent{}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: &fakeWorkspace{},
 		Store:     st,
 		Messenger: msg,
@@ -6790,4 +7066,85 @@ func (m *flipOnNudgeMessenger) Send(_ context.Context, _ domain.SessionID, msg s
 		m.flipped = true
 	}
 	return nil
+}
+
+// Missing readiness evidence must REFUSE, not paste.
+//
+// The registry test proves each adapter declares its evidence; this proves the
+// manager acts on the absence. Both are needed, and only this one fails when
+// waitForPromptReadiness goes back to returning nil — which is how prompted
+// Aider and Goose kept the original blind-paste behaviour after the readiness
+// work supposedly closed it. Liveness proves a process exists; it never proves
+// the pane is an input prompt.
+func TestSpawn_AfterStartPromptRefusesWithoutReadinessEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent func(*recordingAgent) ports.Agent
+		why   string
+	}{
+		{
+			name:  "adapter offers no readiness provider at all",
+			agent: func(a *recordingAgent) ports.Agent { return afterStartAgent{recordingAgent: a} },
+			why:   "aider and goose ship exactly this shape",
+		},
+		{
+			name: "adapter answers with no patterns",
+			agent: func(a *recordingAgent) ports.Agent {
+				return readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: a},
+					hints:           ports.PromptReadinessHints{Timeout: time.Second},
+				}
+			},
+			why: "a delay is not evidence",
+		},
+		{
+			name: "adapter answers with patterns AO never waits on",
+			agent: func(a *recordingAgent) ports.Agent {
+				return readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: a},
+					hints:           ports.PromptReadinessHints{Patterns: []string{"ready>"}},
+				}
+			},
+			why: "a zero timeout means the patterns are never checked",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			rt := &fakeRuntime{outputs: []string{"ready>"}}
+			msg := &fakeMessenger{}
+			m := New(Deps{
+				Runtime:   rt,
+				Agents:    singleAgent{agent: tc.agent(&recordingAgent{})},
+				Workspace: &fakeWorkspace{},
+				Store:     st,
+				Messenger: msg,
+				Lifecycle: &fakeLCM{store: st},
+				LookPath:  func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+				Prompt: "fix the button",
+			})
+			if !errors.Is(err, ErrPromptNotReady) {
+				t.Fatalf("Spawn = %v, want ErrPromptNotReady — %s", err, tc.why)
+			}
+			// And nothing was typed. A refusal that already pasted is the bug.
+			if len(msg.msgs) != 0 {
+				t.Fatalf("refused delivery still wrote %d message(s): %v", len(msg.msgs), msg.msgs)
+			}
+			// The state the API answer has to be truthful about: no surviving
+			// session and no surviving runtime, which is why the message must
+			// not tell anyone to answer something "in the session terminal".
+			for id, rec := range st.sessions {
+				if !rec.IsTerminated {
+					t.Errorf("session %s survived a refused spawn as live", id)
+				}
+			}
+			if rt.destroyed == 0 {
+				t.Error("the runtime was left behind by a refused spawn")
+			}
+		})
+	}
 }

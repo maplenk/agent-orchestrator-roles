@@ -21,6 +21,7 @@ vi.mock("../lib/api-client", () => ({
 		GET: h.get,
 		POST: h.post,
 	},
+	apiErrorCode: (error: { code?: string }) => error?.code,
 	apiErrorMessage: (_e: unknown, fallback = "err") => fallback,
 }));
 
@@ -106,6 +107,32 @@ describe("TaskComposer", () => {
 
 		await waitFor(() => expect(screen.getByText("nope")).toBeInTheDocument());
 		expect(onSubmittingChange).toHaveBeenLastCalledWith(false);
+	});
+
+	it("offers an explicit Terminal UI retry after Chat preflight fails", async () => {
+		h.post
+			.mockResolvedValueOnce({ error: { code: "CHAT_DRIVER_UNAVAILABLE" } })
+			.mockResolvedValueOnce({ data: { workerId: "sess-tui" } });
+		const onCreated = vi.fn();
+
+		render(
+			<Wrap>
+				<TaskComposer projectId="proj-1" onCreated={onCreated} />
+			</Wrap>,
+		);
+		fireEvent.change(task(), { target: { value: "Do the thing" } });
+		// The composer waits for the project config before it will submit, so
+		// that it never sends a shape a strict role map would refuse.
+		await waitFor(() => expect(screen.getByText("Start task").closest("button")).toBeEnabled());
+		fireEvent.click(screen.getByText("Start task"));
+
+		const fallback = await screen.findByRole("button", { name: "Create as Terminal UI" });
+		fireEvent.click(fallback);
+		await waitFor(() => expect(onCreated).toHaveBeenCalledWith("sess-tui"));
+		expect(h.post).toHaveBeenLastCalledWith(
+			"/api/v1/orchestrators/delegate",
+			expect.objectContaining({ body: expect.objectContaining({ mode: "tui" }) }),
+		);
 	});
 
 	it("reports dirty then clears it on unmount", () => {
@@ -257,6 +284,10 @@ describe("TaskComposer under a strict role map", () => {
 		// role under a strict map.
 		expect(body.agent).toBeUndefined();
 		expect(body.model).toBeUndefined();
+		// mode is orthogonal to the role, so the strict branch passes through
+		// whatever interface was asked for rather than pinning one — nobody asked
+		// here, so nothing is sent and the daemon's default stands.
+		expect(body.mode).toBeUndefined();
 	});
 
 	it("shows the role's binding as a fact rather than an editable field", async () => {
@@ -361,4 +392,60 @@ describe("TaskComposer when the project config cannot be read", () => {
 		fireEvent.click(screen.getByText("Try again"));
 		await waitFor(() => expect(h.get.mock.calls.length).toBeGreaterThan(before));
 	});
+});
+
+// Mode and role are orthogonal: a role binds harness, model and policy, never
+// the interface. So the TUI fallback must not drop the role to change
+// interface — that would silently turn a role-pinned worker into a free-form
+// one, which on a strict map the daemon refuses outright.
+it("keeps the role when falling back to Terminal UI", async () => {
+	h.get.mockImplementation(async (path: string) => {
+		if (path.includes("/models")) {
+			return { data: { agent: "codex", selectionMode: "text", models: [], allowCustom: true, refreshRecommended: false } };
+		}
+		return {
+			data: {
+				status: "ok",
+				project: {
+					config: {
+						roleMap: {
+							role_map_schema_version: 1,
+							strictDelegation: true,
+							orchestratorRole: "orchestrator",
+							roles: {
+								orchestrator: { harness: "codex", template: "o", permissions: { canSpawn: true, workspaceWrites: false } },
+								implementor: { harness: "codex", template: "i", permissions: { canSpawn: false, workspaceWrites: true } },
+							},
+						},
+					},
+				},
+			},
+		};
+	});
+	h.post
+		.mockResolvedValueOnce({ error: { code: "SESSION_MODE_ROLE_FORBIDDEN" } })
+		.mockResolvedValueOnce({ data: { workerId: "sess-tui" } });
+
+	render(
+		<Wrap>
+			<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
+		</Wrap>,
+	);
+
+	await userEvent.click(await screen.findByRole("button", { name: "Role" }));
+	await userEvent.click(screen.getByRole("menuitem", { name: "implementor" }));
+	fireEvent.change(task(), { target: { value: "Do the thing" } });
+	await waitFor(() => expect(screen.getByText("Start task").closest("button")).toBeEnabled());
+	fireEvent.click(screen.getByText("Start task"));
+
+	const fallback = await screen.findByRole("button", { name: "Create as Terminal UI" });
+	fireEvent.click(fallback);
+
+	await waitFor(() => expect(h.post).toHaveBeenCalledTimes(2));
+	const retry = h.post.mock.calls[1][1].body;
+	expect(retry.mode).toBe("tui");
+	expect(retry.roleId).toBe("implementor");
+	// And still no free-form target alongside it.
+	expect(retry.agent).toBeUndefined();
+	expect(retry.model).toBeUndefined();
 });

@@ -351,3 +351,16 @@ type WorkspaceRepoInfo struct {
 // on it (stop the other instance, or run this one isolated), which a generic
 // runtime failure collapsing to INTERNAL_ERROR does not tell them.
 var ErrRuntimeSessionConflict = errors.New("runtime session name already in use")
+
+// ErrRuntimeLaunchCommandTooLong means the composed launch command does not fit
+// in what the runtime can carry to its server in one message. tmux caps a
+// client->server message at MAX_IMSGSIZE (16 KiB) and the whole shell command
+// travels as a single word of the `new-session` argv, so an oversized launch
+// rejects with a bare exit 1.
+//
+// It is a distinct sentinel because the size is the user's to control: for a
+// harness that delivers its prompt in argv, the composed SYSTEM prompt and the
+// task prompt are both inlined there. This fork hits it first because role
+// templates are what inflate the system prompt, and AO bounds only the user
+// prompt (maxPromptLen). Without the sentinel this surfaced as an opaque 500.
+var ErrRuntimeLaunchCommandTooLong = errors.New("runtime: launch command exceeds the runtime's command size limit")

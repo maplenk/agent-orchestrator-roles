@@ -99,7 +99,14 @@ func (p *Plugin) GetPromptDeliveryStrategy(ctx context.Context, _ ports.LaunchCo
 }
 
 // PromptReadinessHints waits briefly for Cline's interactive prompt before AO
-// injects the worker's first task.
+// injects the worker's first task. A timeout now refuses delivery rather than
+// pasting anyway, so every pattern here has to be copy only an input prompt
+// produces.
+//
+// A bare ">" was not: it matches ordinary TUI chrome, including the approval
+// dialogs Cline draws for a plan or a command — the same shape of false match
+// that pasted a task brief into Grok's repository-trust screen and answered it.
+// Both remaining patterns are Cline's composer copy.
 func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig) (ports.PromptReadinessHints, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.PromptReadinessHints{}, err
@@ -109,7 +116,6 @@ func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig)
 		Patterns: []string{
 			"Type a message",
 			"What can I help",
-			">",
 		},
 		PollInterval: 200 * time.Millisecond,
 		Timeout:      8 * time.Second,

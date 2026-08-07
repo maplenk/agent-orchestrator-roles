@@ -6,7 +6,7 @@ import { Button } from "./ui/button";
 import { Label } from "./ui/label";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { captureRendererEvent } from "../lib/telemetry";
 import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useAgentsQuery";
 import {
@@ -30,7 +30,29 @@ type CreateTaskInput = {
 	agent?: DelegateAgent;
 	model?: string;
 	roleId?: string;
+	mode?: "tui";
 };
+
+const CHAT_PREFLIGHT_CODES = new Set([
+	"SESSION_MODE_UNSUPPORTED",
+	"CHAT_DRIVER_UNAVAILABLE",
+	"CHAT_DRIVER_INCOMPATIBLE",
+	"CHAT_AUTH_REQUIRED",
+	// A read-only role cannot run in Chat: read_only_enforced is a property of
+	// the harness's terminal launch, and the Chat controller does not take that
+	// argv. TUI fallback is the offer, and it KEEPS the role.
+	"SESSION_MODE_ROLE_FORBIDDEN",
+]);
+
+class TaskCreateError extends Error {
+	constructor(
+		message: string,
+		readonly code?: string,
+	) {
+		super(message);
+		this.name = "TaskCreateError";
+	}
+}
 
 /**
  * Roles a worker may be delegated to, in a stable order.
@@ -81,6 +103,7 @@ export function TaskComposer({
 	const [modelTouched, setModelTouched] = useState(false);
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [error, setError] = useState<string | undefined>();
+	const [canCreateAsTUI, setCanCreateAsTUI] = useState(false);
 	const createTask = useCallback(
 		async (input: CreateTaskInput): Promise<string> => {
 			void captureRendererEvent("ao.renderer.task_create_requested", { project_id: input.projectId });
@@ -92,9 +115,15 @@ export function TaskComposer({
 						agent: input.agent,
 						model: input.model,
 						roleId: input.roleId,
+						...(input.mode ? { mode: input.mode } : {}),
 					},
 				});
-				if (error) throw new Error(apiErrorMessage(error, t("newTask.unableToStart")));
+				if (error) {
+					throw new TaskCreateError(
+						apiErrorMessage(error, t("newTask.unableToStart")),
+						apiErrorCode(error),
+					);
+				}
 				if (!data?.workerId) throw new Error(t("newTask.noSession"));
 				void captureRendererEvent("ao.renderer.task_create_succeeded", { project_id: input.projectId });
 				return data.workerId;
@@ -178,8 +207,7 @@ export function TaskComposer({
 	}, [isSubmitting, onSubmittingChange]);
 	useEffect(() => () => onSubmittingChange?.(false), [onSubmittingChange]);
 
-	const submit = async (event: FormEvent<HTMLFormElement>) => {
-		event.preventDefault();
+	const submitTask = async (interfaceMode?: "tui") => {
 		if (!projectId || isSubmitting) return;
 
 		const cleanPrompt = prompt.trim();
@@ -206,26 +234,42 @@ export function TaskComposer({
 
 		setIsSubmitting(true);
 		setError(undefined);
+		setCanCreateAsTUI(false);
 		try {
 			// Under a strict map the role carries the harness and the model, and
 			// sending either alongside it is HARNESS_OVERRIDE_FORBIDDEN. So they
 			// are not merely hidden in the UI — they are not sent.
+			//
+			// mode rides along in BOTH shapes: a role binds harness, model and
+			// policy, never the interface, so {roleId, mode} is a legal pair and
+			// the TUI fallback must not drop the role to change interface.
 			const sessionId = await createTask(
 				strictDelegation
-					? { projectId, brief: prompt, roleId: role }
+					? { projectId, brief: prompt, roleId: role, mode: interfaceMode }
 					: {
 							projectId,
 							brief: prompt,
 							agent: agentTouched && agent ? (agent as CreateTaskInput["agent"]) : undefined,
 							model: requestedModel,
+							mode: interfaceMode,
 					  },
 			);
 			onCreated(sessionId);
 		} catch (err) {
+			setCanCreateAsTUI(
+				interfaceMode !== "tui" &&
+					err instanceof TaskCreateError &&
+					Boolean(err.code && CHAT_PREFLIGHT_CODES.has(err.code)),
+			);
 			setError(err instanceof Error ? err.message : t("newTask.unableToStart"));
 		} finally {
 			setIsSubmitting(false);
 		}
+	};
+
+	const submit = (event: FormEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		void submitTask();
 	};
 
 	return (
@@ -350,8 +394,20 @@ export function TaskComposer({
 			)}
 
 			{error && (
-				<div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-					{error}
+				<div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+					<span>{error}</span>
+					{canCreateAsTUI ? (
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							disabled={isSubmitting}
+							onClick={() => void submitTask("tui")}
+							className="shrink-0"
+						>
+							{t("newTask.createAsTui")}
+						</Button>
+					) : null}
 				</div>
 			)}
 

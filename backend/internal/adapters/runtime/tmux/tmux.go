@@ -321,8 +321,22 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 	}
 
 	launchCmd := buildLaunchCommand(cfg)
+	// Refuse before tmux is invoked at all: tmux answers an oversized command
+	// line with a bare exit 1, so classifying after the fact gives the caller a
+	// worse error than measuring what we are about to send (see
+	// checkLaunchCommandSize).
+	if err := checkLaunchCommandSize(launchCmd); err != nil {
+		return ports.RuntimeHandle{}, err
+	}
 	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
 	if _, err := r.run(ctx, args...); err != nil {
+		// tmux versions differ in where they enforce the cap and what they print,
+		// so the preflight above is a bound, not a guarantee. Keep the typed
+		// answer when a tmux we did not predict rejects the size itself.
+		if isCommandTooLong(err) {
+			return ports.RuntimeHandle{}, fmt.Errorf("%w: tmux rejected the %d-byte launch command for session %s",
+				ports.ErrRuntimeLaunchCommandTooLong, len(launchCmd), id)
+		}
 		// A name collision is not a generic runtime fault: it means another
 		// tmux client already owns this name. Classify it so the API and the UI
 		// can say WHICH instance and what to do, instead of collapsing to
@@ -754,6 +768,14 @@ func isDuplicateSession(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate session")
 }
 
+// isCommandTooLong recognises tmux refusing a command line it cannot pack into
+// one client->server message. Matched on the message for the same reason as
+// isDuplicateSession — tmux exits 1 for everything, and the captured output on
+// commandError is the only thing that distinguishes them.
+func isCommandTooLong(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "command too long")
+}
+
 // withSocket prefixes the tmux server selector. Every tmux invocation in this
 // package funnels through here or AttachCommand, so adding an operation cannot
 // accidentally escape the namespace.
@@ -1126,6 +1148,32 @@ func buildLaunchCommand(cfg ports.RuntimeConfig) string {
 	// the process env if set, otherwise falls back to /bin/sh.
 	b.WriteString(`; exec "${SHELL:-/bin/sh}" -i`)
 	return b.String()
+}
+
+// tmuxMaxCommandBytes is tmux's own MAX_IMSGSIZE: the client hands the server
+// its whole command line in a single imsg, and anything larger is rejected
+// before any session exists. launchCommandArgvAllowance reserves room for the
+// rest of the `new-session` argv that travels in the same message — the session
+// name, the geometry flags, the workspace path and the shell path — so the
+// budget below is what the launch command word itself may occupy.
+const (
+	tmuxMaxCommandBytes        = 16384
+	launchCommandArgvAllowance = 1024
+)
+
+// checkLaunchCommandSize refuses a launch command that cannot survive the trip
+// to the tmux server. The whole composed command — including a harness that
+// inlines its system prompt into argv, which for this fork means the role
+// template — becomes one shell-quoted word of `new-session`, so a large role
+// prompt is what pushes a spawn over the cap. tmux reports that as a bare exit
+// 1, so measuring first is the only way the caller learns the actual size.
+func checkLaunchCommandSize(launchCmd string) error {
+	allowed := tmuxMaxCommandBytes - launchCommandArgvAllowance
+	if len(launchCmd) <= allowed {
+		return nil
+	}
+	return fmt.Errorf("%w: launch command is %d bytes, limit is %d",
+		ports.ErrRuntimeLaunchCommandTooLong, len(launchCmd), allowed)
 }
 
 func sameDirectory(a, b string) bool {

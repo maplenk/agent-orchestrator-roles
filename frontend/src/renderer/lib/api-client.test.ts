@@ -77,10 +77,14 @@ describe("apiClient runtime base URL", () => {
 		expect(JSON.parse(seen[0].body ?? "{}")).toEqual({ projectId: "p1", prompt: "hello" });
 	});
 
-	it("skips the rebase when the request already targets the runtime base URL", async () => {
-		const seen: (RequestInfo | URL)[] = [];
-		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL) => {
-			seen.push(input);
+	it("still routes to the same URL and method when no rebase is needed", async () => {
+		const seen: { url: string; method?: string }[] = [];
+		vi.spyOn(globalThis, "fetch").mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+			seen.push(
+				input instanceof Request
+					? { url: input.url, method: input.method }
+					: { url: String(input), method: init?.method },
+			);
 			return new Response(JSON.stringify({ projects: [] }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
@@ -88,14 +92,24 @@ describe("apiClient runtime base URL", () => {
 		});
 
 		// Match the base openapi-fetch built the request against (the dev origin
-		// in jsdom), so the rewrite has nothing to do.
+		// in jsdom), so the rebase has nothing to change.
 		setApiBaseUrl(window.location.origin);
 		const { error } = await apiClient.GET("/api/v1/projects");
 
 		expect(error).toBeUndefined();
 		expect(seen).toHaveLength(1);
-		// Untouched pass-through: fetch receives the original Request object.
-		expect(seen[0]).toBeInstanceOf(Request);
+		// The contract is the URL and the method, NOT the identity of the
+		// Request object.
+		//
+		// This asserted `toBeInstanceOf(Request)` — a pass-through that
+		// runtimeFetch deliberately stopped doing. The same-URL case still has
+		// to go through the rebuild so applyOperatorSpawnHeaders runs; skipping
+		// it left desktop spawn headerless on the default 127.0.0.1:3001 port
+		// and every spawn answered 403 SPAWN_AUTH_REQUIRED. Object identity was
+		// never the behaviour anyone wanted — it was an artifact of how the
+		// no-op case happened to be implemented.
+		expect(seen[0].url).toBe(`${window.location.origin}/api/v1/projects`);
+		expect(seen[0].method).toBe("GET");
 	});
 
 	it("passes the request through untouched when the base URL is empty", async () => {

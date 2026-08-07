@@ -23,6 +23,13 @@ type DelegateTaskInput struct {
 	// resolved in the manager — never here, and never in the client.
 	RoleID string
 	Model  string
+	// RequestedMode is the chat/TUI interface for the session. It is NOT a
+	// role field: a role binds harness, model and policy, and the same role
+	// may legitimately run in either interface. So {roleId, mode} is a valid
+	// pair here, unlike {roleId, agent} or {roleId, model} — the manager
+	// resolves the role first and then preflights this mode against the
+	// harness and policy it resolved.
+	RequestedMode domain.SessionMode
 }
 
 // DelegateTaskOutcome identifies the spawned worker and, when present, the
@@ -45,15 +52,19 @@ func (s *Service) DelegateTask(ctx context.Context, in DelegateTaskInput) (Deleg
 	if in.RequestedAgent != "" && !in.RequestedAgent.IsKnown() {
 		return DelegateTaskOutcome{}, apierr.Invalid("UNKNOWN_HARNESS", "Unknown requested agent", nil)
 	}
+	if in.RequestedMode != "" && !in.RequestedMode.Valid() {
+		return DelegateTaskOutcome{}, apierr.Invalid("INVALID_SESSION_MODE", "mode must be chat or tui", nil)
+	}
 
 	worker, _, _, err := s.manager.Spawn(ctx, ports.SpawnConfig{
-		ProjectID:   in.ProjectID,
-		Kind:        domain.KindWorker,
-		Harness:     in.RequestedAgent,
-		RoleID:      in.RoleID,
-		Prompt:      in.Brief,
-		DisplayName: delegatedTaskDisplayName(in.Brief),
-		AgentConfig: ports.AgentConfig{Model: strings.TrimSpace(in.Model)},
+		ProjectID:     in.ProjectID,
+		Kind:          domain.KindWorker,
+		Harness:       in.RequestedAgent,
+		RoleID:        in.RoleID,
+		Prompt:        in.Brief,
+		DisplayName:   delegatedTaskDisplayName(in.Brief),
+		AgentConfig:   ports.AgentConfig{Model: strings.TrimSpace(in.Model)},
+		RequestedMode: in.RequestedMode,
 	})
 	if err != nil {
 		return DelegateTaskOutcome{}, toAPIError(err)

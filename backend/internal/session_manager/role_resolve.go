@@ -360,6 +360,8 @@ func mapRoleError(err error) error {
 		return fmt.Errorf("spawn: %w", ErrHarnessOverrideForbidden)
 	case errors.Is(err, roles.ErrModelOverrideForbidden):
 		return fmt.Errorf("spawn: %w", ErrModelOverrideForbidden)
+	case errors.Is(err, ErrChatModeReadOnlyUnsupported):
+		return fmt.Errorf("spawn: %w", ErrChatModeReadOnlyUnsupported)
 	// A loader failure is a template failure: reuse the sentinel that already
 	// maps to ROLE_TEMPLATE_UNAVAILABLE rather than minting a second code for
 	// the same actionable problem.
@@ -372,4 +374,29 @@ func mapRoleError(err error) error {
 	default:
 		return fmt.Errorf("spawn: role: %w", err)
 	}
+}
+
+// ErrChatModeReadOnlyUnsupported refuses Chat for a role that may not write.
+//
+// read_only_enforced is a property of a harness's TERMINAL launch: Codex earns
+// it from `--sandbox read-only` on the argv the manager builds, and
+// readonly.ApplyLaunch puts it there. The Chat controller does not take that
+// argv — it starts a provider connection — and Codex Chat maps ordinary
+// permissions to danger-full-access. Inheriting the harness capability into
+// Chat would therefore hand full write access to a role defined not to have
+// any, with the read-only claim still displayed.
+//
+// So Chat is refused for such a role until Chat read-only is proven, rather
+// than assumed. The caller may fall back to TUI, which KEEPS the role.
+var ErrChatModeReadOnlyUnsupported = errors.New("session: chat mode cannot enforce a read-only role")
+
+// requireChatModeAllowed gates a chat launch on the pinned role's policy.
+func requireChatModeAllowed(binding domain.SessionRoleBinding) error {
+	if strings.TrimSpace(binding.RoleID) == "" {
+		return nil // no role pin, no role policy to enforce
+	}
+	if binding.ResolvedPermissions.WorkspaceWrites {
+		return nil
+	}
+	return fmt.Errorf("%w: role %q is workspaceWrites:false", ErrChatModeReadOnlyUnsupported, binding.RoleID)
 }

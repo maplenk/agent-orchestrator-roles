@@ -1,4 +1,5 @@
-742c77bcb5d3591c540ef0e8eb71947a7c4a85f8
+fa799a7a58e2f9ec13d174567aff436ba890ff6a
 upstream: Untrivial-ai/agent-orchestrator
-pinned_at: 2026-08-04T06:58:00Z
-branch: roles/multi-sub-v1
+pinned_at: 2026-08-07T00:00:00Z
+branch: roles/upstream-sync-2
+previous: 4efd8a10fc3c36dfd3c1bf98b525a42cf4614e13 (historical context only)

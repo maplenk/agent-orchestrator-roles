@@ -20,10 +20,11 @@ func TestDelegateTaskSpawnsWorkerThenRequestsTitleFromTheProjectOwner(t *testing
 		name      string
 		agent     domain.AgentHarness
 		model     string
+		mode      domain.SessionMode
 		wantAgent domain.AgentHarness
 	}{
 		{name: "project default"},
-		{name: "requested agent and model", agent: domain.HarnessCursor, model: "  sonnet-custom  ", wantAgent: domain.HarnessCursor},
+		{name: "requested agent model and mode", agent: domain.HarnessCursor, model: "  sonnet-custom  ", mode: domain.SessionModeChat, wantAgent: domain.HarnessCursor},
 	}
 
 	for _, tt := range tests {
@@ -43,7 +44,7 @@ func TestDelegateTaskSpawnsWorkerThenRequestsTitleFromTheProjectOwner(t *testing
 
 			brief := "  Fix the renderer\nwithout changing the API.  "
 			out, err := svc.DelegateTask(context.Background(), DelegateTaskInput{
-				ProjectID: "ao", Brief: brief, RequestedAgent: tt.agent, Model: tt.model,
+				ProjectID: "ao", Brief: brief, RequestedAgent: tt.agent, Model: tt.model, RequestedMode: tt.mode,
 			})
 			if err != nil {
 				t.Fatalf("DelegateTask: %v", err)
@@ -56,6 +57,9 @@ func TestDelegateTaskSpawnsWorkerThenRequestsTitleFromTheProjectOwner(t *testing
 			}
 			if cmd.spawnedCfg.AgentConfig.Model != strings.TrimSpace(tt.model) {
 				t.Fatalf("spawn model = %q, want %q", cmd.spawnedCfg.AgentConfig.Model, strings.TrimSpace(tt.model))
+			}
+			if cmd.spawnedCfg.RequestedMode != tt.mode {
+				t.Fatalf("spawn mode = %q, want %q", cmd.spawnedCfg.RequestedMode, tt.mode)
 			}
 			if len(cmd.sent) != 1 || cmd.sent[0] != "orch-new" {
 				t.Fatalf("sent = %#v; want orch-new", cmd.sent)

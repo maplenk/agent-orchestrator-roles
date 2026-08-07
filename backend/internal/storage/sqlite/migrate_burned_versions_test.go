@@ -64,16 +64,45 @@ var shippedMigrations = map[int64]string{
 	44: "0044_backfill_review_run_batch_id.sql",
 	47: "0047_agent_model_catalog.sql",
 	52: "0052_model_usage.sql",
-	// Roles fork. Originally 0042-0049; renumbered to 0053-0060 during the
-	// upstream sync because upstream had taken 42/43/44/47 and reached 52.
-	53: "0053_session_role_fields.sql",
-	54: "0054_session_spawn_capability_hash.sql",
-	55: "0055_lifecycle_ledger.sql",
-	56: "0056_session_switch_pending.sql",
-	57: "0057_one_active_orchestrator.sql",
-	58: "0058_orchestrator_replacement_intent.sql",
-	59: "0059_lifecycle_ledger_orchestrator_fresh.sql",
-	60: "0060_session_pause.sql",
+	53: "0053_allow_muse_harness.sql",
+	66: "0066_chat_session_mode.sql",
+	67: "0067_app_settings.sql",
+	68: "0068_conversation_turn_settings.sql",
+	69: "0069_conversation_compaction.sql",
+	70: "0070_command_output_and_diffs.sql",
+	71: "0071_conversation_usage.sql",
+	72: "0072_conversation_history_ops.sql",
+	73: "0073_conversation_provider_state.sql",
+	74: "0074_activity_kinds_mcp_and_auto_review.sql",
+	75: "0075_conversation_user_input.sql",
+	76: "0076_conversation_delivery_content_and_cost.sql",
+	77: "0077_cancelled_conversation_activities.sql",
+	78: "0078_session_interface_transitions.sql",
+	79: "0079_session_interface_transition_delivery.sql",
+	// Roles fork, in its own 9000 range. Originally 0042-0049, then 0053-0060,
+	// and that second choice was the mistake: it put fork migrations INSIDE the
+	// sequence upstream was still filling, so upstream's own 0053 (Muse) landed
+	// on top of the fork's and was silently skipped wherever the fork had run.
+	// The range is far enough above upstream's counter that a future collision
+	// would have to be deliberate. Existing databases are carried across by
+	// repairForkMigrationVersions before goose runs.
+	9000: "9000_session_role_fields.sql",
+	9001: "9001_session_spawn_capability_hash.sql",
+	9002: "9002_lifecycle_ledger.sql",
+	9003: "9003_session_switch_pending.sql",
+	9004: "9004_one_active_orchestrator.sql",
+	9005: "9005_orchestrator_replacement_intent.sql",
+	9006: "9006_lifecycle_ledger_orchestrator_fresh.sql",
+	9007: "9007_session_pause.sql",
+}
+
+// forkRenumbered maps the fork's abandoned 0053-0060 numbers to the 9000-series
+// files that replaced them. The ledger test consults this so a renumber that
+// HAS a repair path is not reported as the silent-skip hazard the ledger exists
+// to catch — while a renumber without one still is.
+var forkRenumbered = map[int64]int64{
+	53: 9000, 54: 9001, 55: 9002, 56: 9003,
+	57: 9004, 58: 9005, 59: 9006, 60: 9007,
 }
 
 // burnedVersion reports version numbers that must never be (re)used: they
@@ -84,8 +113,8 @@ var shippedMigrations = map[int64]string{
 //   - 22 shipped in a nightly (#2412) and was deleted by the revert.
 //
 // Beware of the adjacent hazard this cannot catch: at least one field profile
-// has versions 40 through 46 recorded as applied by a foreign build
-// (#3475/#3476), so migrations numbered up to 0046 are skipped there entirely.
+// has versions 40 through 51 recorded as applied by a foreign build
+// (#3475/#3476), so migrations numbered up to 0051 are skipped there entirely.
 // Any such migration whose schema the generated queries depend on must add a
 // schemaRepairs entry in db.go.
 func burnedVersion(v int64) bool {
@@ -230,6 +259,37 @@ INSERT INTO projects (
 			if columns != 1 {
 				t.Fatalf("%s.%s count = %d, want exactly 1 after repair", table, column, columns)
 			}
+		}
+	}
+}
+
+// A renumber is only safe if every abandoned number has somewhere to go. The
+// ledger test tolerates the 0053-0060 renumber because this repair exists; if
+// the two ever drift — a pair dropped from the repair, or an old number left
+// with no replacement — databases written by those builds would re-run
+// migrations against schema they already have. So they are pinned to each other
+// rather than to a comment.
+func TestForkRenumberHasARepairPathForEveryAbandonedVersion(t *testing.T) {
+	repair := map[int64]int64{}
+	for _, m := range forkMigrations() {
+		repair[m.oldVersion] = m.newVersion
+	}
+	for old, want := range forkRenumbered {
+		got, ok := repair[old]
+		if !ok {
+			t.Errorf("version %d was abandoned by the renumber but has no repair entry", old)
+			continue
+		}
+		if got != want {
+			t.Errorf("version %d repairs to %d, ledger says %d", old, got, want)
+		}
+		if _, shipped := shippedMigrations[want]; !shipped {
+			t.Errorf("repair sends %d to %d, which ships no migration file", old, want)
+		}
+	}
+	for old := range repair {
+		if _, ok := forkRenumbered[old]; !ok {
+			t.Errorf("repair claims version %d, which the ledger does not record as renumbered", old)
 		}
 	}
 }

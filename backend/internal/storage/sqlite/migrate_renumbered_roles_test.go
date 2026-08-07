@@ -45,7 +45,7 @@ func TestOldRolesDatabaseCannotMigrateSilently(t *testing.T) {
 	// Rewrite history to what an OLD roles database actually looks like: the
 	// same schema, recorded under the pre-rename version numbers. This is the
 	// exact state on any machine that ran this branch before the sync.
-	for newV, oldV := range map[int64]int64{53: 42, 54: 43, 55: 44, 56: 45, 57: 46, 58: 47, 59: 48, 60: 49} {
+	for newV, oldV := range map[int64]int64{9000: 42, 9001: 43, 9002: 44, 9003: 45, 9004: 46, 9005: 47, 9006: 48, 9007: 49} {
 		if _, err := db.Exec(`UPDATE goose_db_version SET version_id = ? WHERE version_id = ?`, oldV, newV); err != nil {
 			t.Fatalf("rewrite version %d -> %d: %v", newV, oldV, err)
 		}
@@ -87,15 +87,22 @@ func TestCurrentDatabaseMigratesAndIsIdempotent(t *testing.T) {
 	}
 }
 
-// The renumbered set must start above upstream's highest, or the collision this
-// whole exercise removes comes straight back on the next sync.
-func TestRolesMigrationsStartAboveUpstreamRange(t *testing.T) {
+// The fork's set must sit in its own range, well clear of upstream's counter.
+//
+// This test previously demanded the fork start at 53, "immediately above
+// upstream's 52" — which is exactly what went wrong. Upstream kept counting,
+// shipped its own 0053 (Muse), and every fork database silently skipped it.
+// Adjacency is not separation; a fork range is.
+func TestRolesMigrationsStartInTheForkRange(t *testing.T) {
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	// Upstream's highest at the pinned merge target (4efd8a10) is 0052.
-	const upstreamHighest = 52
+	// Upstream's highest at the pinned merge target (fa799a7a) is 0079.
+	const upstreamHighest = 79
+	// The fork's own range. Deliberately distant: upstream would have to add
+	// ~8900 migrations to reach it.
+	const forkRangeStart = 9000
 	var rolesLowest int64 = 1 << 30
 	var maxSeen int64
 	for _, e := range entries {
@@ -107,16 +114,22 @@ func TestRolesMigrationsStartAboveUpstreamRange(t *testing.T) {
 		if v > maxSeen {
 			maxSeen = v
 		}
-		// The fork's own migrations are the ones above the upstream range.
-		if v > upstreamHighest && v < rolesLowest {
+		// The fork's own migrations are the ones in the fork range.
+		if v >= forkRangeStart && v < rolesLowest {
 			rolesLowest = v
 		}
+		// Nothing of ours may sit between upstream's highest and the fork
+		// range: that gap is upstream's to fill, and anything parked there is
+		// the next collision.
+		if v > upstreamHighest && v < forkRangeStart {
+			t.Errorf("migration %d sits in upstream's growth path (>%d, <%d)", v, upstreamHighest, forkRangeStart)
+		}
 	}
-	if rolesLowest != 53 {
-		t.Fatalf("lowest fork migration = %d, want 53 (immediately above upstream's %d)", rolesLowest, upstreamHighest)
+	if rolesLowest != forkRangeStart {
+		t.Fatalf("lowest fork migration = %d, want %d", rolesLowest, forkRangeStart)
 	}
-	if maxSeen != 60 {
-		t.Fatalf("highest migration = %d, want 60; update this test and UPSTREAM_SYNC_PLAN.md together", maxSeen)
+	if maxSeen != 9007 {
+		t.Fatalf("highest migration = %d, want 9007; update this test and UPSTREAM_SYNC_PLAN.md together", maxSeen)
 	}
 }
 

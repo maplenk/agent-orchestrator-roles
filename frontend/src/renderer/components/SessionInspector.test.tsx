@@ -1819,3 +1819,33 @@ describe("SessionInspector paused-dead cell", () => {
 		);
 	});
 });
+
+// The other paused cell. Pinned but still running is the common case, and there
+// Restart would be an offer to relaunch a process that never died — so the
+// second control has to be absent, not merely worded differently.
+describe("SessionInspector paused-live cell", () => {
+	const pausedLive = () =>
+		session([], {
+			status: "idle",
+			activity: { state: "idle", lastActivityAt: "2026-06-15T10:00:00Z" },
+			pause: {
+				incidentId: "limit-abc123",
+				reason: "usage_limit",
+				detectedBy: "structured_envelope",
+				harness: "codex",
+				pausedAt: "2026-06-15T09:00:00Z",
+			},
+		});
+
+	it("offers Resume alone while the agent is still alive", async () => {
+		renderWithQuery(<SessionInspector session={pausedLive()} />);
+
+		expect(await screen.findByRole("button", { name: /Resume this session/ })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Restart agent" })).not.toBeInTheDocument();
+
+		expect(screen.getByText("Agent running")).toBeInTheDocument();
+		// And the hint stays on the pause axis: no talk of a separate restart step.
+		expect(screen.getByText("Lifts the pause so AO may act on this session again.")).toBeInTheDocument();
+		expect(screen.queryByText(/restarting it is a separate step/)).not.toBeInTheDocument();
+	});
+});
