@@ -27,15 +27,32 @@ const MaxFailoversPerIncident = 8
 // FailoverAttemptState is the durable lifecycle of one continuation attempt.
 type FailoverAttemptState string
 
+// The state set is split by ONE question: was the source stopped? That is the
+// line the switch saga already draws between a rolled-back pre-stop failure and
+// ErrSwitchPostStop, and it is what makes an attempt terminal or recoverable.
+// Collapsing every failure into "failed" (the first draft of this contract)
+// contradicted recovery: a post-stop failure is finished by the saga that
+// already exists, so a terminal marking produced failed->target_ack, attempts
+// left failed after a successful recovery, and a Continue that launched a
+// SECOND runtime over an unrecovered switch. See PHASE3B_MVP_CONTRACT §6a.
 const (
-	// FailoverAttemptRequested means the attempt is durable and the switch saga
-	// either is running or died mid-flight. Recovery keys on this state.
+	// FailoverAttemptRequested means the attempt is durable and the source has
+	// NOT been stopped: the saga is either running under beginSwitch or died
+	// before the point of no return. Adoptable — re-driving destroys nothing.
 	FailoverAttemptRequested FailoverAttemptState = "requested"
+	// FailoverAttemptPostStop means the source is stopped and the handoff is
+	// retained, but the target has not acked. RECOVERABLE, never terminal: it is
+	// completed on the SAME generation by whichever reaches it first — an
+	// operator Continue that adopts it, or boot Reconcile's existing post_stop
+	// recovery. Neither advances the ladder, so neither is an automatic retry.
+	FailoverAttemptPostStop FailoverAttemptState = "post_stop"
 	// FailoverAttemptAcked means the target owns input (switch target_ack) and
-	// the pause has been cleared for this incident.
+	// the pause has been cleared for this incident. Terminal, success.
 	FailoverAttemptAcked FailoverAttemptState = "acked"
-	// FailoverAttemptFailed means the continuation did not complete. The pause
-	// survives, the rung is spent, and nothing is retried automatically.
+	// FailoverAttemptFailed is a PRE-STOP failure only: the source was confirmed
+	// alive and nothing was destroyed. Terminal. The pause survives, the rung is
+	// spent, and nothing is retried automatically. A post-stop failure must
+	// never be written here — it is FailoverAttemptPostStop.
 	FailoverAttemptFailed FailoverAttemptState = "failed"
 )
 
@@ -44,11 +61,21 @@ const (
 // feature that cannot run.
 func (s FailoverAttemptState) Valid() bool {
 	switch s {
-	case FailoverAttemptRequested, FailoverAttemptAcked, FailoverAttemptFailed:
+	case FailoverAttemptRequested, FailoverAttemptPostStop,
+		FailoverAttemptAcked, FailoverAttemptFailed:
 		return true
 	default:
 		return false
 	}
+}
+
+// Terminal reports whether the attempt is closed. A non-terminal attempt is the
+// one Continue ADOPTS instead of starting a new one — which is why idempotence
+// keys on this method rather than on a single state: keying on "requested"
+// alone is exactly the bug that let a duplicate Continue open a second runtime
+// over an unrecovered post_stop.
+func (s FailoverAttemptState) Terminal() bool {
+	return s == FailoverAttemptAcked || s == FailoverAttemptFailed
 }
 
 // FailoverAttempt is one durable continuation attempt for one incident.
@@ -76,8 +103,14 @@ type FailoverAttempt struct {
 	// selected. Kept durable so an audit can tell which ladder entry was spent
 	// even after the role map is edited.
 	RungIndex int
-	// GenerationID is the switch saga's generation (== RuntimeLaunchID). Empty
-	// until the saga has begun; recovery matches on it.
+	// GenerationID is the switch saga's generation (== RuntimeLaunchID).
+	//
+	// NEVER empty. Continue mints it before the attempt/ledger transaction and
+	// pins it into the saga via SwitchRequest.ForceGenerationID, so the row is
+	// durable with its generation from the first write. The alternative — let
+	// the saga mint it and stamp the row afterwards — adds a third durable write
+	// whose crash window can only be closed by guessing which runtime belongs to
+	// which attempt, and a wrong guess there is a second runtime.
 	GenerationID string
 	State        FailoverAttemptState
 	CreatedAt    time.Time

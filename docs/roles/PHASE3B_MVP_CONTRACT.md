@@ -126,10 +126,11 @@ with the existing phases `requested → pre_stop → post_stop → target_ack`, 
   ledger key uses, which is why `ValidateIncidentID` excludes `:`
 - `session_id`, `project_id`, `incident_id`, `seq`
 - `role_id`, `from_harness`, `from_model`, `to_harness`, `to_model`, `rung_index`
-- `generation_id` (the switch saga's `ForceLaunchID`; empty until the saga starts)
-- `state` — `requested` | `acked` | `failed`, CHECK-constrained
+- `generation_id` — the switch saga's `ForceLaunchID`. **Never empty.** See §6a.
+- `state` — `requested` | `post_stop` | `acked` | `failed`, CHECK-constrained
 - `created_at`, `updated_at`
 - `UNIQUE(session_id, incident_id, seq)`; index on `(session_id, incident_id)`
+  and on `(session_id, generation_id)` for recovery matching
 
 Agent A owns the exact DDL, the sqlc queries and the store methods. The columns
 above are the contract; adding a column is allowed, removing one is not.
@@ -138,29 +139,104 @@ above are the contract; adding a column is allowed, removing one is not.
 
 ## 6. Ordering guarantees (non-negotiable)
 
-1. **Ledger before effect.** The `failover`/`requested` ledger row and the
-   attempt row are durable *before* the switch saga touches the runtime. Same
-   rule 3A applied to pause.
+1. **Ledger and attempt are ONE write.** The `failover`/`requested` ledger row
+   and the attempt row are inserted in a **single SQLite write transaction**,
+   via the existing `Store.inTx` helper (`storage/sqlite/store/store.go:70`),
+   which hands the callback a `*gen.Queries` that already carries
+   `InsertLifecycleLedger`. There is therefore no "between" for a crash to land
+   in, and no orphan-repair logic to get wrong. Both rows are durable before the
+   switch saga touches the runtime — the 3A "ledger before effect" rule,
+   strengthened to atomicity because here it is two rows rather than one.
+   This also means Agent A needs no edit to `lifecycle_ledger_store.go`, which
+   it does not own. A test must assert atomicity by failing the second insert
+   and proving neither row exists.
 2. **Pause clears only after `target_ack`.** The pin stays through
    `requested`, `pre_stop` and `post_stop`. It is cleared under a CAS on the
    *same* `incidentId` — a newer pin must never be cleared by an older
    continuation.
-3. **Failure leaves the pause and the attempt intact.** A failed launch is
-   `state=failed` + ledger `failed`, pin untouched, session still paused. It
-   does not schedule a retry; nothing in AO retries on its own.
+3. **Failure never lifts the pause.** In every failure mode the pin is
+   untouched and the session stays paused. What the *attempt* records depends on
+   how far the saga got, and that distinction is §6a — it is not "any failure is
+   terminal".
 4. **One relaunch path.** Continue calls the existing switch saga
    (`switchUnderOwnership` via the worker entry point). It must not open a
    second launch path.
-5. **Idempotence.** A duplicate Continue for an incident whose latest attempt is
-   still in flight returns that attempt (`reused: true`) — same `generationId`,
-   same `attemptSeq`, no second attempt row, no second runtime.
+5. **Idempotence adopts any non-terminal attempt.** A duplicate Continue for an
+   incident whose latest attempt is `requested` **or** `post_stop` returns that
+   attempt (`reused: true`) — same `generationId`, same `attemptSeq`, no second
+   attempt row, no second runtime, no second rung spent.
 6. **Crash recovery completes the same incident.** An incomplete `post_stop`
-   whose generation matches the incident's latest attempt is finished through
-   `RecoverSwitchFromPostStop` — one runtime, one `target_ack`. An incomplete
-   `post_stop` from anything else is `FAILOVER_RECOVERY_REQUIRED`.
+   whose generation matches the incident's latest non-terminal attempt is
+   finished through `RecoverSwitchFromPostStop` — one runtime, one `target_ack`.
+   An incomplete `post_stop` matching nothing is `FAILOVER_RECOVERY_REQUIRED`.
 7. **Role identity is invariant.** `role_id`, `template_artifact_id`,
    `template_sha256` and `resolved_permissions` are byte-identical before and
    after. Only `resolved_harness` / `resolved_model` move.
+
+## 6a. The attempt state machine — terminal vs recoverable
+
+The first draft of this contract said every launch failure is `failed` while
+idempotence adopted only `requested`. Those two clauses contradict: a target
+launch that fails *after* the source stopped is recoverable by the switch saga
+that already exists, and boot's `Reconcile` will recover it. That produced three
+reachable defects — a `failed` attempt reaching `target_ack`, an attempt left
+`failed` after a successful recovery, and a Continue that starts a *second*
+attempt over an unrecovered switch (two runtimes, and a ladder advance nobody
+asked for, which is the automatic failover this MVP refuses to build).
+
+Terminal-vs-recoverable is decided by **whether the source was stopped** —
+exactly the line the existing saga already draws between a rolled-back pre-stop
+failure and `ErrSwitchPostStop`.
+
+| State | Meaning | Terminal | Rung spent | Continue does |
+|---|---|---|---|---|
+| `requested` | durable; source **not** stopped. Saga running (fenced by `beginSwitch`) or crashed pre-stop. | no | yes | adopt — safe to re-drive, nothing was destroyed |
+| `post_stop` | source stopped, handoff retained, target has not acked | **no — recoverable** | yes | adopt and drive `RecoverSwitchFromPostStop` on the **same** generation |
+| `acked` | target owns input; pin cleared for this incident | yes | yes | nothing; the incident is closed |
+| `failed` | **pre-stop failure only** — source confirmed alive, nothing destroyed | yes | yes | nothing; a new Continue starts a new attempt on the next rung |
+
+Load-bearing consequences:
+
+- A post-stop failure **never** writes `failed`. It writes `post_stop` and stops.
+  `failed` is reachable only when the source survived.
+- `post_stop → acked` is performed by whichever of the two completes it: an
+  operator Continue that adopts it, or boot `Reconcile`'s existing post_stop
+  recovery. Both match on `generation_id`, both clear the pin under the incident
+  CAS, and both are idempotent — so a race between them ends in one ack.
+- **Neither is an automatic retry.** Both complete the *same rung* on the *same
+  generation*; neither selects a new rung, and only a human's Continue ever
+  advances the ladder. Automatic failover would be choosing a new rung with no
+  human in the loop, and nothing here does that.
+- `ErrFailoverRecoveryRequired` therefore means "an incomplete `post_stop`
+  exists that this incident's latest non-terminal attempt does not account for"
+  — a genuine ambiguity a human must resolve, not a routine state.
+
+## 6b. The generation is minted by the caller
+
+`SwitchRequest` gains one field, **frozen here and owned by Agent A**:
+
+```go
+// ForceGenerationID pins the saga's generation. Empty keeps today's behaviour
+// (the saga mints its own), so every existing caller is unaffected.
+ForceGenerationID string
+```
+
+Continue mints the generation (a uuid, as `newSwitchGeneration` does) *before*
+the §6 rule 1 transaction and passes it in, so the attempt row is durable **with
+its generation from the very first write**.
+
+Without this, the generation is minted inside the saga and the attempt row must
+be written empty and stamped afterwards — a third durable write, and a crash in
+that window leaves an attempt that can only be matched to its runtime by
+guessing from `(to_harness, to_model, role_id)` and ledger ordering. Recovery
+matching then decides whether to adopt or to launch again, so a wrong guess is a
+second runtime. Replacing a heuristic with an identity is worth a three-line,
+behaviour-preserving field on a struct.
+
+This is the one edit to `switch.go` Agent A is authorized to make. It must be
+exactly this: an optional field, honoured where `newSwitchGeneration()` is
+called, no other change. A test must prove the empty case is byte-identical to
+today's behaviour.
 
 ---
 
