@@ -20,6 +20,9 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [stack.md](stack.md)                                   | Accepted library/runtime choices, pending stack decisions, and dependencies explicitly avoided for V1.                |
 | [telemetry.md](telemetry.md)                           | Telemetry collection, privacy safeguards, configuration, and PostHog dashboard guidance.                              |
 | [posthog-cost-controls.md](posthog-cost-controls.md)   | PostHog event-name migration, ingestion drop rules, and dashboard queries for reducing telemetry spend.              |
+| [roles/MASTER_PLAN.md](roles/MASTER_PLAN.md)           | Canonical Target B product and architecture plan for the multi-sub roles fork.                                        |
+| [roles/REMAINING_PLAN.md](roles/REMAINING_PLAN.md)     | Living implementation status, remaining phases, ordering, and capability gates.                                      |
+| [roles/UPSTREAM_SYNC2_PLAN.md](roles/UPSTREAM_SYNC2_PLAN.md) | Active Sync 2 execution and acceptance checklist before merging the integration branch.                         |
 
 ## Mental model
 

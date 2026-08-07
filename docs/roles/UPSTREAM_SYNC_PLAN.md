@@ -1,5 +1,10 @@
 # Upstream integration plan — before Phase 3A-2b
 
+> **Historical first-sync plan.** This records the integration to `4efd8a10`
+> and its then-current 0053–0060 migration assignment. Do not use it as the
+> current execution tracker. Sync 2 is tracked in
+> [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
+
 Review recommendation, accepted: stop before 3A-2b and sync upstream first.
 Designing the structured-detection seam against the pre-sync architecture risks
 building a parallel event path alongside upstream's event-driven usage plumbing

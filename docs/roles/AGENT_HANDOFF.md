@@ -1,5 +1,11 @@
 # Agent handoff — multi-sub roles fork (`roles/multi-sub-v1`)
 
+> **Superseded checkpoint (written 2026-08-04).** Keep this for the detailed
+> Phase 1/2 history, but do not follow its branch, CI-debt or “start Phase 3A”
+> instructions. Current execution status is in
+> [`REMAINING_PLAN.md`](REMAINING_PLAN.md); the active Sync 2 acceptance steps
+> are in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
+
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
 **Written:** 2026-08-04 (after Phase 2A close-out accept + `SwitchSupported` promotion).  
 **Audience:** Implementation agent (Claude/Codex/other) picking up on a clean checkout.

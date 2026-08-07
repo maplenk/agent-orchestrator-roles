@@ -1,9 +1,19 @@
 # Master plan: Multi-sub harness orchestration on AO
 
-**Status:** implementation-ready after Codex review rounds 1–2; **Target B locked** (~4–6 weeks)
+**Status:** canonical Target B design; implementation is active and tracked in
+[`REMAINING_PLAN.md`](REMAINING_PLAN.md). Current integration acceptance is
+tracked in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
 **Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
 **Not base:** Intent asar; harness-orchestration as daily UI
 **Sources:** Intent RE, AO code/PRs, harness-orchestration PLAN, deep-research-report, Codex plan reviews
+
+**Execution checkpoint (2026-08-07):** Phase 1 foundation and Phase 2A are
+accepted. Phase 2B-0/1/2 landed; 2B-3 is blocked on Claude read-only
+enforcement. Phase 3A's durable pause, operator surface, desktop pause/role
+composer and detector boundary landed, but no vendor detector is promoted.
+Sync 2 is at its final acceptance gates on `roles/upstream-sync-2`; Phase 3B has
+not started. The estimates below are original planning estimates, not a claim
+about remaining duration.
 
 ---
 
@@ -327,22 +337,22 @@ Zai and Kimi validated **separately** on Pi.
 
 ## 10. Coding checklist
 
-1. [ ] Fork + pin AO baseline; own migrations
-2. [ ] Capability matrix + config validation
-3. [ ] Session-scoped spawn credential
-4. [ ] Role map schema (schema_version + sha256 + revision)
-5. [ ] Template CAS artifact by sha256
-6. [ ] Durable session role fields + switch-history
-7. [ ] `ao spawn --role`; strict reject roleless / overrides
-8. [ ] RoleExecutionPolicy enforcement
-9. [ ] Strict orch prompt builder
-10. [ ] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
-11. [ ] Worker switch saga + fresh-conversation
-12. [ ] Lifecycle ledger
-13. [ ] Orchestrator switch protocol
-14. [ ] Limit pause
+1. [x] Fork + pin AO baseline; own migrations
+2. [x] Capability matrix + config validation
+3. [x] Session-scoped spawn credential
+4. [x] Role map schema (schema_version + sha256 + revision)
+5. [x] Template CAS artifact by sha256
+6. [x] Durable session role fields + switch-history
+7. [x] `ao spawn --role`; strict reject roleless / overrides
+8. [x] RoleExecutionPolicy enforcement — Codex read-only is enforced; Claude remains correctly unsupported until it has an enforceable sandbox
+9. [x] Strict orch prompt builder
+10. [x] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
+11. [x] Worker switch saga + fresh-conversation
+12. [x] Lifecycle ledger
+13. [~] Orchestrator switch protocol — in-place fresh and replacement recovery landed; cross-harness is blocked on Claude read-only
+14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
 15. [ ] Manual continue + opt-in auto-failover
-16. [ ] Dogfood against all DoD invariants
+16. [~] Dogfood against all DoD invariants — Phase 2A/2B/3A evidence exists; Sync 2 has two live records and required CI still open
 
 ---
 

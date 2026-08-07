@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -841,5 +842,80 @@ func TestRecoverSwitchRefusesAChatSessionWithoutTouchingAnything(t *testing.T) {
 	// And the pending pin is untouched: refusing is not resolving.
 	if after := st.sessions[rec.ID]; after.Metadata.SwitchPending == nil {
 		t.Error("recovery cleared the pending pin it refused to act on")
+	}
+}
+
+// Both chat cleanup branches must preserve BOTH failures.
+//
+// The compensating write is what makes a failed launch safe to boot on: if
+// MarkTerminated fails, an active row survives for a session that does not
+// exist, and the next boot adopts it. markSpawnFailedTerminated reports that as
+// ErrLaunchCleanupUnresolved, which is an ErrBootUnsafe — and upstream's chat
+// path discarded the return value, so the boot-safety signal was lost on both
+// branches while the original error travelled alone. Only lint caught it.
+//
+// The original error has to survive too: "the turn was refused" and "and then
+// cleanup failed" are different facts and the caller needs both.
+func TestChatSpawnCleanupPreservesBothFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		arrange func(*fakeStore, *fakeLCM, *recordingLauncher)
+		wantErr string
+	}{
+		{
+			name: "MarkSpawned fails, then termination fails",
+			arrange: func(_ *fakeStore, lcm *fakeLCM, _ *recordingLauncher) {
+				lcm.markSpawnedErr = errors.New("adoption rejected")
+				lcm.markTerminatedErr = errors.New("compensating write rejected")
+			},
+			wantErr: "adoption rejected",
+		},
+		{
+			name: "the initial turn fails, then termination fails",
+			arrange: func(_ *fakeStore, lcm *fakeLCM, l *recordingLauncher) {
+				l.turnErr = errors.New("provider refused the turn")
+				lcm.markTerminatedErr = errors.New("compensating write rejected")
+			},
+			wantErr: "provider refused the turn",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := &recordingLauncher{}
+			mgr, st, _ := newChatManager(launcher)
+			lcm := &fakeLCM{store: st}
+			mgr.lcm = lcm
+			tc.arrange(st, lcm, launcher)
+
+			_, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Prompt: "start", RequestedMode: domain.SessionModeChat,
+			})
+			if err == nil {
+				t.Fatal("Spawn succeeded despite an injected failure")
+			}
+			// The original cause, not replaced by the cleanup failure.
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error lost the original cause %q: %v", tc.wantErr, err)
+			}
+			// And the boot-safety identity, which is the one lint was guarding.
+			if !errors.Is(err, ErrLaunchCleanupUnresolved) {
+				t.Errorf("error does not carry ErrLaunchCleanupUnresolved: %v", err)
+			}
+			if !errors.Is(err, ErrBootUnsafe) {
+				t.Errorf("ErrLaunchCleanupUnresolved no longer implies ErrBootUnsafe: %v", err)
+			}
+			// The residue the signal is about: a live row for a session that
+			// does not exist. Asserted so the test fails if the fixture ever
+			// stops reproducing the condition.
+			active := 0
+			for _, rec := range st.sessions {
+				if !rec.IsTerminated {
+					active++
+				}
+			}
+			if active == 0 {
+				t.Error("no active row survived, so this fixture no longer exercises unresolved cleanup")
+			}
+		})
 	}
 }
