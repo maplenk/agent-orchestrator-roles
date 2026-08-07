@@ -28,6 +28,17 @@ type SwitchRequest struct {
 	Semantic domain.SemanticHandoffV1
 	// FreshConversation forces same harness + kind fresh_conversation.
 	FreshConversation bool
+	// ForceGenerationID pins the saga's generation. Empty keeps today's
+	// behaviour (the saga mints its own), so every existing caller is
+	// unaffected.
+	//
+	// Manual failover (PHASE3B_MVP_CONTRACT section 6b) sets it because its
+	// durable attempt row must carry the generation from its FIRST write. With
+	// the saga minting it, the row is written empty and stamped afterwards --
+	// a third durable write whose crash window can only be closed by guessing
+	// which runtime belongs to which attempt, and a wrong guess there is a
+	// second runtime.
+	ForceGenerationID string
 }
 
 // SwitchResult is the outcome of a completed switch/fresh saga (target ack).
@@ -167,8 +178,12 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, err)
 	}
 
-	// Single generation for ledger + runtime launch.
-	targetGen := m.newSwitchGeneration()
+	// Single generation for ledger + runtime launch. A caller may pin it (see
+	// SwitchRequest.ForceGenerationID); empty falls through to the saga's own.
+	targetGen := strings.TrimSpace(req.ForceGenerationID)
+	if targetGen == "" {
+		targetGen = m.newSwitchGeneration()
+	}
 	roleID := strings.TrimSpace(meta.Role.RoleID)
 	fromModel := strings.TrimSpace(meta.Role.ResolvedModel)
 	toModel := resolveTargetModel(req.TargetModel, fromModel, sameHarness)
