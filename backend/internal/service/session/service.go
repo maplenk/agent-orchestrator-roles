@@ -816,6 +816,9 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchNotSupported):
 		return apierr.Conflict("SWITCH_NOT_SUPPORTED",
 			"Harness does not support switching (switch_supported=false for this source or target)", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchChatUnsupported):
+		return apierr.Conflict("SWITCH_CHAT_UNSUPPORTED",
+			"Switching harness is not supported for chat sessions yet; move the session to terminal mode first", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)

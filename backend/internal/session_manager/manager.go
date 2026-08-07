@@ -73,6 +73,12 @@ var (
 	// was "already switching interfaces", and SWITCH_IN_PROGRESS became
 	// unreachable.
 	ErrInterfaceTransitionInProgress = errors.New("session: interface transition already in progress")
+	// ErrSwitchChatUnsupported refuses the switch/fresh saga for a chat session.
+	// The saga stops a terminal runtime, probes it for liveness, and treats an
+	// empty runtime handle as confirmed death — none of which describes a chat
+	// controller. Lifting this needs stop and recovery for that controller, not
+	// a relaxed precondition.
+	ErrSwitchChatUnsupported = errors.New("session: switch is not supported for chat sessions yet")
 	// ErrSwitchNotSupported means source/target harness lacks switch_supported.
 	ErrSwitchNotSupported = errors.New("session: harness does not support switch")
 	// ErrSwitchPostStop means the source runtime was already stopped; the

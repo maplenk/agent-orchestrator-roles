@@ -748,3 +748,58 @@ func TestResumeAgentRestartsABranchlessScratchChatSession(t *testing.T) {
 		t.Error("restarting a chat session created a terminal runtime")
 	}
 }
+
+// The switch/fresh saga must refuse a chat session explicitly, before it stops
+// anything.
+//
+// It was already refused — but only because the saga demands a runtime handle
+// a chat session has never had. That is the same precondition Restart had to
+// exempt to work at all, so "correct" here rested on a rule the next fix was
+// going to relax. The saga stops a tmux runtime, probes it for liveness, and
+// reads an empty handle as confirmed death; none of that describes a chat
+// controller.
+func TestSwitchAndFreshRefuseChatSessionsBeforeStoppingAnything(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		call func(*Manager, domain.SessionID) error
+	}{
+		{"cross-harness switch", func(m *Manager, id domain.SessionID) error {
+			_, err := m.SwitchWorker(context.Background(), SwitchRequest{
+				SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+			})
+			return err
+		}},
+		{"fresh conversation", func(m *Manager, id domain.SessionID) error {
+			_, err := m.FreshConversation(context.Background(), id, domain.SemanticHandoffV1{})
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := &recordingLauncher{}
+			mgr, st, runtime := newChatManager(launcher)
+
+			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Prompt: "start", RequestedMode: domain.SessionModeChat,
+			})
+			if err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+
+			if err := tc.call(mgr, rec.ID); !errors.Is(err, ErrSwitchChatUnsupported) {
+				t.Fatalf("%s = %v, want ErrSwitchChatUnsupported", tc.name, err)
+			}
+			// Nothing stopped, nothing terminated, mode untouched.
+			if len(launcher.stopped) != 0 {
+				t.Errorf("the saga stopped the chat controller before refusing")
+			}
+			if runtime.destroyed != 0 {
+				t.Errorf("the saga destroyed a runtime for a chat session")
+			}
+			after := st.sessions[rec.ID]
+			if after.IsTerminated || domain.NormalizeSessionMode(after.Mode) != domain.SessionModeChat {
+				t.Errorf("session after refusal: terminated=%v mode=%s", after.IsTerminated, after.Mode)
+			}
+		})
+	}
+}

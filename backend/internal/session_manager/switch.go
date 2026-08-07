@@ -84,6 +84,21 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	if rec.Kind != domain.KindWorker && rec.Kind != domain.KindOrchestrator {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
 	}
+	// A chat session must not enter this saga, and the refusal has to be its
+	// own rather than a side effect.
+	//
+	// It was already refused, but only because the saga demands a runtime
+	// handle a chat session has never had — the same precondition that had to
+	// be exempted to make Restart work for chat. Correct by accident is not
+	// correct: relaxing that precondition again, exactly as Restart needed,
+	// would silently admit chat sessions to a saga that stops a tmux runtime,
+	// probes it for liveness, and reads an empty handle as confirmed death.
+	//
+	// The saga can have chat when it can stop and recover a chat controller.
+	// Until then this is a stated refusal, before anything is stopped.
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchChatUnsupported)
+	}
 	if rec.Kind == domain.KindOrchestrator && !ownershipHeld {
 		// Reached the worker entry point. Continuing would hold beginSwitch
 		// without the project gate, so a concurrent EnsureOrchestrator(clean)
