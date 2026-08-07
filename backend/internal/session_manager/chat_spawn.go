@@ -197,19 +197,14 @@ func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, cl
 	if err != nil {
 		return false, fmt.Errorf("send %s: session: %w", id, err)
 	}
-	// The pause fence, which the terminal path gets from sessionguard.
+	// Order matters, and it is sessionguard's order.
 	//
-	// Chat does not go through the messenger, so it does not go through the
-	// guard either — sendChat short-circuits above it. That left AO's own
-	// writes to a paused chat session unfenced while the identical write to a
-	// paused TUI session was suppressed, and the transition-message outbox is
-	// exactly such a writer. The rule is the guard's, unchanged: AO-initiated
-	// writes are refused while paused, human turns are not.
-	if origin == sendOriginAuto && rec.Metadata.Pause != nil {
-		m.logger.Info("chat write suppressed", "sessionID", id, "reason", "paused",
-			"incident", rec.Metadata.Pause.IncidentID)
-		return true, nil
-	}
+	// Existence and mode come first, or a paused TUI record would be claimed
+	// here and never reach the terminal path at all. Termination comes next,
+	// because the guard deliberately makes it OUTRANK pause: a terminated
+	// session cannot receive a message under any policy, and reporting a
+	// terminated write as "suppressed, fine" would hide a real error behind a
+	// pause that is no longer the reason.
 	if !ok || domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
 		return false, nil
 	}
@@ -219,6 +214,16 @@ func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, cl
 	}
 	if rec.IsTerminated {
 		return true, fmt.Errorf("send %s: %w", id, ErrTerminated)
+	}
+	// The pause fence, which the terminal path gets from sessionguard. Chat
+	// does not go through the messenger, so it does not go through the guard
+	// either — sendChat short-circuits above it. The rule is the guard's,
+	// unchanged: AO-initiated writes are refused while paused, human turns are
+	// not.
+	if origin == sendOriginAuto && rec.Metadata.Pause != nil {
+		m.logger.Info("chat write suppressed", "sessionID", id, "reason", "paused",
+			"incident", rec.Metadata.Pause.IncidentID)
+		return true, nil
 	}
 	var relayErr error
 	if clientMessageID != "" {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"os"
 	"path/filepath"
 	"testing"
@@ -610,5 +611,140 @@ func TestResumeAgentRestartsAChatSessionWithNoRuntimeHandle(t *testing.T) {
 	}
 	if runtime.created != 0 {
 		t.Errorf("restarting a chat session created a terminal runtime")
+	}
+}
+
+// The pause fence must hold for BOTH controllers, driven from the same origin.
+//
+// The first version of this fix threaded the origin into sendChat and stopped
+// there — so chat was fenced and the terminal path, which always called
+// sessionguard's USER-origin Deliver, was not. An automatic write to a paused
+// TUI session still went through. The two branches are one rule, so they are
+// tested as one table.
+func TestPauseFenceHoldsForBothControllers(t *testing.T) {
+	for _, mode := range []domain.SessionMode{domain.SessionModeChat, domain.SessionModeTUI} {
+		for _, tc := range []struct {
+			name    string
+			origin  sendOrigin
+			wantOut bool
+		}{
+			{"AO's own write", sendOriginAuto, false},
+			{"a person's turn", sendOriginUser, true},
+		} {
+			t.Run(string(mode)+"/"+tc.name, func(t *testing.T) {
+				launcher := &recordingLauncher{}
+				mgr, st, _ := newChatManager(launcher)
+				messenger := &fakeMessenger{}
+				mgr.messenger = sessionguard.New(st, messenger, mgr.logger)
+
+				rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+					ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+					Prompt: "start", RequestedMode: mode,
+				})
+				if err != nil {
+					t.Fatalf("Spawn: %v", err)
+				}
+				paused := st.sessions[rec.ID]
+				paused.Activity.State = domain.ActivityIdle
+				paused.Metadata.Pause = &domain.SessionPause{
+					IncidentID: "limit-1", Reason: domain.PauseReasonOperator,
+					DetectedBy: domain.PauseDetectionOperator, PausedAt: time.Now().UTC(),
+				}
+				st.sessions[rec.ID] = paused
+
+				chatBefore, tuiBefore := len(launcher.relayed), len(messenger.msgs)
+				if err := mgr.send(context.Background(), rec.ID, "message", "", tc.origin); err != nil {
+					t.Fatalf("send: %v", err)
+				}
+				got := (len(launcher.relayed)-chatBefore)+(len(messenger.msgs)-tuiBefore) > 0
+				if got != tc.wantOut {
+					t.Fatalf("%s write to a paused %s session delivered=%v, want %v",
+						tc.name, mode, got, tc.wantOut)
+				}
+			})
+		}
+	}
+}
+
+// sendChat must claim only what it owns, and in sessionguard's order: a paused
+// TUI record has to fall through to the terminal path, and termination has to
+// outrank pause rather than being reported as a successful suppression.
+func TestSendChatSuppressionOrderMatchesTheGuard(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, st, _ := newChatManager(launcher)
+
+	rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "start", RequestedMode: domain.SessionModeTUI,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	tui := st.sessions[rec.ID]
+	tui.Metadata.Pause = &domain.SessionPause{
+		IncidentID: "limit-1", Reason: domain.PauseReasonOperator,
+		DetectedBy: domain.PauseDetectionOperator, PausedAt: time.Now().UTC(),
+	}
+	st.sessions[rec.ID] = tui
+	if handled, _ := mgr.sendChat(context.Background(), rec.ID, "m", "", sendOriginAuto); handled {
+		t.Error("sendChat claimed a paused TUI session; it never reaches the terminal path")
+	}
+
+	chatRec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "start", RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	both := st.sessions[chatRec.ID]
+	both.IsTerminated = true
+	both.Metadata.Pause = &domain.SessionPause{
+		IncidentID: "limit-2", Reason: domain.PauseReasonOperator,
+		DetectedBy: domain.PauseDetectionOperator, PausedAt: time.Now().UTC(),
+	}
+	st.sessions[chatRec.ID] = both
+	// Terminated AND paused: the guard pins termination as the answer, because
+	// a terminated session cannot receive a message under any policy and
+	// "suppressed, fine" would hide that behind a pause.
+	_, err = func() (bool, error) { return mgr.sendChat(context.Background(), chatRec.ID, "m", "", sendOriginAuto) }()
+	if !errors.Is(err, ErrTerminated) {
+		t.Fatalf("terminated+paused chat send = %v, want ErrTerminated", err)
+	}
+}
+
+// A scratch project's sessions have no branch, by design. The runtime-handle
+// exemption alone still left a scratch chat session unrestartable, because the
+// branch requirement was unconditional.
+func TestResumeAgentRestartsABranchlessScratchChatSession(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, st, runtime := newChatManager(launcher)
+
+	project := st.projects["mer"]
+	project.Kind = domain.ProjectKindScratch
+	st.projects["mer"] = project
+
+	rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "start", RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	dead := st.sessions[rec.ID]
+	dead.Activity.State = domain.ActivityExited
+	dead.Metadata.RuntimeHandleID = ""
+	dead.Metadata.Branch = "" // scratch: no branch, and none is expected
+	st.sessions[rec.ID] = dead
+
+	before := len(launcher.started)
+	if _, err := mgr.ResumeAgentWithMode(context.Background(), rec.ID); err != nil {
+		t.Fatalf("ResumeAgent on a branchless scratch chat session: %v", err)
+	}
+	if len(launcher.started)-before != 1 {
+		t.Fatal("no chat controller was started")
+	}
+	if runtime.created != 0 {
+		t.Error("restarting a chat session created a terminal runtime")
 	}
 }

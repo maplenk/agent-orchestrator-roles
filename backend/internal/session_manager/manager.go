@@ -1971,14 +1971,30 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 	//
 	// Found by restarting a paused-dead CHAT session on a live daemon: resume
 	// lifted the pause and left it exited, and restart then answered 409.
-	chatMode := domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat
-	if meta.WorkspacePath == "" || meta.Branch == "" || (!chatMode && meta.RuntimeHandleID == "") {
-		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrIncompleteHandle)
-	}
-
+	// Loaded BEFORE the completeness check, because what counts as complete
+	// depends on the project kind: a scratch session legitimately has no
+	// branch. RestoreWithMode has always keyed on that; this path did not, so
+	// a scratch chat session was rejected for a branch it is not supposed to
+	// have — the runtime-handle exemption alone left it unreachable.
 	project, err := m.loadProject(ctx, rec.ProjectID)
 	if err != nil {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, err)
+	}
+	// A chat session has no runtime handle BY DESIGN — no pane, nothing to
+	// reattach — so requiring one refused every chat restart with "missing
+	// runtime or workspace handles". That is the Restart control the pause
+	// contract insists on keeping separate from Resume, and on the paused-dead
+	// chat cell it was the only way back; relaunchSession already dispatches to
+	// the chat controller from the persisted mode.
+	//
+	// Found by restarting a paused-dead CHAT session on a live daemon: resume
+	// lifted the pause and left it exited, and restart then answered 409.
+	chatMode := domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat
+	branchRequired := project.Kind.WithDefault() != domain.ProjectKindScratch
+	if meta.WorkspacePath == "" ||
+		(branchRequired && meta.Branch == "") ||
+		(!chatMode && meta.RuntimeHandleID == "") {
+		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrIncompleteHandle)
 	}
 	ws := ports.WorkspaceInfo{
 		Path:      meta.WorkspacePath,
@@ -3371,11 +3387,25 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 	if err != nil {
 		return err
 	}
-	outcome, err := m.messenger.Deliver(ctx, id, message)
+	// Deliver is sessionguard's USER-origin operation, so calling it for an
+	// automatic write told the guard a human had typed this — and the pause
+	// fence only refuses originAuto. Threading the origin into sendChat alone
+	// fixed the chat half and left the terminal half exactly as it was: the
+	// transition outbox could still write to a paused TUI session.
+	deliver := m.messenger.Deliver
+	if origin == sendOriginAuto {
+		deliver = m.messenger.DeliverAuto
+	}
+	outcome, err := deliver(ctx, id, message)
 	if err != nil {
 		return fmt.Errorf("send %s: %w", id, err)
 	}
 	switch outcome {
+	case sessionguard.SuppressedPaused:
+		// Suppressed, not failed: the guard already logged it, and the write
+		// was AO's own. Reporting an error would make the outbox retry a
+		// message the pause exists to withhold.
+		return nil
 	case sessionguard.SuppressedNotFound:
 		return fmt.Errorf("send %s: %w", id, ErrNotFound)
 	case sessionguard.SuppressedTerminated:
