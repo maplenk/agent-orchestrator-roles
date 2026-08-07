@@ -10,7 +10,7 @@ check is green; the only action left is merging back to the roles trunk.
 | Integration branch | `roles/upstream-sync-2` |
 | Current checkpoint | `dd06d31a` |
 | Upstream pin | `fa799a7a58e2f9ec13d174567aff436ba890ff6a` |
-| Roles trunk awaiting merge | `roles/multi-sub-v1` @ `1f80bdb5` |
+| Roles trunk | `roles/multi-sub-v1` @ `5dc2fcfb` (Sync 2 merged 2026-08-07) |
 | Upstream distance at checkpoint | 0 commits behind the pin |
 | Fork migrations | `9000`–`9007`; next fork migration is `9008+` |
 
@@ -71,8 +71,12 @@ Items 1–4 are closed; item 5, the merge itself, is the only one still open.
 4. ~~Run the required GitHub Actions jobs.~~ **Done.** All green on
    `7165c942` (PR #1, draft). The local `-race` timing failures did not
    reproduce on the Ubuntu runner.
-5. **Open.** Merge `roles/upstream-sync-2` into `roles/multi-sub-v1`, then
-   update this file and `REMAINING_PLAN.md` with the merge SHA.
+5. ~~Merge `roles/upstream-sync-2` into `roles/multi-sub-v1`.~~ **Done**
+   (2026-08-07) as merge commit `5dc2fcfb`, a `--no-ff` merge so the sync
+   stays revertable as one unit. Trunk verified after the merge: backend 4486
+   pass, frontend 1992 pass / 0 fail, gofmt clean, typecheck clean.
+
+**Sync 2 is closed.** The next work is Phase 3A-2b vendor detection.
 
 ## After Sync 2
 

@@ -2,10 +2,9 @@
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
 **Active integration branch:** `roles/upstream-sync-2` @ `dd06d31a` (PR #1, draft — **accepted 2026-08-07; all required CI green**)
-**Roles trunk awaiting merge:** `roles/multi-sub-v1` @ `1f80bdb5`
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
-**Current gate:** merge the accepted Sync 2 branch to the roles trunk, then resume Phase 3A-2b vendor detection
+**Current gate:** Phase 3A-2b vendor detection (blocked on captured vendor fixtures)
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 Canonical product design remains `MASTER_PLAN.md`; this file tracks execution status.
@@ -27,7 +26,7 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Not started.** Manual continue and bounded opt-in automatic failover remain. |
-| Upstream Sync 2 | **Accepted (2026-08-07) on `roles/upstream-sync-2` @ `dd06d31a`; not yet merged to the roles trunk.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. The merge is the only remaining action. See `UPSTREAM_SYNC2_PLAN.md`. |
+| Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
 | CI | **Green, including the required GitHub Actions jobs** on `7165c942` (PR #1, draft): Go — build-test with `go test -race ./...`, lint, api-drift — plus Frontend, CLI E2E, e2e-gate, gitleaks, Mobile and React Doctor. Locally: gofmt, build, vet, golangci-lint v2.12.2 (0 issues), backend 4486 pass, frontend 1992 pass / 0 fail, typecheck clean, zero data races. The `-race` timing failures seen locally do not reproduce on the Ubuntu runner. |
 
 > **Claude-only installs cannot use a strict role map.** The strict

@@ -10,7 +10,7 @@ Local working tree: `/Users/tagtaste/Documents/QBApps/agent-orchestrator-roles`
 | Remote name | `upstream` |
 | Pinned SHA | See `AO_BASELINE_SHA.txt` |
 | Roles trunk | `roles/multi-sub-v1` |
-| Active integration | `roles/upstream-sync-2` (accepted 2026-08-07; until it merges to the trunk) |
+| Active integration | none — Sync 2 merged to `roles/multi-sub-v1` on 2026-08-07 (`5dc2fcfb`) |
 
 Pin before feature work. Own migration numbers on this fork (do not collide with upstream 0042 races from #3548 / #3386).
 
@@ -29,7 +29,7 @@ Master plan (design): `MASTER_PLAN.md`
 - Phase 1 **strict dogfood exit** remains open (see `REMAINING_PLAN.md`).
 - Claude `read_only_enforced=false` (honest); RO orch/reviewer use **Codex**.
 - Phase 2A is accepted; Phase 2B-0/1/2 and the Phase 3A pause/UI boundary landed.
-**Next:** merge the accepted Sync 2 branch to the roles trunk, then implement a vendor-backed Phase 3A-2b detector. Phase 2B-3 remains blocked on Claude read-only.
+**Next:** implement a vendor-backed Phase 3A-2b detector. Sync 2 merged to the trunk on 2026-08-07 as `5dc2fcfb`. Phase 2B-3 remains blocked on Claude read-only.
 
 ## Remotes
 
