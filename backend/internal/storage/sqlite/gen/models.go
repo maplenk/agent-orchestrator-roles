@@ -385,6 +385,24 @@ type SessionCleanupFact struct {
 	FailureCode          string
 }
 
+type SessionFailoverAttempt struct {
+	ID           string
+	SessionID    string
+	ProjectID    string
+	IncidentID   string
+	Seq          int64
+	RoleID       string
+	FromHarness  string
+	FromModel    string
+	ToHarness    string
+	ToModel      string
+	RungIndex    int64
+	GenerationID string
+	State        string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
 type SessionInterfaceTransition struct {
 	ID                   string
 	SessionID            domain.SessionID
