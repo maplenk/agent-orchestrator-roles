@@ -1,11 +1,11 @@
 # Multi-sub roles — status & remaining plan
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
-**Active integration branch:** `roles/upstream-sync-2` @ `7165c942` (PR #1, draft — **all required CI green**)
+**Active integration branch:** `roles/upstream-sync-2` @ `dd06d31a` (PR #1, draft — **accepted 2026-08-07; all required CI green**)
 **Roles trunk awaiting merge:** `roles/multi-sub-v1` @ `1f80bdb5`
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
-**Current gate:** two live Step 5 dogfood records, then merge to the roles trunk, then resume Phase 3A-2b vendor detection
+**Current gate:** merge the accepted Sync 2 branch to the roles trunk, then resume Phase 3A-2b vendor detection
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 Canonical product design remains `MASTER_PLAN.md`; this file tracks execution status.
@@ -27,7 +27,7 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Not started.** Manual continue and bounded opt-in automatic failover remain. |
-| Upstream Sync 2 | **Merged on `roles/upstream-sync-2`, not yet merged to the roles trunk.** Pinned to `fa799a7a`; fork migrations are 9000–9007. Steps 1–4 and 6–8 accepted; **every required GitHub Actions job is green**. Step 5 needs two live records. See `UPSTREAM_SYNC2_PLAN.md`. |
+| Upstream Sync 2 | **Accepted (2026-08-07) on `roles/upstream-sync-2` @ `dd06d31a`; not yet merged to the roles trunk.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. The merge is the only remaining action. See `UPSTREAM_SYNC2_PLAN.md`. |
 | CI | **Green, including the required GitHub Actions jobs** on `7165c942` (PR #1, draft): Go — build-test with `go test -race ./...`, lint, api-drift — plus Frontend, CLI E2E, e2e-gate, gitleaks, Mobile and React Doctor. Locally: gofmt, build, vet, golangci-lint v2.12.2 (0 issues), backend 4486 pass, frontend 1992 pass / 0 fail, typecheck clean, zero data races. The `-race` timing failures seen locally do not reproduce on the Ubuntu runner. |
 
 > **Claude-only installs cannot use a strict role map.** The strict
@@ -35,13 +35,13 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 > advertises enforceable read-only. This is the Phase 1-B blocker itself;
 > Phase 2B-3 is downstream.
 
-**Next engineering actions, in order:** capture the two missing live Step 5
-records — orchestrator fresh conversation, and a genuine durable `post_stop`
-without `target_ack` — then merge `roles/upstream-sync-2` into
-`roles/multi-sub-v1`. Those two records are the ONLY remaining pre-merge
-acceptance work; every other Sync 2 gate, CI included, is closed. Then resume
-vendor-backed Phase 3A-2b detection. Claude read-only may proceed in parallel
-and remains the gate for 2B-3.
+**Next engineering actions, in order:** merge `roles/upstream-sync-2` into
+`roles/multi-sub-v1` and record the merge SHA here and in the Sync 2 tracker.
+Every Sync 2 acceptance gate — review, the two live Step 5 records and the
+required CI jobs — is closed, so the merge is the only thing left. Then resume
+vendor-backed Phase 3A-2b detection, which is still blocked on captured vendor
+fixtures. Claude read-only may proceed in parallel and remains the gate for
+2B-3.
 
 ---
 
@@ -268,7 +268,8 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 2B-0a/0b ownership + uniqueness ──► LANDED (safety only)
 2B-1 orch in-place fresh      ──► LANDED (first user-facing 2B behaviour)
 2B-2 replacement recoverability ──► LANDED (intent + crash-consistent retirement)
-Now ──► Sync 2 acceptance ──► merge to roles trunk
+Sync 2 acceptance ──► DONE (2026-08-07)
+Now ──► merge Sync 2 to roles trunk
      ──► vendor-backed 3A-2b detector ──► promote one harness at a time
      ──► 3B manual continue ──► bounded opt-in auto-failover
      ║
@@ -341,7 +342,6 @@ Still open or partial:
 
 ## 7. Immediate next action
 
-1. Close the ordered review, live-dogfood and required-CI blockers in `UPSTREAM_SYNC2_PLAN.md`.
-2. Merge `roles/upstream-sync-2` into `roles/multi-sub-v1`; record the merge SHA here and in the Sync 2 tracker.
-3. Resume Phase 3A-2b only with captured, sanitized vendor fixtures. Keep `limit_detection_supported=false` until a detector has structural tests and live evidence, then promote it separately.
-4. Start Phase 3B after one detector is accepted. Claude read-only remains parallel and gates 2B-3.
+1. Merge `roles/upstream-sync-2` into `roles/multi-sub-v1`; record the merge SHA here and in the Sync 2 tracker. The ordered review, live-dogfood and required-CI blockers in `UPSTREAM_SYNC2_PLAN.md` are all closed.
+2. Resume Phase 3A-2b only with captured, sanitized vendor fixtures. Keep `limit_detection_supported=false` until a detector has structural tests and live evidence, then promote it separately.
+3. Start Phase 3B after one detector is accepted. Claude read-only remains parallel and gates 2B-3.

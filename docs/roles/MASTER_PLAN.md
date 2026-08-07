@@ -11,9 +11,11 @@ tracked in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
 accepted. Phase 2B-0/1/2 landed; 2B-3 is blocked on Claude read-only
 enforcement. Phase 3A's durable pause, operator surface, desktop pause/role
 composer and detector boundary landed, but no vendor detector is promoted.
-Sync 2 is on `roles/upstream-sync-2` with every required CI job green; its
-remaining gate is two live dogfood records (orchestrator fresh conversation, and
-a genuine post-stop recovery). Phase 3B has not started. The estimates below are original planning estimates, not a claim
+Sync 2 is accepted on `roles/upstream-sync-2` @ `dd06d31a`: all eight steps are
+done, every required CI job is green, and the two live Step 5 dogfood records
+(orchestrator fresh conversation, and a genuine post-stop recovery on the
+original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Merging
+it to the roles trunk is the only outstanding action. Phase 3B has not started. The estimates below are original planning estimates, not a claim
 about remaining duration.
 
 ---
@@ -353,7 +355,7 @@ Zai and Kimi validated **separately** on Pi.
 13. [~] Orchestrator switch protocol — in-place fresh and replacement recovery landed; cross-harness is blocked on Claude read-only
 14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
 15. [ ] Manual continue + opt-in auto-failover
-16. [~] Dogfood against all DoD invariants — Phase 2A/2B/3A evidence exists; Sync 2's required CI is green and two live records remain
+16. [~] Dogfood against all DoD invariants — Phase 2A/2B/3A evidence exists; Sync 2 is accepted with its required CI green and both live Step 5 records captured. Still partial because invariants 7 and 8 (promoted limit detection, failover runtime) have no dogfood evidence yet
 
 ---
 

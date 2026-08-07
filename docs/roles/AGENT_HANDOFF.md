@@ -3,7 +3,7 @@
 > **Superseded checkpoint (written 2026-08-04).** Keep this for the detailed
 > Phase 1/2 history, but do not follow its branch, CI-debt or “start Phase 3A”
 > instructions. Current execution status is in
-> [`REMAINING_PLAN.md`](REMAINING_PLAN.md); the active Sync 2 acceptance steps
+> [`REMAINING_PLAN.md`](REMAINING_PLAN.md); the Sync 2 record and what follows it
 > are in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
 
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
