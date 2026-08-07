@@ -797,3 +797,50 @@ func TestInterfaceTransitionDoesNotStartTargetWhenSourceStopRemainsAmbiguous(t *
 		t.Fatalf("target Chat controller started with %q", chat.start.ProviderConversationID)
 	}
 }
+
+// A read-only role must be refused during PREFLIGHT, which runs before the
+// source handoff — not at relaunch, which runs after the TUI runtime has been
+// stopped and Chat mode committed.
+//
+// The late check was not merely untidy. It stopped a perfectly good agent to
+// perform a transition it was always going to refuse, then relied on rollback
+// to put it back; if rollback failed, the session was left in a mode its role
+// forbids. So this asserts the two facts a late refusal would break: the mode
+// is unchanged and the runtime was never stopped.
+func TestInterfaceTransitionRefusesAReadOnlyRoleBeforeStoppingTheRuntime(t *testing.T) {
+	manager, store, runtime, chat, log := newTransitionManager(t, domain.SessionModeTUI)
+
+	rec := store.sessions["session-1"]
+	rec.Metadata.Role = domain.SessionRoleBinding{
+		RoleID:              "reviewer",
+		ResolvedHarness:     rec.Harness,
+		ResolvedPermissions: domain.RoleExecutionPolicy{WorkspaceWrites: false},
+	}
+	store.sessions["session-1"] = rec
+
+	transition, err := manager.StartInterfaceTransition(context.Background(), "session-1",
+		domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settled := awaitTransition(t, store, transition.ID)
+	if settled.Phase != domain.SessionInterfaceTransitionFailed {
+		t.Fatalf("phase = %s, want failed", settled.Phase)
+	}
+	if !strings.Contains(settled.ErrorDetail, "read-only role") {
+		t.Errorf("error detail = %q, want the role refusal", settled.ErrorDetail)
+	}
+	if got := store.sessions["session-1"].Mode; got != domain.SessionModeTUI {
+		t.Errorf("mode = %s, want tui: a refused transition committed the target mode", got)
+	}
+	if chat.start.SessionID != "" {
+		t.Errorf("a refused transition still started a chat controller")
+	}
+	// The whole point: the agent that was running is still running.
+	if strings.Contains(fmt.Sprint(*log), "stop:") {
+		t.Errorf("a refused transition stopped the source controller: %v", *log)
+	}
+	if runtime.destroyed != 0 {
+		t.Errorf("a refused transition destroyed the terminal runtime")
+	}
+}

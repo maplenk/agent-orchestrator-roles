@@ -473,4 +473,11 @@ func TestChatSpawnRefusesAReadOnlyRole(t *testing.T) {
 	if runtime.created != 0 {
 		t.Errorf("a refused chat spawn still created a runtime")
 	}
+	// Nor a role template artifact. The CAS write is harmless residue on its
+	// own — content-addressed and reused by the next spawn of the same template
+	// — but "refused before anything durable" should be true rather than nearly
+	// true, so the gate sits above it.
+	if len(st.artifacts) != 0 {
+		t.Errorf("a refused chat spawn persisted %d template artifact(s)", len(st.artifacts))
+	}
 }

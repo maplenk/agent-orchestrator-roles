@@ -422,6 +422,16 @@ func (m *Manager) preflightInterfaceTarget(
 		if m.chat == nil {
 			return ports.ErrChatUnsupported
 		}
+		// The ROLE gate belongs in preflight, not only at relaunch. Preflight
+		// runs BEFORE the source handoff; relaunch runs after the TUI runtime
+		// has been stopped and Chat mode committed. Checking only at relaunch
+		// meant a forbidden transition stopped a perfectly good agent and then
+		// depended on rollback to put it back — and with the gate removed the
+		// transition test lands in recovery_required, which is what "stranded"
+		// looks like from the outside.
+		if err := requireChatModeAllowed(rec.Metadata.Role); err != nil {
+			return err
+		}
 		return m.chat.PreflightChat(ctx, rec.Harness)
 	}
 	agent, ok := m.agents.Agent(rec.Harness)

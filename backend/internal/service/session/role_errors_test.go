@@ -119,3 +119,41 @@ func TestToAPIError_ChatModeRoleForbidden(t *testing.T) {
 		t.Fatalf("code = %q, want SESSION_MODE_ROLE_FORBIDDEN", apiErr.Code)
 	}
 }
+
+// Two fences, two codes. They were one code for a while: upstream's merged
+// INTERFACE_TRANSITION_IN_PROGRESS case matched ErrSwitchInProgress and sat
+// ABOVE the fork's SWITCH_IN_PROGRESS case, so the first branch answered for
+// both and every ordinary switch, fresh-conversation and input-fence conflict
+// told the client it was "already switching interfaces". SWITCH_IN_PROGRESS was
+// unreachable — a code with no input is indistinguishable from a code that
+// works, which is why this pins both directions.
+func TestToAPIError_SwitchAndInterfaceFencesKeepSeparateCodes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{"switch saga fence", sessionmanager.ErrSwitchInProgress, "SWITCH_IN_PROGRESS"},
+		{"interface transition fence", sessionmanager.ErrInterfaceTransitionInProgress, "INTERFACE_TRANSITION_IN_PROGRESS"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := fmt.Errorf("switch mer-1: %w", tc.err)
+			var apiErr *apierr.Error
+			if !errors.As(toAPIError(wrapped), &apiErr) {
+				t.Fatalf("%v did not map to an apierr", tc.err)
+			}
+			if apiErr.Code != tc.code {
+				t.Fatalf("code = %q, want %q — the two fences clear on different events and need different remedies", apiErr.Code, tc.code)
+			}
+		})
+	}
+}
+
+// And the sentinels must stay distinct values: making one an alias of the other
+// would restore the shadowing while both cases still appear in the switch.
+func TestSwitchAndInterfaceFenceSentinelsAreDistinct(t *testing.T) {
+	if errors.Is(sessionmanager.ErrSwitchInProgress, sessionmanager.ErrInterfaceTransitionInProgress) ||
+		errors.Is(sessionmanager.ErrInterfaceTransitionInProgress, sessionmanager.ErrSwitchInProgress) {
+		t.Fatal("the two fences share an identity; whichever toAPIError case comes first will answer for both")
+	}
+}

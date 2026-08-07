@@ -61,6 +61,18 @@ var (
 	// session. The API maps it to a 409 so a double-submit does not race two
 	// teardown/relaunch cycles over one worktree.
 	ErrSwitchInProgress = errors.New("session: switch already in progress")
+	// ErrInterfaceTransitionInProgress is the INTERFACE transition's fence, and
+	// it is deliberately not ErrSwitchInProgress.
+	//
+	// They are different operations with different remedies: a switch fence
+	// clears when the switch saga finishes or is recovered, an interface
+	// transition clears when the transition settles or is cancelled. Sharing a
+	// sentinel meant whichever toAPIError case came first answered for both,
+	// and the one that came first was the interface one — so every ordinary
+	// switch, fresh-conversation and input-fence conflict told the client it
+	// was "already switching interfaces", and SWITCH_IN_PROGRESS became
+	// unreachable.
+	ErrInterfaceTransitionInProgress = errors.New("session: interface transition already in progress")
 	// ErrSwitchNotSupported means source/target harness lacks switch_supported.
 	ErrSwitchNotSupported = errors.New("session: harness does not support switch")
 	// ErrSwitchPostStop means the source runtime was already stopped; the
@@ -616,6 +628,38 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	if roleErr != nil {
 		return domain.SessionRecord{}, 0, 0, mapRoleError(roleErr)
 	}
+	// Resolve the controller mode here, before ANYTHING durable is written —
+	// including the role template CAS below. A chat request AO cannot honour
+	// should cost nothing: no terminated row, no worktree, and no content-
+	// addressed template row for a session that never existed. It never falls
+	// back to TUI, which would put the user in a terminal they did not ask for.
+	//
+	// This sits above persistRoleTemplateArtifact deliberately. The CAS write is
+	// harmless residue on its own (content-addressed, deduplicated, reused by
+	// the next spawn of the same template), but "refused before anything
+	// durable" should be true rather than nearly true.
+	mode := m.resolveSessionMode(ctx, cfg.RequestedMode)
+	if mode == domain.SessionModeChat {
+		if m.chat == nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: chat mode is not available in this build", ports.ErrChatUnsupported)
+		}
+		if err := m.chat.PreflightChat(ctx, cfg.Harness); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+		}
+		// The ROLE preflight, alongside the harness one and for the same
+		// reason. applyRoleMap has already run, so cfg.RoleBinding is the
+		// host's resolved policy, not anything the client sent. A read-only
+		// role cannot be enforced by the Chat controller — read_only_enforced
+		// is a property of the terminal argv, which Chat never receives.
+		//
+		// This was missing at first and only a live spawn found it: the helper
+		// existed, relaunch called it, and a read-only role still started in
+		// chat on the FIRST try.
+		if err := requireChatModeAllowed(cfg.RoleBinding); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+		}
+	}
+	cfg.RequestedMode = mode
 	if err := m.persistRoleTemplateArtifact(ctx, roleResult); err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: persist role template artifact: %w", err)
 	}
@@ -635,37 +679,6 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	if _, ok := m.agents.Agent(cfg.Harness); !ok {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %q", ErrUnknownHarness, cfg.Harness)
 	}
-
-	// Resolve the controller mode here, before anything durable is created, for
-	// the same reason an unknown harness is rejected above: a chat request AO
-	// cannot honor should cost nothing, not leave a terminated row and a worktree
-	// behind. It never falls back to TUI — that would put the user in a terminal
-	// they deliberately did not ask for.
-	mode := m.resolveSessionMode(ctx, cfg.RequestedMode)
-	if mode == domain.SessionModeChat {
-		if m.chat == nil {
-			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: chat mode is not available in this build", ports.ErrChatUnsupported)
-		}
-		if err := m.chat.PreflightChat(ctx, cfg.Harness); err != nil {
-			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
-		}
-		// The ROLE preflight, alongside the harness one and for the same
-		// reason: a request AO cannot honour must cost nothing.
-		//
-		// applyRoleMap has already run, so cfg.RoleBinding is the host's
-		// resolved policy rather than anything the client sent. A read-only
-		// role cannot be enforced by the Chat controller — read_only_enforced
-		// is a property of the terminal argv, which Chat never receives — so
-		// this is the spawn-side half of the gate in relaunchSession.
-		//
-		// It was missing here at first, and only a live spawn found it: the
-		// helper existed, the relaunch path called it, and a read-only role
-		// still started in chat on the FIRST try.
-		if err := requireChatModeAllowed(cfg.RoleBinding); err != nil {
-			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
-		}
-	}
-	cfg.RequestedMode = mode
 
 	// A chat session runs no agent inside a terminal runtime, so the terminal
 	// prerequisites are not its concern.
@@ -1837,7 +1850,7 @@ func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (Res
 	if active, err := m.hasActiveInterfaceTransition(ctx, id); err != nil {
 		return RestoreResult{}, fmt.Errorf("restore %s: interface transition: %w", id, err)
 	} else if active {
-		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrSwitchInProgress)
+		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, ErrInterfaceTransitionInProgress)
 	}
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
@@ -1917,7 +1930,7 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 	if active, err := m.hasActiveInterfaceTransition(ctx, id); err != nil {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: interface transition: %w", id, err)
 	} else if active {
-		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrSwitchInProgress)
+		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrInterfaceTransitionInProgress)
 	}
 	if !m.beginAgentResume(id) {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrResumeInProgress)
