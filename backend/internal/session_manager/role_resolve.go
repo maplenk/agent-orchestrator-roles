@@ -360,6 +360,8 @@ func mapRoleError(err error) error {
 		return fmt.Errorf("spawn: %w", ErrHarnessOverrideForbidden)
 	case errors.Is(err, roles.ErrModelOverrideForbidden):
 		return fmt.Errorf("spawn: %w", ErrModelOverrideForbidden)
+	case errors.Is(err, ErrChatModeReadOnlyUnsupported):
+		return fmt.Errorf("spawn: %w", ErrChatModeReadOnlyUnsupported)
 	// A loader failure is a template failure: reuse the sentinel that already
 	// maps to ROLE_TEMPLATE_UNAVAILABLE rather than minting a second code for
 	// the same actionable problem.

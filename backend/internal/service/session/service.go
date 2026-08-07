@@ -851,6 +851,12 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrHarnessOverrideForbidden):
 		return apierr.Invalid("HARNESS_OVERRIDE_FORBIDDEN",
 			"The role map decides the harness for a role-pinned session; remove the harness override", nil)
+	case errors.Is(err, sessionmanager.ErrChatModeReadOnlyUnsupported):
+		// The composer treats this as a Chat-preflight code and offers the TUI
+		// fallback, which keeps the role.
+		return apierr.Invalid("SESSION_MODE_ROLE_FORBIDDEN",
+			"This role may not write to the workspace, and chat mode cannot enforce that. "+
+				"Start the session in terminal mode instead.", nil)
 	case errors.Is(err, sessionmanager.ErrModelOverrideForbidden):
 		return apierr.Invalid("MODEL_OVERRIDE_FORBIDDEN",
 			"The role map decides the model for a role-pinned session; remove the model override", nil)

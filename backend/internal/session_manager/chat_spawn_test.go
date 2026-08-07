@@ -3,6 +3,9 @@ package sessionmanager
 import (
 	"context"
 	"errors"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -409,5 +412,65 @@ func TestSendRefusedForTerminatedChatSession(t *testing.T) {
 	}
 	if len(launcher.relayed) != 0 {
 		t.Errorf("a terminated session still received %v", launcher.relayed)
+	}
+}
+
+// The gate has to be on the SPAWN path, not only on relaunch.
+//
+// This is the test the previous one should have been. A unit test of
+// requireChatModeAllowed passes whether or not anything calls it, which is
+// exactly how the hole survived: the helper was right, relaunch called it, and
+// a read-only role still started in chat on the first try. Only a live spawn
+// found it. So this drives Spawn and asserts nothing durable was created.
+func TestChatSpawnRefusesAReadOnlyRole(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, st, runtime := newChatManager(launcher)
+
+	roleMap := domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		StrictDelegation: true,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {Harness: domain.HarnessCodex, Template: "orchestrator",
+				Permissions: domain.RoleExecutionPolicy{CanSpawn: true}},
+			"reviewer": {Harness: domain.HarnessCodex, Template: "reviewer",
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: false}},
+		},
+	}
+	project := st.projects["mer"]
+	project.Config.RoleMap = roleMap
+	st.projects["mer"] = project
+
+	dir := t.TempDir()
+	for _, name := range []string{"orchestrator", "reviewer"} {
+		body := "---\nid: " + name + "\nname: " + name + "\nroleReminder: r\n---\n# body\n"
+		if err := os.WriteFile(filepath.Join(dir, name+".md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	before := len(st.sessions)
+	_, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID:     "mer",
+		Kind:          domain.KindWorker,
+		RoleID:        "reviewer",
+		Prompt:        "review it",
+		RequestedMode: domain.SessionModeChat,
+	})
+	if !errors.Is(err, ErrChatModeReadOnlyUnsupported) {
+		t.Fatalf("Spawn = %v, want ErrChatModeReadOnlyUnsupported", err)
+	}
+	// Refused BEFORE anything durable: no row, no worktree, no controller. A
+	// request AO cannot honour must cost nothing.
+	if len(st.sessions) != before {
+		t.Errorf("a refused chat spawn still created a session row")
+	}
+	if len(launcher.started) != 0 {
+		t.Errorf("a refused chat spawn still started a controller")
+	}
+	if runtime.created != 0 {
+		t.Errorf("a refused chat spawn still created a runtime")
 	}
 }

@@ -478,3 +478,53 @@ func TestApplyRoleMap_MissingTemplateIsClassified(t *testing.T) {
 		t.Fatalf("mapRoleError = %v, want ErrRolePromptRequired (which maps to ROLE_TEMPLATE_UNAVAILABLE)", mapRoleError(err))
 	}
 }
+
+// requireChatModeAllowed guards TWO paths, and the live dogfood found that only
+// one of them was wired: relaunch had the gate, SPAWN did not, so a read-only
+// role started in chat mode on the first try and only a restart would have
+// refused it. The gate belongs to both, which is what this pins.
+func TestRequireChatModeAllowed(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		binding domain.SessionRoleBinding
+		wantErr bool
+		why     string
+	}{
+		{
+			name:    "no role pin",
+			binding: domain.SessionRoleBinding{},
+			why:     "a session with no role has no role policy to enforce; chat is ordinary",
+		},
+		{
+			name: "writable role",
+			binding: domain.SessionRoleBinding{RoleID: "implementor",
+				ResolvedPermissions: domain.RoleExecutionPolicy{WorkspaceWrites: true}},
+			why: "the role may write, so chat grants nothing it does not already have",
+		},
+		{
+			name: "read-only role",
+			binding: domain.SessionRoleBinding{RoleID: "reviewer",
+				ResolvedPermissions: domain.RoleExecutionPolicy{WorkspaceWrites: false}},
+			wantErr: true,
+			why: "read_only_enforced is a property of the TERMINAL argv; the chat " +
+				"controller never receives it, and Codex chat maps ordinary permissions " +
+				"to danger-full-access — so chat would hand writes to a role defined " +
+				"not to have them, with the read-only claim still displayed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := requireChatModeAllowed(tc.binding)
+			if tc.wantErr && !errors.Is(err, ErrChatModeReadOnlyUnsupported) {
+				t.Fatalf("err = %v, want ErrChatModeReadOnlyUnsupported — %s", err, tc.why)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("err = %v, want nil — %s", err, tc.why)
+			}
+			// And it must be classified, or the client sees a 500 for a request
+			// whose fix (use terminal mode) the message can state.
+			if tc.wantErr && !errors.Is(mapRoleError(err), ErrChatModeReadOnlyUnsupported) {
+				t.Fatalf("mapRoleError dropped the sentinel: %v", mapRoleError(err))
+			}
+		})
+	}
+}

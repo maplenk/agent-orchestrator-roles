@@ -649,6 +649,21 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		if err := m.chat.PreflightChat(ctx, cfg.Harness); err != nil {
 			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
 		}
+		// The ROLE preflight, alongside the harness one and for the same
+		// reason: a request AO cannot honour must cost nothing.
+		//
+		// applyRoleMap has already run, so cfg.RoleBinding is the host's
+		// resolved policy rather than anything the client sent. A read-only
+		// role cannot be enforced by the Chat controller — read_only_enforced
+		// is a property of the terminal argv, which Chat never receives — so
+		// this is the spawn-side half of the gate in relaunchSession.
+		//
+		// It was missing here at first, and only a live spawn found it: the
+		// helper existed, the relaunch path called it, and a read-only role
+		// still started in chat on the FIRST try.
+		if err := requireChatModeAllowed(cfg.RoleBinding); err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w", err)
+		}
 	}
 	cfg.RequestedMode = mode
 

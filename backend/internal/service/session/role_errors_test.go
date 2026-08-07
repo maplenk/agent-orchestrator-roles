@@ -105,3 +105,17 @@ func TestToAPIError_TemplateUnavailableThroughTheFullWrapping(t *testing.T) {
 		t.Fatalf("code = %q, want ROLE_TEMPLATE_UNAVAILABLE", apiErr.Code)
 	}
 }
+
+// The typed refusal the composer keys on: it is in CHAT_PREFLIGHT_CODES, so the
+// renderer offers the TUI fallback — which keeps the role — instead of dead-ending.
+func TestToAPIError_ChatModeRoleForbidden(t *testing.T) {
+	wrapped := fmt.Errorf("spawn mer-1: %w",
+		fmt.Errorf("spawn: %w", sessionmanager.ErrChatModeReadOnlyUnsupported))
+	var apiErr *apierr.Error
+	if !errors.As(toAPIError(wrapped), &apiErr) {
+		t.Fatal("a read-only role in chat mode surfaced as a 500")
+	}
+	if apiErr.Code != "SESSION_MODE_ROLE_FORBIDDEN" {
+		t.Fatalf("code = %q, want SESSION_MODE_ROLE_FORBIDDEN", apiErr.Code)
+	}
+}
