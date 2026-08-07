@@ -1,11 +1,11 @@
 # Multi-sub roles — status & remaining plan
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
-**Active integration branch:** `roles/upstream-sync-2` @ `e01702b6`
+**Active integration branch:** `roles/upstream-sync-2` @ `7165c942` (PR #1, draft — **all required CI green**)
 **Roles trunk awaiting merge:** `roles/multi-sub-v1` @ `1f80bdb5`
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
-**Current gate:** finish Sync 2 acceptance, merge it to the roles trunk, then resume Phase 3A-2b vendor detection
+**Current gate:** two live Step 5 dogfood records, then merge to the roles trunk, then resume Phase 3A-2b vendor detection
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 Canonical product design remains `MASTER_PLAN.md`; this file tracks execution status.
@@ -27,7 +27,7 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Not started.** Manual continue and bounded opt-in automatic failover remain. |
-| Upstream Sync 2 | **Merged on `roles/upstream-sync-2`, not yet merged to the roles trunk.** Pinned to `fa799a7a`; fork migrations are 9000–9007. See `UPSTREAM_SYNC2_PLAN.md`. |
+| Upstream Sync 2 | **Merged on `roles/upstream-sync-2`, not yet merged to the roles trunk.** Pinned to `fa799a7a`; fork migrations are 9000–9007. Steps 1–4 and 6–8 accepted; **every required GitHub Actions job is green**. Step 5 needs two live records. See `UPSTREAM_SYNC2_PLAN.md`. |
 | Local CI matrix | Backend tests, build, vet, gofmt, golangci-lint, API drift and TypeScript checks pass. Race has upstream-reproduced timing failures but no races; Vitest has one deterministic fork failure. Required GitHub Actions and two review regressions remain acceptance gates. |
 
 > **Claude-only installs cannot use a strict role map.** The strict

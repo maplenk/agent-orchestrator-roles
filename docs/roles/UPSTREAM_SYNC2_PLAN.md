@@ -40,28 +40,34 @@ old fork history to the 9000 range before goose evaluates the upstream chain.
 | 5 | Existing sagas | **Implementation pass; live acceptance incomplete** | Worker Codex→Claude switch passed with ordered ledger and stable role pin. Chat switch/fresh refuses before stopping its controller. Switch and interface-transition sentinels are distinct. Still capture on this merged tree: (a) orchestrator fresh conversation and (b) a genuine durable `post_stop` without `target_ack` recovered on the original generation. |
 | 6 | Muse | **Done** | Muse is spawn-capable in the registry, binds writable roles and role models/templates, and remains false for read-only, switch, limit detection and failover source/rung capabilities. |
 | 7 | Desktop integration | **Safe portion done; transition UI deferred** | Paused live/dead states, Resume versus Restart agent, strict role composer, Muse TUI-only presentation and dead-Chat 409 mapping are covered. Interface-transition UI remains deferred behind the product fence. |
-| 8 | CI matrix | **Run; acceptance open** | `gofmt`, build, vet, golangci-lint, backend tests, API drift and TypeScript checks pass locally. `-race` found no data races but has three timing failures reproduced on upstream. Full Vitest has one deterministic fork failure. Required GitHub Actions have not yet supplied the final Ubuntu acceptance signal. |
+| 8 | CI matrix | **Done** | Every required GitHub Actions job is green on `7165c942` (PR #1): **Go** (build-test incl. `go test -race ./...`, lint, api-drift), **Frontend** (test, renderer-smoke), CLI E2E, e2e-gate, gitleaks, Mobile, React Doctor. The three `-race` timing failures are local-only — they pass on the Ubuntu runner, which is what settles them. The deterministic Vitest failure is gone: that test asserted `instanceof Request`, a pass-through `runtimeFetch` deliberately stopped doing so same-URL requests still receive operator auth, so restoring it would have reopened the spawn-auth defect. Frontend is 1992 pass / 0 fail. |
 
 ## Ordered acceptance blockers
 
 Do these before merging the integration branch back to `roles/multi-sub-v1`:
 
-1. Fix the stale same-URL expectation in
-   `frontend/src/renderer/lib/api-client.test.ts`. Production intentionally
-   injects operator headers on same-URL requests; the deterministic test still
-   expects the pre-fix `Request` identity.
-2. Add wiring-level Chat rollback regressions for both launch failure shapes:
-   initial-turn or `MarkSpawned` failure followed by a failed termination must
-   preserve `ErrLaunchCleanupUnresolved` and must not leave an untracked
-   controller or a false live row.
-3. Capture the two missing live Step 5 records on the merged tree:
-   orchestrator fresh conversation and genuine post-stop recovery without a
-   pre-existing `target_ack`.
-4. Run the required GitHub Actions jobs. Treat the local race timing comparison
-   as diagnostic evidence, not as a substitute for the repository's Ubuntu
-   required checks.
-5. Merge `roles/upstream-sync-2` into `roles/multi-sub-v1`, then update this
-   file and `REMAINING_PLAN.md` with the merge SHA.
+1. ~~Fix the stale same-URL expectation in `api-client.test.ts`.~~ **Done**
+   (`7165c942`). It asserts the URL and method now. The auth behaviour keeps
+   its own sibling test, so removing the header injection still fails loudly.
+2. ~~Add wiring-level Chat rollback regressions for both launch failure
+   shapes.~~ **Done** (`7165c942`). Each branch asserts three things that are
+   easy to conflate: the original cause survives, `ErrLaunchCleanupUnresolved`
+   (an `ErrBootUnsafe`) survives, and an active row really is left behind — the
+   last so the test fails if the fixture stops reproducing the condition it
+   claims to cover. Both mutation-checked independently; before this, errcheck
+   was the only thing standing between a discarded return and a silent boot
+   hazard.
+3. **Open.** Capture the two missing live Step 5 records on the merged tree:
+   orchestrator fresh conversation, and a genuine durable `post_stop` without
+   `target_ack` recovered on the original generation. Note that `s2-4` is NOT
+   such a specimen: it failed at `pre_stop`, so its source was never stopped
+   and `RecoverSwitchFromPostStop` correctly reports nothing to recover. A real
+   specimen needs the target launch to fail after the source stops.
+4. ~~Run the required GitHub Actions jobs.~~ **Done.** All green on
+   `7165c942` (PR #1, draft). The local `-race` timing failures did not
+   reproduce on the Ubuntu runner.
+5. **Open.** Merge `roles/upstream-sync-2` into `roles/multi-sub-v1`, then
+   update this file and `REMAINING_PLAN.md` with the merge SHA.
 
 ## After Sync 2
 
