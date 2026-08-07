@@ -103,8 +103,14 @@ func (p *Plugin) GetPromptDeliveryStrategy(ctx context.Context, _ ports.LaunchCo
 }
 
 // PromptReadinessHints waits briefly for Amp's interactive prompt before AO
-// injects the worker's first task. Timeout falls back to delivery so startup
-// copy changes do not permanently block a session.
+// injects the worker's first task. A timeout now refuses delivery rather than
+// pasting anyway, so every pattern here has to be copy only an input prompt
+// produces.
+//
+// A bare ">" was not: it matches the prompt, the pager, the diff view and the
+// confirmation dialogs the harness draws while it is waiting for a human. That
+// is the class of match that pasted a task brief into Grok's trust screen and
+// answered it. Both remaining patterns are Amp's composer copy.
 func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig) (ports.PromptReadinessHints, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.PromptReadinessHints{}, err
@@ -114,7 +120,6 @@ func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig)
 		Patterns: []string{
 			"Type a message",
 			"What can I help",
-			">",
 		},
 		PollInterval: 200 * time.Millisecond,
 		Timeout:      8 * time.Second,

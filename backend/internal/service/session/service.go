@@ -893,12 +893,6 @@ func toAPIError(err error) error {
 		return apierr.Conflict("RUNTIME_SESSION_CONFLICT",
 			"Another AO instance already owns this session's terminal. Stop the other instance, "+
 				"or run this one with its own AO_DATA_DIR so it gets an isolated terminal server", nil)
-	// Also a size the caller controls, not a fault. AO bounds the task prompt
-	// but not the composed system prompt, and a harness that delivers its prompt
-	// in argv puts both into the terminal launch command — so a role-pinned
-	// spawn, whose role template is the bulk of that system prompt, is what
-	// pushes it past the terminal runtime's limit. Naming the two inputs is the
-	// remedy; INTERNAL_ERROR named nothing.
 	case errors.Is(err, chatsvc.ErrNoController):
 		// The sentinel and this answer both existed already — the conversation
 		// routes have returned it all along — but /sessions/{id}/send reached
@@ -907,6 +901,12 @@ func toAPIError(err error) error {
 		// from writeConversationError so the two read identically.
 		return apierr.Conflict("CHAT_CONTROLLER_NOT_READY",
 			"the agent controller for this session is not running", nil)
+	// Also a size the caller controls, not a fault. AO bounds the task prompt
+	// but not the composed system prompt, and a harness that delivers its prompt
+	// in argv puts both into the terminal launch command — so a role-pinned
+	// spawn, whose role template is the bulk of that system prompt, is what
+	// pushes it past the terminal runtime's limit. Naming the two inputs is the
+	// remedy; INTERNAL_ERROR named nothing.
 	case errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong):
 		return apierr.Invalid("LAUNCH_COMMAND_TOO_LONG",
 			"The role's system prompt plus the task prompt are too large for the terminal runtime to launch. "+

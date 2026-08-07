@@ -151,16 +151,26 @@ func (p *Plugin) GetPromptDeliveryStrategy(ctx context.Context, _ ports.LaunchCo
 	return ports.PromptDeliveryAfterStart, nil
 }
 
-// PromptReadinessHints waits for Grok's interactive UI before AO injects the
-// worker's first task. Timeout falls back to delivery so a changed startup
-// banner cannot permanently block spawning.
+// PromptReadinessHints waits for Grok's composer before AO injects the worker's
+// first task. The marker is the composer's own glyph, because the product
+// banner this used to match ("Grok Build") is printed by the repository-trust
+// screen as well and therefore only proved that Grok had drawn something: three
+// worker sessions had their brief pasted into that trust dialog, where its "n"
+// selected "No, quit".
+//
+// Verified against Grok Build 1.0.0 by capturing the pane in an isolated tmux
+// server: the trust screen shows the banner and no composer, the ready TUI
+// shows "❯" inside the input box, and the resume-session picker marks rows with
+// "›" rather than "❯". The trust screen appears whenever the workspace carries
+// local hook settings — which every AO worktree does, since AO installs
+// .claude/settings.local.json for Grok's Claude-compat layer.
 func (p *Plugin) PromptReadinessHints(ctx context.Context, _ ports.LaunchConfig) (ports.PromptReadinessHints, error) {
 	if err := ctx.Err(); err != nil {
 		return ports.PromptReadinessHints{}, err
 	}
 	return ports.PromptReadinessHints{
 		InitialDelay: 750 * time.Millisecond,
-		Patterns:     []string{"Grok Build"},
+		Patterns:     []string{"❯"},
 		PollInterval: 200 * time.Millisecond,
 		Timeout:      8 * time.Second,
 		Lines:        80,

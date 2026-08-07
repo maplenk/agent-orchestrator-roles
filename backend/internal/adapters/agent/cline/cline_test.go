@@ -140,6 +140,33 @@ func TestPromptReadinessHints(t *testing.T) {
 	}
 }
 
+// A readiness timeout now refuses delivery instead of pasting anyway, so a
+// pattern that matches non-composer chrome is the only way a brief can still
+// reach a dialog. A bare ">" was exactly that: it matches the approval screens
+// Cline draws while it waits for a human, which is how a task brief was pasted
+// into Grok's repository-trust screen and answered "No, quit".
+func TestPromptReadinessHintsRejectAmbiguousChrome(t *testing.T) {
+	const approvalScreen = `Cline wants to run a command:
+
+  > rm -rf build
+
+  1. Yes, proceed
+  2. No, exit
+`
+	hints, err := (&Plugin{}).PromptReadinessHints(context.Background(), ports.LaunchConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range hints.Patterns {
+		if strings.TrimSpace(pattern) == ">" {
+			t.Fatalf("patterns = %#v, want no bare prompt character", hints.Patterns)
+		}
+		if strings.Contains(approvalScreen, pattern) {
+			t.Fatalf("pattern %q reports readiness for an approval screen", pattern)
+		}
+	}
+}
+
 func TestGetConfigSpecReportsModelField(t *testing.T) {
 	plugin := &Plugin{}
 

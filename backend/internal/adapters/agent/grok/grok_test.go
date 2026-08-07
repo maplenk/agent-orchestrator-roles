@@ -62,8 +62,68 @@ func TestPromptReadinessHints(t *testing.T) {
 	if hints.InitialDelay != 750*time.Millisecond || hints.PollInterval != 200*time.Millisecond || hints.Timeout != 8*time.Second || hints.Lines != 80 {
 		t.Fatalf("hints = %#v", hints)
 	}
-	if !reflect.DeepEqual(hints.Patterns, []string{"Grok Build"}) {
-		t.Fatalf("patterns = %#v, want Grok Build", hints.Patterns)
+	if !reflect.DeepEqual(hints.Patterns, []string{"❯"}) {
+		t.Fatalf("patterns = %#v, want the composer glyph", hints.Patterns)
+	}
+}
+
+// Panes captured live from Grok Build 1.0.0 in an isolated tmux server, kept
+// verbatim except for the ASCII-art logo rows.
+const (
+	grokTrustScreenPane = `
+   master /private/tmp/ao-grok-trust-probe
+
+                              Do you trust the contents of this directory?
+                                    /private/tmp/ao-grok-trust-probe
+
+                        Grok Build may run or modify contents in this directory,
+                                         posing security risks.
+
+                                     Yes, proceed                 y
+                                     No, quit                     n
+
+                                                              Grok Build  1.0.0
+`
+
+	grokReadyPane = `
+  /private/tmp/ao-grok-trust-probe
+
+   ╭──────────────────────────────────────────────────────────────────╮
+   │     Grok Build  1.0.0                                            │
+   │     New worktree                                         ctrl+w  │
+   │     Resume session                                       ctrl+s  │
+   │     Quit                                                 ctrl+q  │
+   ╰──────────────────────────────────────────────────────────────────╯
+
+  Tip: Use Shift+Tab to cycle between modes like Plan mode.
+
+  ╭──────────────────────────────────────────────────────────────────────╮
+  │ ❯                                                                    │
+  ╰───────────────────────── Grok 4.5 (high) · always-approve ───────────╯
+`
+)
+
+// The trust screen prints the product banner too, so a banner pattern reported
+// readiness for a dialog: the pasted brief's "n" answered "No, quit" and three
+// worker sessions exited before receiving their task.
+func TestPromptReadinessPatternsRejectTrustScreen(t *testing.T) {
+	hints, err := (&Plugin{}).PromptReadinessHints(context.Background(), ports.LaunchConfig{})
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	for _, pattern := range hints.Patterns {
+		if strings.Contains(grokTrustScreenPane, pattern) {
+			t.Fatalf("pattern %q matches the repository-trust screen", pattern)
+		}
+	}
+	matched := false
+	for _, pattern := range hints.Patterns {
+		if strings.Contains(grokReadyPane, pattern) {
+			matched = true
+		}
+	}
+	if !matched {
+		t.Fatalf("patterns %#v match no part of Grok's ready composer", hints.Patterns)
 	}
 }
 

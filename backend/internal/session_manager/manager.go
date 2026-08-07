@@ -126,6 +126,17 @@ var (
 	// would answer it on the user's behalf. The API maps it to a 409; the
 	// caller retries once the user has answered in the terminal.
 	ErrAwaitingDecision = errors.New("session: awaiting a user decision")
+	// ErrPromptNotReady refuses an after-start task delivery AO cannot prove is
+	// landing in the agent's own input prompt — the readiness wait expired, or
+	// the pane is showing a trust/approval screen.
+	//
+	// It wraps ErrAwaitingDecision because the remedy is that sentinel's (a
+	// human has to answer what the terminal is showing) and because the answer
+	// it already carries is the actionable one. Delivering anyway is what cost
+	// three live sessions: Grok's repository-trust screen prints the same
+	// "Grok Build" banner the readiness matcher accepted as proof of a prompt,
+	// and the pasted brief's "n" chose "No, quit".
+	ErrPromptNotReady = fmt.Errorf("%w: agent is not at an input prompt", ErrAwaitingDecision)
 )
 
 // Env vars a spawned process reads to learn who it is. A worker that starts
@@ -902,7 +913,7 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: completed: %w", id, errors.Join(err, cleanupErr))
 	}
 	if delivery == ports.PromptDeliveryAfterStart && prompt != "" {
-		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, id, prompt); err != nil {
+		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, id, launchID, prompt); err != nil {
 			runtimeDestroyed, cleanupErr := m.reapFailedLaunchRuntime(ctx, "spawn", id, handle, launchID)
 			workspaceDestroyed := m.rollbackPreparedSpawnWorkspace(ctx, rec, ws, workspaceProject, runtimeDestroyed)
 			if runtimeDestroyed && workspaceDestroyed {
@@ -2215,7 +2226,7 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 			Config:           agentConfig,
 			Permissions:      agentConfig.Permissions,
 		}
-		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, rec.ID, rec.Metadata.Prompt); err != nil {
+		if err := m.deliverAfterStartPrompt(ctx, agent, launchCfg, handle, rec.ID, launchID, rec.Metadata.Prompt); err != nil {
 			// Always terminates, switch included: the launch WAS adopted here, so
 			// the row already names the runtime and there is no post-stop state to
 			// preserve. Matches what this branch has always done.
@@ -4482,8 +4493,17 @@ func (m *Manager) cleanupAgentWorkspace(ctx context.Context, rec domain.SessionR
 	}
 }
 
-func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent, cfg ports.LaunchConfig, handle ports.RuntimeHandle, id domain.SessionID, prompt string) error {
+func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent, cfg ports.LaunchConfig, handle ports.RuntimeHandle, id domain.SessionID, launchID, prompt string) error {
 	if err := m.waitForPromptReadiness(ctx, agent, cfg, handle); err != nil {
+		return err
+	}
+	// Readiness described what the pane was SHOWING, not what is still behind
+	// it. tmux keeps the pane alive after the agent exits (buildLaunchCommand
+	// execs an interactive shell in its place), so an agent that quit during
+	// the wait — the incident's "No, quit" — leaves a shell that would run the
+	// task brief as commands. The guard below cannot see that: the store still
+	// says active because no exit hook has landed yet.
+	if err := m.confirmWorkloadBeforePaste(ctx, id, handle, launchID); err != nil {
 		return err
 	}
 	// Host-owned delivery: may inject into a SwitchPending target so the first
@@ -4510,6 +4530,44 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 		return nil
 	default:
 		return fmt.Errorf("send %s: unexpected guard outcome %v", id, outcome)
+	}
+}
+
+// promptDeliveryWorkloadRecheck bounds the single re-probe in
+// confirmWorkloadBeforePaste. It separates "the launch shell has not forked the
+// agent yet" from "the agent is gone" — one process-table snapshot cannot tell
+// them apart, and an adapter with no readiness hints delivers with no wait at
+// all.
+const promptDeliveryWorkloadRecheck = 250 * time.Millisecond
+
+// confirmWorkloadBeforePaste refuses an after-start delivery whose agent
+// process is no longer running under the pane. Runtimes that cannot inspect
+// their workload keep the previous behavior rather than blocking every spawn.
+//
+// A probe that fails is refused too: pasting a task brief into a pane AO cannot
+// account for is the unrecoverable direction, and a refused delivery is the
+// recoverable one (same posture as sessionguard's fail-closed read).
+func (m *Manager) confirmWorkloadBeforePaste(ctx context.Context, id domain.SessionID, handle ports.RuntimeHandle, launchID string) error {
+	inspector, ok := m.runtime.(ports.SupervisedProcessInspector)
+	if !ok || strings.TrimSpace(launchID) == "" || strings.TrimSpace(handle.ID) == "" {
+		return nil
+	}
+	ref := ports.SupervisedProcessRef{SessionID: id, LaunchID: launchID}
+	alive, err := inspector.IsSupervisedProcessAlive(ctx, handle, ref)
+	if err == nil && alive {
+		return nil
+	}
+	if err := sleepContext(ctx, promptDeliveryWorkloadRecheck); err != nil {
+		return err
+	}
+	alive, err = inspector.IsSupervisedProcessAlive(ctx, handle, ref)
+	switch {
+	case err != nil:
+		return fmt.Errorf("deliver %s: agent liveness unresolved before prompt delivery: %w", id, err)
+	case !alive:
+		return fmt.Errorf("deliver %s: %w during startup, before the task was delivered", id, ErrAgentExited)
+	default:
+		return nil
 	}
 }
 
@@ -4588,24 +4646,41 @@ func (m *Manager) waitForPromptReadiness(ctx context.Context, agent ports.Agent,
 
 	for {
 		output, err := m.runtime.GetOutput(ctx, handle, lines)
-		if err == nil && promptOutputContains(output, hints.Patterns) {
-			return nil
+		if err == nil {
+			// Negative evidence outranks positive evidence, always: the trust
+			// screen that ended three sessions carried BOTH the banner the
+			// matcher wanted and the y/n choice the brief went on to answer.
+			if marker, blocked := promptOutputBlocked(output); blocked {
+				m.logger.Warn("prompt readiness: approval screen on the pane; refusing after-start prompt delivery",
+					"sessionID", cfg.SessionID,
+					"kind", string(cfg.Kind),
+					"marker", marker,
+				)
+				return fmt.Errorf("prompt readiness %s: %w: the pane is showing an approval screen (%q)",
+					cfg.SessionID, ErrPromptNotReady, marker)
+			}
+			if promptOutputContains(output, hints.Patterns) {
+				return nil
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-deadline.C:
-			// Prompt readiness is best-effort: a missing terminal marker must not
-			// block spawn forever or be treated as confirmed readiness. Fall back
-			// to delivering the prompt and make the degraded path observable.
-			m.logger.Warn("prompt readiness timed out; falling back to after-start prompt delivery",
+			// A missing marker is not permission to paste. AO knows what the
+			// pane is NOT (an input prompt it recognizes) and nothing about what
+			// it is, and the runtime appends Enter to every paste — which is how
+			// a task brief answered a dialog nobody had read. Refuse, and let
+			// the caller unwind the launch it cannot hand a task to.
+			m.logger.Warn("prompt readiness timed out; refusing after-start prompt delivery",
 				"sessionID", cfg.SessionID,
 				"kind", string(cfg.Kind),
 				"timeout", hints.Timeout.String(),
 				"pollInterval", poll.String(),
 				"lines", lines,
 			)
-			return nil
+			return fmt.Errorf("prompt readiness %s: %w: no prompt marker appeared within %s",
+				cfg.SessionID, ErrPromptNotReady, hints.Timeout)
 		case <-ticker.C:
 		}
 	}
@@ -4618,6 +4693,41 @@ func promptOutputContains(output string, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// promptApprovalMarkers name screens that are waiting for a keystroke from the
+// USER rather than a task from AO. They are checked against the same capture
+// the positive patterns read, and a match refuses delivery even when a positive
+// pattern matched too.
+//
+// The first three are Grok Build 1.0.0's repository-trust screen, captured
+// live: "Do you trust the contents of this directory?" over the choices "Yes,
+// proceed  y" and "No, quit  n". A pasted brief containing "n" chose the
+// second one for three sessions, and the same screen prints the "Grok Build"
+// banner the adapter used to accept as readiness. Claude-Code-shaped harnesses
+// (Grok's compat layer, Cline, Kiro) phrase the same dialog with "files in this
+// folder" and "No, exit"; the y/n forms cover the plain-text confirmations
+// other CLIs print before their UI starts.
+var promptApprovalMarkers = []string{
+	"do you trust",
+	"yes, proceed",
+	"no, quit",
+	"no, exit",
+	"press enter to continue",
+	"(y/n)",
+	"[y/n]",
+}
+
+// promptOutputBlocked reports the approval marker visible on the pane, if any.
+// Matching is case-insensitive because these screens are prose, not protocol.
+func promptOutputBlocked(output string) (string, bool) {
+	lowered := strings.ToLower(output)
+	for _, marker := range promptApprovalMarkers {
+		if strings.Contains(lowered, marker) {
+			return marker, true
+		}
+	}
+	return "", false
 }
 
 func sleepContext(ctx context.Context, d time.Duration) error {
