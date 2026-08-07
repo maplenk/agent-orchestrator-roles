@@ -127,16 +127,22 @@ var (
 	// caller retries once the user has answered in the terminal.
 	ErrAwaitingDecision = errors.New("session: awaiting a user decision")
 	// ErrPromptNotReady refuses an after-start task delivery AO cannot prove is
-	// landing in the agent's own input prompt — the readiness wait expired, or
-	// the pane is showing a trust/approval screen.
+	// landing in the agent's own input prompt — the readiness wait expired, the
+	// pane is showing a trust/approval screen, or the adapter offers no evidence
+	// of readiness at all.
 	//
-	// It wraps ErrAwaitingDecision because the remedy is that sentinel's (a
-	// human has to answer what the terminal is showing) and because the answer
-	// it already carries is the actionable one. Delivering anyway is what cost
-	// three live sessions: Grok's repository-trust screen prints the same
-	// "Grok Build" banner the readiness matcher accepted as proof of a prompt,
-	// and the pasted brief's "n" chose "No, quit".
-	ErrPromptNotReady = fmt.Errorf("%w: agent is not at an input prompt", ErrAwaitingDecision)
+	// It is deliberately NOT ErrAwaitingDecision. That sentinel's remedy is
+	// "answer it in the session terminal", and by the time a caller reads this
+	// there is no such terminal: spawn tears the runtime and workspace down on
+	// this error, and relaunch parks or terminates the session. Pointing a
+	// person at a pane that no longer exists is a worse answer than a generic
+	// one, because they will go looking.
+	//
+	// Delivering anyway is what cost three live sessions: Grok's
+	// repository-trust screen prints the same "Grok Build" banner the readiness
+	// matcher accepted as proof of a prompt, and the pasted brief's "n" chose
+	// "No, quit".
+	ErrPromptNotReady = errors.New("session: agent is not at an input prompt")
 )
 
 // Env vars a spawned process reads to learn who it is. A worker that starts
@@ -4614,9 +4620,17 @@ func gateTerminalPending(rec domain.SessionRecord) error {
 }
 
 func (m *Manager) waitForPromptReadiness(ctx context.Context, agent ports.Agent, cfg ports.LaunchConfig, handle ports.RuntimeHandle) error {
+	// No provider is not permission to paste.
+	//
+	// This returned nil, so an adapter that offered no readiness evidence got
+	// the ORIGINAL blind-paste behaviour — the liveness probe proves a process
+	// exists, never that its pane is an input prompt. Aider and Goose are
+	// after-start with no hints today, so they were exactly the sessions this
+	// whole change was supposed to protect.
 	provider, ok := agent.(ports.AgentPromptReadinessProvider)
 	if !ok {
-		return nil
+		return fmt.Errorf("%s: %w: this harness offers no readiness evidence",
+			cfg.SessionID, ErrPromptNotReady)
 	}
 	hints, err := provider.PromptReadinessHints(ctx, cfg)
 	if err != nil {
@@ -4627,8 +4641,11 @@ func (m *Manager) waitForPromptReadiness(ctx context.Context, agent ports.Agent,
 			return err
 		}
 	}
+	// Same rule for a provider that answers with nothing usable: a delay is not
+	// evidence, and a pattern set AO never waits on is not either.
 	if len(hints.Patterns) == 0 || hints.Timeout <= 0 {
-		return nil
+		return fmt.Errorf("%s: %w: this harness supplied no usable readiness patterns",
+			cfg.SessionID, ErrPromptNotReady)
 	}
 	poll := hints.PollInterval
 	if poll <= 0 {

@@ -808,6 +808,18 @@ func toAPIError(err error) error {
 			"The session is already using the requested interface", nil)
 	case errors.Is(err, sessionmanager.ErrInterfaceTransitionNotFound):
 		return apierr.NotFound("INTERFACE_TRANSITION_NOT_FOUND", "No active interface switch exists")
+	case errors.Is(err, sessionmanager.ErrPromptNotReady):
+		// Deliberately not AWAITING_DECISION's "answer it in the session
+		// terminal first": there is no terminal left to answer in. Spawn tears
+		// the runtime and workspace down on this error and relaunch parks or
+		// terminates the session, so the honest answer names what happened to
+		// the task, what happened to the session, and what has to change before
+		// a retry is any different.
+		return apierr.Conflict("PROMPT_NOT_READY",
+			"The agent never reached its own input prompt, so the task was not sent and the "+
+				"launch was stopped. Nothing was typed into the agent. Resolve what the agent "+
+				"is waiting on — most often a trust or approval screen for this workspace — "+
+				"then start the session again", nil)
 	case errors.Is(err, sessionmanager.ErrAwaitingDecision):
 		return apierr.Conflict("SESSION_AWAITING_DECISION",
 			"Session is paused on a permission decision; answer it in the session terminal first", nil)

@@ -725,6 +725,17 @@ type readinessAgent struct {
 	hints ports.PromptReadinessHints
 }
 
+// readyAfterStartAgent is an after-start agent that DOES offer readiness
+// evidence, which is now the precondition for any after-start delivery. The
+// bare afterStartAgent is refused, deliberately: an adapter that cannot say
+// what its own input prompt looks like is one AO must not paste into.
+func readyAfterStartAgent() readinessAgent {
+	return readinessAgent{hints: ports.PromptReadinessHints{
+		Patterns: []string{"ready>"},
+		Timeout:  time.Second,
+	}}
+}
+
 func (a readinessAgent) PromptReadinessHints(context.Context, ports.LaunchConfig) (ports.PromptReadinessHints, error) {
 	return a.hints, nil
 }
@@ -1599,13 +1610,13 @@ func TestSpawn_ReturnsFinalPromptByteMetrics(t *testing.T) {
 func TestSpawn_DeliversPromptAfterStartWhenAgentRequestsIt(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{}
 	agent := &recordingAgent{}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -1699,8 +1710,8 @@ func TestSpawn_AfterStartPromptRefusesWhenReadinessTimesOut(t *testing.T) {
 		t.Fatalf("Spawn err = %v, want ErrPromptNotReady", err)
 	}
 	// The 409 the API already answers for "a human has to act in the terminal".
-	if !errors.Is(err, ErrAwaitingDecision) {
-		t.Fatalf("Spawn err = %v, want it to carry ErrAwaitingDecision", err)
+	if !errors.Is(err, ErrPromptNotReady) {
+		t.Fatalf("Spawn err = %v, want it to carry ErrPromptNotReady", err)
 	}
 	if rt.outputCalls == 0 {
 		t.Fatal("GetOutput was not called")
@@ -1957,14 +1968,14 @@ func TestSpawn_AfterStartPromptRefusesWhenWorkloadDiedDuringWait(t *testing.T) {
 func TestSpawn_AfterStartPromptFailureCleansUpSpawn(t *testing.T) {
 	st := newFakeStore()
 	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{err: errors.New("pane unavailable")}
 	agent := &recordingAgent{}
 	lcm := &fakeLCM{store: st}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -2005,14 +2016,14 @@ func TestSpawn_AfterStartPromptFailureCleansUpWorkspaceProjectRows(t *testing.T)
 		Config: testRoleAgents(),
 	}
 	st.workspaceRepo["mer"] = []domain.WorkspaceRepoRecord{{Name: "api", RelativePath: "api"}}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{err: errors.New("pane unavailable")}
 	agent := &recordingAgent{}
 	lcm := &fakeLCM{store: st}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -2077,14 +2088,14 @@ func TestSpawn_AfterStartPromptSuppressedTerminationFailsSpawn(t *testing.T) {
 	base := newFakeStore()
 	base.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
 	st := &terminatedOnReReadStore{fakeStore: base}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	ws := &fakeWorkspace{}
 	msg := &fakeMessenger{} // underlying messenger is fine; suppression comes from the guard's re-read
 	agent := &recordingAgent{}
 	lcm := &fakeLCM{store: base}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: ws,
 		Store:     st,
 		Messenger: msg,
@@ -3993,12 +4004,12 @@ func TestRestore_FallbackLaunchDeliversPromptAfterStartWhenAgentRequestsIt(t *te
 		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker, IsTerminated: true,
 		Metadata: domain.SessionMetadata{WorkspacePath: "/ws/mer-1", Branch: "b", Prompt: "continue the task"},
 	}
-	rt := &fakeRuntime{}
+	rt := &fakeRuntime{outputs: []string{"ready>"}}
 	msg := &fakeMessenger{}
 	agent := &recordingAgent{}
 	m := New(Deps{
 		Runtime:   rt,
-		Agents:    singleAgent{agent: afterStartAgent{recordingAgent: agent}},
+		Agents:    singleAgent{agent: readinessAgent{afterStartAgent: afterStartAgent{recordingAgent: agent}, hints: ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second}}},
 		Workspace: &fakeWorkspace{},
 		Store:     st,
 		Messenger: msg,
@@ -7066,4 +7077,85 @@ func (m *flipOnNudgeMessenger) Send(_ context.Context, _ domain.SessionID, msg s
 		m.flipped = true
 	}
 	return nil
+}
+
+// Missing readiness evidence must REFUSE, not paste.
+//
+// The registry test proves each adapter declares its evidence; this proves the
+// manager acts on the absence. Both are needed, and only this one fails when
+// waitForPromptReadiness goes back to returning nil — which is how prompted
+// Aider and Goose kept the original blind-paste behaviour after the readiness
+// work supposedly closed it. Liveness proves a process exists; it never proves
+// the pane is an input prompt.
+func TestSpawn_AfterStartPromptRefusesWithoutReadinessEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		agent func(*recordingAgent) ports.Agent
+		why   string
+	}{
+		{
+			name:  "adapter offers no readiness provider at all",
+			agent: func(a *recordingAgent) ports.Agent { return afterStartAgent{recordingAgent: a} },
+			why:   "aider and goose ship exactly this shape",
+		},
+		{
+			name: "adapter answers with no patterns",
+			agent: func(a *recordingAgent) ports.Agent {
+				return readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: a},
+					hints:           ports.PromptReadinessHints{Timeout: time.Second},
+				}
+			},
+			why: "a delay is not evidence",
+		},
+		{
+			name: "adapter answers with patterns AO never waits on",
+			agent: func(a *recordingAgent) ports.Agent {
+				return readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: a},
+					hints:           ports.PromptReadinessHints{Patterns: []string{"ready>"}},
+				}
+			},
+			why: "a zero timeout means the patterns are never checked",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: testRoleAgents()}
+			rt := &fakeRuntime{outputs: []string{"ready>"}}
+			msg := &fakeMessenger{}
+			m := New(Deps{
+				Runtime:   rt,
+				Agents:    singleAgent{agent: tc.agent(&recordingAgent{})},
+				Workspace: &fakeWorkspace{},
+				Store:     st,
+				Messenger: msg,
+				Lifecycle: &fakeLCM{store: st},
+				LookPath:  func(string) (string, error) { return "/bin/true", nil },
+			})
+
+			_, _, _, err := m.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+				Prompt: "fix the button",
+			})
+			if !errors.Is(err, ErrPromptNotReady) {
+				t.Fatalf("Spawn = %v, want ErrPromptNotReady — %s", err, tc.why)
+			}
+			// And nothing was typed. A refusal that already pasted is the bug.
+			if len(msg.msgs) != 0 {
+				t.Fatalf("refused delivery still wrote %d message(s): %v", len(msg.msgs), msg.msgs)
+			}
+			// The state the API answer has to be truthful about: no surviving
+			// session and no surviving runtime, which is why the message must
+			// not tell anyone to answer something "in the session terminal".
+			for id, rec := range st.sessions {
+				if !rec.IsTerminated {
+					t.Errorf("session %s survived a refused spawn as live", id)
+				}
+			}
+			if rt.destroyed == 0 {
+				t.Error("the runtime was left behind by a refused spawn")
+			}
+		})
+	}
 }

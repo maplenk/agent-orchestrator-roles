@@ -210,3 +210,39 @@ func TestSwitchAndInterfaceFenceSentinelsAreDistinct(t *testing.T) {
 		t.Fatal("the two fences share an identity; whichever toAPIError case comes first will answer for both")
 	}
 }
+
+// PROMPT_NOT_READY must not inherit AWAITING_DECISION's remedy.
+//
+// ErrPromptNotReady used to wrap ErrAwaitingDecision, whose message tells the
+// person to answer it in the session terminal. On this path there is no such
+// terminal: spawn tears the runtime and workspace down on this error, and
+// relaunch parks or terminates the session. Sending someone to look for a pane
+// that no longer exists is worse than a generic answer, because they will go
+// and look.
+func TestToAPIError_PromptNotReadyDoesNotPointAtADestroyedTerminal(t *testing.T) {
+	wrapped := fmt.Errorf("spawn mer-1: %w",
+		fmt.Errorf("deliver prompt: %w", sessionmanager.ErrPromptNotReady))
+
+	var apiErr *apierr.Error
+	if !errors.As(toAPIError(wrapped), &apiErr) {
+		t.Fatal("a refused prompt delivery surfaced as a 500")
+	}
+	if apiErr.Code != "PROMPT_NOT_READY" {
+		t.Fatalf("code = %q, want PROMPT_NOT_READY", apiErr.Code)
+	}
+	// The remedy must describe THIS path: nothing sent, launch stopped.
+	for _, want := range []string{"not sent", "stopped"} {
+		if !strings.Contains(apiErr.Message, want) {
+			t.Errorf("message does not say %q: %s", want, apiErr.Message)
+		}
+	}
+	// And it must not tell them to go to a terminal that was destroyed.
+	if strings.Contains(apiErr.Message, "session terminal") {
+		t.Errorf("message points at a terminal this path already tore down: %s", apiErr.Message)
+	}
+	// The distinction has to be real, not just differently worded: the two
+	// sentinels must not match each other, or whichever case comes first wins.
+	if errors.Is(sessionmanager.ErrPromptNotReady, sessionmanager.ErrAwaitingDecision) {
+		t.Fatal("ErrPromptNotReady still matches ErrAwaitingDecision; the AWAITING_DECISION case will claim it")
+	}
+}

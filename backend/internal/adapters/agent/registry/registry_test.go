@@ -132,3 +132,78 @@ func hasLine(content, line string) bool {
 	}
 	return false
 }
+
+// Every after-start adapter must be able to say what its own input prompt looks
+// like, or AO must refuse to type into it.
+//
+// This is a registry test rather than a per-adapter one because the hazard is
+// what a NEW adapter inherits. AO delivers an after-start prompt by pasting into
+// whatever the pane is showing, and a liveness probe only proves a process
+// exists — not that its screen is an input prompt. Three live sessions died when
+// Grok's repository-trust screen was accepted as readiness and the pasted brief's
+// "n" answered "No, quit".
+//
+// An adapter that offers no readiness evidence is not a bug here: the manager
+// refuses its delivery (waitForPromptReadiness returns ErrPromptNotReady). This
+// test exists so that refusal is a DECISION each adapter's author makes
+// knowingly, rather than something discovered when a worker silently dies.
+func TestAfterStartAdaptersDeclareReadinessEvidence(t *testing.T) {
+	// Harnesses whose prompted spawns are knowingly refused for want of
+	// readiness evidence. Removing a name means the adapter now supplies
+	// hints; adding one means accepting that its prompted spawns fail.
+	refusedForNoEvidence := map[domain.AgentHarness]string{
+		domain.HarnessAider: "no readiness hints; prompted spawns are refused rather than pasted blind",
+		domain.HarnessGoose: "no readiness hints; prompted spawns are refused rather than pasted blind",
+	}
+
+	ctx := context.Background()
+	for _, adapter := range Constructors() {
+		// Adapter is the minimal registry contract; the prompt-delivery and
+		// readiness questions live on ports.Agent, which every shipped adapter
+		// also satisfies.
+		agent, ok := adapter.(ports.Agent)
+		if !ok {
+			t.Fatalf("%s does not satisfy ports.Agent", adapter.Manifest().ID)
+		}
+		harness := domain.AgentHarness(adapter.Manifest().ID)
+		t.Run(string(harness), func(t *testing.T) {
+			strategy, err := agent.GetPromptDeliveryStrategy(ctx, ports.LaunchConfig{
+				SessionID: "probe", WorkspacePath: t.TempDir(), Prompt: "task",
+			})
+			if err != nil {
+				t.Skipf("delivery strategy unavailable: %v", err)
+			}
+			if strategy != ports.PromptDeliveryAfterStart {
+				if _, listed := refusedForNoEvidence[harness]; listed {
+					t.Fatalf("listed as refused-for-no-evidence but delivers %q; the list is stale", strategy)
+				}
+				return
+			}
+
+			provider, hasHints := agent.(ports.AgentPromptReadinessProvider)
+			var patterns int
+			if hasHints {
+				hints, hintErr := provider.PromptReadinessHints(ctx, ports.LaunchConfig{
+					SessionID: "probe", WorkspacePath: t.TempDir(),
+				})
+				if hintErr != nil {
+					t.Fatalf("PromptReadinessHints: %v", hintErr)
+				}
+				if hints.Timeout > 0 {
+					patterns = len(hints.Patterns)
+				}
+			}
+
+			reason, refused := refusedForNoEvidence[harness]
+			switch {
+			case patterns > 0 && refused:
+				t.Fatalf("supplies %d readiness pattern(s) but is still listed as refused (%q) — "+
+					"drop it from the list so its prompted spawns work", patterns, reason)
+			case patterns == 0 && !refused:
+				t.Fatalf("delivers its prompt after start but offers no readiness evidence, so AO " +
+					"would refuse every prompted spawn. Add verified hints, switch to in-command " +
+					"delivery, or add it to refusedForNoEvidence with the reason")
+			}
+		})
+	}
+}
