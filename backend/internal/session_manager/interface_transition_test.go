@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -842,5 +843,44 @@ func TestInterfaceTransitionRefusesAReadOnlyRoleBeforeStoppingTheRuntime(t *test
 	}
 	if runtime.destroyed != 0 {
 		t.Errorf("a refused transition destroyed the terminal runtime")
+	}
+}
+
+// Every hasActiveInterfaceTransition caller must report the INTERFACE fence.
+//
+// The sentinel split was applied to two of the three callers and Kill was
+// missed, so killing a session mid-transition reported SWITCH_IN_PROGRESS —
+// pointing the operator at a switch saga that was not running. A test naming
+// each caller individually would have had the same blind spot as the change, so
+// this walks the call sites in the source: a new caller that returns the wrong
+// fence, or a future one that returns none, fails here.
+func TestEveryInterfaceTransitionGuardReportsTheInterfaceFence(t *testing.T) {
+	src, err := os.ReadFile("manager.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(src), "\n")
+
+	var callers []int
+	for i, l := range lines {
+		if strings.Contains(l, "m.hasActiveInterfaceTransition(ctx, id)") {
+			callers = append(callers, i)
+		}
+	}
+	if len(callers) < 3 {
+		t.Fatalf("found %d hasActiveInterfaceTransition call sites, want at least 3 "+
+			"(Kill, Restore, ResumeAgent) — did a guard get dropped?", len(callers))
+	}
+
+	for _, at := range callers {
+		// The sentinel the guard returns is within the few lines that follow.
+		window := strings.Join(lines[at:min(at+6, len(lines))], "\n")
+		if strings.Contains(window, "ErrSwitchInProgress") {
+			t.Errorf("line %d: an interface-transition guard returns ErrSwitchInProgress, "+
+				"so its caller reports SWITCH_IN_PROGRESS for a transition:\n%s", at+1, window)
+		}
+		if !strings.Contains(window, "ErrInterfaceTransitionInProgress") {
+			t.Errorf("line %d: an interface-transition guard returns neither fence sentinel:\n%s", at+1, window)
+		}
 	}
 }

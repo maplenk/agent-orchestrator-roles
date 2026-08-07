@@ -628,8 +628,32 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	if roleErr != nil {
 		return domain.SessionRecord{}, 0, 0, mapRoleError(roleErr)
 	}
-	// Resolve the controller mode here, before ANYTHING durable is written —
-	// including the role template CAS below. A chat request AO cannot honour
+	// A per-project role override picks the harness when the spawn names none,
+	// so a project can default workers to one agent and orchestrators to another.
+	// Skip when applyRoleMap already set harness from a role binding.
+	//
+	// This runs BEFORE the chat preflight below, because the preflight asks the
+	// adapter about a specific harness. Preflighting first passed an EMPTY
+	// harness for any request that relies on the project default — a valid
+	// non-role chat spawn — and rejected it.
+	if cfg.RoleBinding.RoleID == "" {
+		cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
+	}
+	if cfg.Harness == "" {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: configure project %s.agent or pass --harness / --role", ErrMissingHarness, roleConfigName(cfg.Kind))
+	}
+
+	// Reject an unknown harness before any durable state is created. Doing this
+	// after CreateSession would leave a terminated orphan row and waste a
+	// worktree on a spawn that can never launch.
+	if _, ok := m.agents.Agent(cfg.Harness); !ok {
+		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %q", ErrUnknownHarness, cfg.Harness)
+	}
+
+	// Resolve the controller mode after the harness is known and validated, and
+	// before ANYTHING durable is written — including the role template CAS
+	// below. Both halves of that sentence are load-bearing: preflight needs a
+	// real harness to ask about, and a refused request must leave nothing. A chat request AO cannot honour
 	// should cost nothing: no terminated row, no worktree, and no content-
 	// addressed template row for a session that never existed. It never falls
 	// back to TUI, which would put the user in a terminal they did not ask for.
@@ -660,24 +684,9 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		}
 	}
 	cfg.RequestedMode = mode
+
 	if err := m.persistRoleTemplateArtifact(ctx, roleResult); err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: persist role template artifact: %w", err)
-	}
-	// A per-project role override picks the harness when the spawn names none,
-	// so a project can default workers to one agent and orchestrators to another.
-	// Skip when applyRoleMap already set harness from a role binding.
-	if cfg.RoleBinding.RoleID == "" {
-		cfg.Harness = effectiveHarness(cfg.Harness, cfg.Kind, project.Config)
-	}
-	if cfg.Harness == "" {
-		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: configure project %s.agent or pass --harness / --role", ErrMissingHarness, roleConfigName(cfg.Kind))
-	}
-
-	// Reject an unknown harness before any durable state is created. Doing this
-	// after CreateSession would leave a terminated orphan row and waste a
-	// worktree on a spawn that can never launch.
-	if _, ok := m.agents.Agent(cfg.Harness); !ok {
-		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %q", ErrUnknownHarness, cfg.Harness)
 	}
 
 	// A chat session runs no agent inside a terminal runtime, so the terminal
@@ -1441,7 +1450,7 @@ func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
 	if active, err := m.hasActiveInterfaceTransition(ctx, id); err != nil {
 		return false, fmt.Errorf("kill %s: interface transition: %w", id, err)
 	} else if active {
-		return false, fmt.Errorf("kill %s: %w", id, ErrSwitchInProgress)
+		return false, fmt.Errorf("kill %s: %w", id, ErrInterfaceTransitionInProgress)
 	}
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {

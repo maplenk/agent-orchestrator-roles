@@ -481,3 +481,43 @@ func TestChatSpawnRefusesAReadOnlyRole(t *testing.T) {
 		t.Errorf("a refused chat spawn persisted %d template artifact(s)", len(st.artifacts))
 	}
 }
+
+// A chat spawn that names no harness must preflight the PROJECT's configured
+// agent, not an empty string.
+//
+// Moving the mode preflight above the role template CAS also moved it above
+// effectiveHarness, which is what fills in the project default. Every valid
+// non-role chat spawn — the ordinary case, where the user picked a project and
+// typed a task — then asked the adapter about harness "" and was refused. The
+// preflight has to come after the harness is known and validated, and still
+// before anything durable is written; this pins the harness it actually asks
+// about.
+func TestChatSpawnPreflightsTheProjectDefaultHarness(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, st, _ := newChatManager(launcher)
+
+	project := st.projects["mer"]
+	project.Config.Worker = domain.RoleOverride{Harness: domain.HarnessCodex}
+	st.projects["mer"] = project
+
+	rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer",
+		Kind:      domain.KindWorker,
+		// No Harness and no RoleID: the project default is the whole point.
+		Prompt:        "do the thing",
+		RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	if len(launcher.preflighted) != 1 {
+		t.Fatalf("preflighted %v, want exactly one harness", launcher.preflighted)
+	}
+	if launcher.preflighted[0] != domain.HarnessCodex {
+		t.Fatalf("preflighted %q, want the project default %q — an empty harness means "+
+			"preflight ran before effectiveHarness", launcher.preflighted[0], domain.HarnessCodex)
+	}
+	if rec.Harness != domain.HarnessCodex {
+		t.Fatalf("session harness = %q, want %q", rec.Harness, domain.HarnessCodex)
+	}
+}
