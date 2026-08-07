@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -857,26 +856,33 @@ func TestRecoverSwitchRefusesAChatSessionWithoutTouchingAnything(t *testing.T) {
 // The original error has to survive too: "the turn was refused" and "and then
 // cleanup failed" are different facts and the caller needs both.
 func TestChatSpawnCleanupPreservesBothFailures(t *testing.T) {
+	// The injected causes are package-level values so the assertion can be
+	// errors.Is rather than a message match: a %w downgraded to %v keeps the
+	// text and destroys the identity the caller switches on, and a string check
+	// cannot tell those apart.
+	adoptionRejected := errors.New("adoption rejected")
+	turnRejected := errors.New("provider refused the turn")
+
 	for _, tc := range []struct {
 		name    string
 		arrange func(*fakeStore, *fakeLCM, *recordingLauncher)
-		wantErr string
+		wantErr error
 	}{
 		{
 			name: "MarkSpawned fails, then termination fails",
 			arrange: func(_ *fakeStore, lcm *fakeLCM, _ *recordingLauncher) {
-				lcm.markSpawnedErr = errors.New("adoption rejected")
+				lcm.markSpawnedErr = adoptionRejected
 				lcm.markTerminatedErr = errors.New("compensating write rejected")
 			},
-			wantErr: "adoption rejected",
+			wantErr: adoptionRejected,
 		},
 		{
 			name: "the initial turn fails, then termination fails",
 			arrange: func(_ *fakeStore, lcm *fakeLCM, l *recordingLauncher) {
-				l.turnErr = errors.New("provider refused the turn")
+				l.turnErr = turnRejected
 				lcm.markTerminatedErr = errors.New("compensating write rejected")
 			},
-			wantErr: "provider refused the turn",
+			wantErr: turnRejected,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -893,9 +899,9 @@ func TestChatSpawnCleanupPreservesBothFailures(t *testing.T) {
 			if err == nil {
 				t.Fatal("Spawn succeeded despite an injected failure")
 			}
-			// The original cause, not replaced by the cleanup failure.
-			if !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("error lost the original cause %q: %v", tc.wantErr, err)
+			// The original cause's IDENTITY, not merely its message.
+			if !errors.Is(err, tc.wantErr) {
+				t.Errorf("error lost the original cause %v: %v", tc.wantErr, err)
 			}
 			// And the boot-safety identity, which is the one lint was guarding.
 			if !errors.Is(err, ErrLaunchCleanupUnresolved) {
@@ -915,6 +921,17 @@ func TestChatSpawnCleanupPreservesBothFailures(t *testing.T) {
 			}
 			if active == 0 {
 				t.Error("no active row survived, so this fixture no longer exercises unresolved cleanup")
+			}
+			// The controller must be stopped before compensation. Dropping
+			// stopChatBestEffort would leave a provider controller running with
+			// no session that owns it — invisible to every other assertion
+			// here, since the row and the error identities would look the same.
+			var spawned domain.SessionID
+			for id := range st.sessions {
+				spawned = id
+			}
+			if len(launcher.stopped) != 1 || launcher.stopped[0] != spawned {
+				t.Errorf("stopped = %v, want exactly [%s]", launcher.stopped, spawned)
 			}
 		})
 	}

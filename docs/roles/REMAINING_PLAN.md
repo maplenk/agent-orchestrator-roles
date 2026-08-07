@@ -28,19 +28,20 @@ Canonical product design remains `MASTER_PLAN.md`; this file tracks execution st
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Not started.** Manual continue and bounded opt-in automatic failover remain. |
 | Upstream Sync 2 | **Merged on `roles/upstream-sync-2`, not yet merged to the roles trunk.** Pinned to `fa799a7a`; fork migrations are 9000–9007. Steps 1–4 and 6–8 accepted; **every required GitHub Actions job is green**. Step 5 needs two live records. See `UPSTREAM_SYNC2_PLAN.md`. |
-| Local CI matrix | Backend tests, build, vet, gofmt, golangci-lint, API drift and TypeScript checks pass. Race has upstream-reproduced timing failures but no races; Vitest has one deterministic fork failure. Required GitHub Actions and two review regressions remain acceptance gates. |
+| CI | **Green, including the required GitHub Actions jobs** on `7165c942` (PR #1, draft): Go — build-test with `go test -race ./...`, lint, api-drift — plus Frontend, CLI E2E, e2e-gate, gitleaks, Mobile and React Doctor. Locally: gofmt, build, vet, golangci-lint v2.12.2 (0 issues), backend 4486 pass, frontend 1992 pass / 0 fail, typecheck clean, zero data races. The `-race` timing failures seen locally do not reproduce on the Ubuntu runner. |
 
 > **Claude-only installs cannot use a strict role map.** The strict
 > orchestrator role must be `workspaceWrites:false`, and only Codex currently
 > advertises enforceable read-only. This is the Phase 1-B blocker itself;
 > Phase 2B-3 is downstream.
 
-**Next engineering actions, in order:** finish the acceptance blockers in
-[`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md), capture the two missing live
-Step 5 records, obtain the required GitHub Actions result, and merge
-`roles/upstream-sync-2` into `roles/multi-sub-v1`. Then resume vendor-backed
-Phase 3A-2b detection. Claude read-only may proceed in parallel and remains the
-gate for 2B-3.
+**Next engineering actions, in order:** capture the two missing live Step 5
+records — orchestrator fresh conversation, and a genuine durable `post_stop`
+without `target_ack` — then merge `roles/upstream-sync-2` into
+`roles/multi-sub-v1`. Those two records are the ONLY remaining pre-merge
+acceptance work; every other Sync 2 gate, CI included, is closed. Then resume
+vendor-backed Phase 3A-2b detection. Claude read-only may proceed in parallel
+and remains the gate for 2B-3.
 
 ---
 
