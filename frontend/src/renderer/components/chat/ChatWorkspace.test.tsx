@@ -101,7 +101,10 @@ describe("ChatWorkspace timeline", () => {
 		);
 
 		expect(screen.getByRole("alert")).toHaveTextContent("The agent controller stopped");
-		await user.click(screen.getByRole("button", { name: "Resume agent" }));
+		// "Restart", not "Resume": this button starts a process, and the pause
+		// contract keeps that name distinct from lifting a durable pause.
+		expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Restart agent" }));
 		await user.click(screen.getByRole("button", { name: "Open shell" }));
 		expect(resume).toHaveBeenCalledOnce();
 		expect(openShell).toHaveBeenCalledOnce();
@@ -118,7 +121,7 @@ describe("ChatWorkspace timeline", () => {
 		);
 
 		expect(screen.queryByText("The agent controller stopped")).not.toBeInTheDocument();
-		expect(screen.queryByRole("button", { name: "Resume agent" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Restart agent" })).not.toBeInTheDocument();
 	});
 
 	it("announces thread and tool-server failures", () => {

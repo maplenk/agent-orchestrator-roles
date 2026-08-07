@@ -284,6 +284,10 @@ describe("TaskComposer under a strict role map", () => {
 		// role under a strict map.
 		expect(body.agent).toBeUndefined();
 		expect(body.model).toBeUndefined();
+		// mode is orthogonal to the role, so the strict branch passes through
+		// whatever interface was asked for rather than pinning one — nobody asked
+		// here, so nothing is sent and the daemon's default stands.
+		expect(body.mode).toBeUndefined();
 	});
 
 	it("shows the role's binding as a fact rather than an editable field", async () => {

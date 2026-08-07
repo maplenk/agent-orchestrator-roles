@@ -123,4 +123,20 @@ describe("spawnOrchestrator", () => {
 		expect((error as Error).message).toBe("chat driver is unavailable (CHAT_DRIVER_UNAVAILABLE)");
 		expect(isChatPreflightError(error)).toBe(true);
 	});
+
+	// A TUI-only harness such as muse is installed and offered like any other;
+	// nothing in the renderer knows it cannot run Chat. The daemon says so with
+	// SESSION_MODE_UNSUPPORTED, and classifying that as a preflight code is what
+	// turns the refusal into a Terminal UI offer instead of a dead end.
+	it("classifies a TUI-only harness's chat refusal as a preflight failure", async () => {
+		(apiClient.POST as ReturnType<typeof vi.fn>).mockResolvedValue({
+			data: undefined,
+			error: { code: "SESSION_MODE_UNSUPPORTED", message: "muse does not support chat sessions" },
+			response: { status: 400 },
+		});
+
+		const error = await spawnOrchestrator("proj", "board", false, "chat").catch((caught: unknown) => caught);
+		expect(error).toMatchObject({ code: "SESSION_MODE_UNSUPPORTED", status: 400 });
+		expect(isChatPreflightError(error)).toBe(true);
+	});
 });

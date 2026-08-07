@@ -8,6 +8,7 @@ This file is documentation only.
 | codex | true | **true** | false | **true** | RO sandbox; switch promoted after Phase 2A close-out |
 | claude-code | true | **true** | false | **false** | switch promoted after Phase 2A close-out; RO deferred |
 | pi | true | false | false | **false** | |
+| muse | true | false | false | **false** | spawn proven (argv + developer-prompt env + managed hooks); no write-denial flag |
 | other AllHarnesses | true | false | false | false | |
 | fake (tests) | true | true | false | true | Test-only |
 

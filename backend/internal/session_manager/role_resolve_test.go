@@ -357,8 +357,11 @@ func TestApplyRoleMap_ReadOnly_OnlyCodexAllowed(t *testing.T) {
 		t.Fatalf("codex: applied=%v policy=%+v", res.Applied, res.Policy)
 	}
 
-	// Claude auto mode is not fail-closed; Pi has no sandbox — reject both.
-	for _, harness := range []domain.AgentHarness{domain.HarnessClaudeCode, domain.HarnessPi} {
+	// Claude auto mode is not fail-closed; Pi has no sandbox; Muse's only
+	// approval flags widen approval and it has no write-denial flag — reject all
+	// three, and reject them here so the refusal carries ErrReadOnlyUnsupported
+	// (READ_ONLY_UNSUPPORTED) rather than a 500.
+	for _, harness := range []domain.AgentHarness{domain.HarnessClaudeCode, domain.HarnessPi, domain.HarnessMuse} {
 		cfg := ports.SpawnConfig{Kind: domain.KindWorker, RoleID: "reviewer"}
 		_, err := applyRoleMap(&cfg, mkProject(harness), dir)
 		if !errors.Is(err, ErrReadOnlyUnsupported) {

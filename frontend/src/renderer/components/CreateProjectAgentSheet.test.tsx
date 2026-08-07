@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { agentsQueryKey } from "../hooks/useAgentsQuery";
@@ -83,6 +83,38 @@ describe("CreateProjectAgentSheet", () => {
 		await userEvent.click(screen.getByLabelText("Agent"));
 
 		expect(await screen.findByRole("listbox")).toHaveClass("max-h-select-menu-max!");
+	});
+
+	// Muse is a supported harness that the daemon reports as installed, so the
+	// picker offers it like any other. Which interfaces it can run is a SERVER
+	// capability answered at spawn (SESSION_MODE_UNSUPPORTED for Chat) — a
+	// harness list that pre-filtered on it would hide an agent that works fine in
+	// Terminal UI, on a fact the renderer does not hold.
+	it("offers an installed Muse as a selectable harness", async () => {
+		const catalog = [
+			{ id: "codex", label: "codex", authStatus: "authorized" as const },
+			{ id: "muse", label: "muse", authStatus: "authorized" as const },
+		];
+		render(
+			<RequiredAgentField
+				id="agent"
+				label="Agent"
+				onChange={() => undefined}
+				placeholder="Project default"
+				value=""
+				supported={catalog}
+				installed={catalog}
+				authorized={catalog}
+			/>,
+		);
+
+		await userEvent.click(screen.getByLabelText("Agent"));
+
+		const muse = await screen.findByRole("option", { name: /muse/i });
+		expect(muse).not.toHaveAttribute("aria-disabled", "true");
+		// Authorized agents carry no status chip; a "Needs install"/"Needs auth"
+		// badge here would mean the catalog was ignored.
+		expect(within(muse).queryByText(/Needs/)).not.toBeInTheDocument();
 	});
 
 	it("creates without intake when the toggle is left off", async () => {

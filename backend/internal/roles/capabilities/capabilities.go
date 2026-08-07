@@ -42,6 +42,22 @@ func For(h domain.AgentHarness) Caps {
 			ReadOnlyEnforced: true,
 			Notes:            "RO via --sandbox read-only; switch supported (Phase 2A)",
 		}
+	case domain.HarnessMuse:
+		// Muse landed with a working ordinary spawn path but no entry here, so a
+		// role map read it as spawn_supported=false and refused a harness the
+		// daemon launches fine. Only spawn is evidenced: the adapter builds argv,
+		// injects the developer prompt, and installs managed hooks. Its approval
+		// flags only *widen* approval (--approval-mode never / --yolo) — there is
+		// no write-denial flag — and neither switch nor limit detection has ever
+		// been exercised against it.
+		return Caps{
+			SpawnSupported:          true,
+			SwitchSupported:         false,
+			LimitDetectionSupported: false,
+			ReadOnlyEnforced:        false,
+			Notes: "spawn proven (argv + developer-prompt env + managed hooks); " +
+				"no write-denial flag, so RO unenforceable; switch/limit detection unproven",
+		}
 	case domain.HarnessPi:
 		return Caps{
 			SpawnSupported:   true,

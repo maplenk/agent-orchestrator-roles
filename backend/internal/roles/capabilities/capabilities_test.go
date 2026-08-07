@@ -45,6 +45,128 @@ func TestFor_Phase1Cells(t *testing.T) {
 	}
 }
 
+// Muse arrived with a working adapter but no registry entry, so For() fell to the
+// zero-value default and role maps saw spawn_supported=false for a harness the
+// ordinary spawn path launches. Registering it must fix exactly that cell and
+// promote nothing else — a wrong `true` here is a guarantee AO cannot keep.
+func TestFor_MuseSpawnOnly(t *testing.T) {
+	muse := For(domain.HarnessMuse)
+	for _, tc := range []struct {
+		cell string
+		got  bool
+		want bool
+		why  string
+	}{
+		{"spawn_supported", muse.SpawnSupported, true,
+			"the adapter builds argv, injects the developer prompt and installs managed hooks"},
+		{"switch_supported", muse.SwitchSupported, false,
+			"no switch saga has ever run against Muse, as source or target"},
+		{"read_only_enforced", muse.ReadOnlyEnforced, false,
+			"Muse's flags only widen approval; it has no workspace write-denial flag"},
+		{"limit_detection_supported", muse.LimitDetectionSupported, false,
+			"limit detection is Phase 3 and unexercised for every production harness"},
+	} {
+		if tc.got != tc.want {
+			t.Fatalf("muse %s = %v, want %v — %s (caps: %+v)", tc.cell, tc.got, tc.want, tc.why, muse)
+		}
+	}
+	if muse.Notes == "" {
+		t.Fatalf("muse caps must record what is and is not proven: %+v", muse)
+	}
+}
+
+func TestValidateRoleMap_AllowsMuseForWritableRole(t *testing.T) {
+	// The whole point of registering Muse: a writable role may bind it, because
+	// the ordinary spawn path already reaches the adapter.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessMuse,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+	}
+	if err := ValidateRoleMap(m); err != nil {
+		t.Fatalf("writable muse role must validate: %v", err)
+	}
+}
+
+func TestValidateRoleMap_RejectsMuseReadOnly(t *testing.T) {
+	// Muse has no write-denial flag, so workspaceWrites=false must fail at
+	// config-save on the same read_only_enforced path Claude/Pi take — this is
+	// what surfaces as READ_ONLY_UNSUPPORTED rather than a prompt-only pretence.
+	m := domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		StrictDelegation: true,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {
+				Template: "orchestrator", Harness: domain.HarnessMuse,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: false, CanSpawn: true},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "read_only_enforced") {
+		t.Fatalf("err = %v, want read_only_enforced reject", err)
+	}
+	// applyRoleMap/switch wrap exactly this call into ErrReadOnlyUnsupported, so
+	// the launch-time refusal and the config-save refusal cannot drift apart.
+	if err := RequireReadOnly(domain.HarnessMuse); err == nil {
+		t.Fatal("RequireReadOnly(muse) succeeded; launch would allow a read-only Muse role")
+	}
+}
+
+func TestValidateRoleMap_MuseCannotBeFailoverSource(t *testing.T) {
+	// Same shape as the Pi source case: Muse spawns fine, so a ladder on a
+	// Muse-primary role passes every other gate and would only fail at runtime
+	// with ErrSwitchNotSupported.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"ui": {
+				Template: "ui-implementor", Harness: domain.HarnessMuse,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{
+				"ui": {{Harness: domain.HarnessCodex}},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "switch_supported") {
+		t.Fatalf("err=%v want switch_supported reject on muse failover source", err)
+	}
+	if !strings.Contains(err.Error(), "roles[ui]") {
+		t.Fatalf("err=%v must attribute the reject to the primary binding, not a rung", err)
+	}
+}
+
+func TestValidateRoleMap_MuseCannotBeFailoverRung(t *testing.T) {
+	// The target side of the same claim: a switch-incapable rung is unreachable.
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.HarnessMuse}},
+			},
+		},
+	}
+	err := ValidateRoleMap(m)
+	if err == nil || !strings.Contains(err.Error(), "switch_supported") {
+		t.Fatalf("err=%v want switch_supported reject on muse rung", err)
+	}
+}
+
 func TestValidateRoleMap_RejectsClaudeAndPiReadOnly(t *testing.T) {
 	for _, harness := range []domain.AgentHarness{domain.HarnessClaudeCode, domain.HarnessPi} {
 		m := domain.RoleMap{

@@ -14,7 +14,10 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters"
 	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/binaryutil"
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 )
 
 func TestManifest(t *testing.T) {
@@ -102,6 +105,151 @@ func TestGetLaunchCommandAppendsModelBeforePrompt(t *testing.T) {
 	want := []string{"muse", "--trust-workspace", "--model", "muse-spark", "fix it"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
+	}
+}
+
+// resolveMuseRole runs the real role pipeline for a Muse-bound role: the
+// capability check config-save performs, then roles.Resolve. The tests below
+// start from its output, so dropping Muse from the capability registry — or
+// losing the model/prompt on the way to argv — fails at the adapter boundary
+// instead of only in a session-manager test.
+func resolveMuseRole(t *testing.T, model string) roles.Resolved {
+	t.Helper()
+	dir := t.TempDir()
+	const body = "---\nid: implementor\nname: Muse Implementor\nroleReminder: stay in scope\n---\n# Duties\nShip the change.\n"
+	if err := os.WriteFile(filepath.Join(dir, "implementor.md"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m := domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template:    "implementor",
+				Harness:     domain.HarnessMuse,
+				Model:       model,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+	}
+	if err := capabilities.ValidateRoleMap(m); err != nil {
+		t.Fatalf("capability registry refuses a writable Muse role: %v", err)
+	}
+	resolved, err := roles.Resolve(roles.ResolveInput{
+		Map:    m,
+		RoleID: "implementor",
+		Kind:   domain.KindWorker,
+		Loader: roles.NewLoader(roles.NewArtifactStore(), dir),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+// Under a role map the model is host-authoritative: the binding is the only
+// place it can come from, and this adapter is the last hop before argv.
+func TestGetLaunchCommandCarriesRoleResolvedModel(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		model string
+		want  []string
+	}{
+		{
+			name:  "bound model",
+			model: "muse-spark",
+			want:  []string{"muse", "--trust-workspace", "--model", "muse-spark", "fix it"},
+		},
+		{
+			// An unset binding model means "provider default", not a literal
+			// empty --model, which Muse would reject.
+			name: "provider default",
+			want: []string{"muse", "--trust-workspace", "fix it"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			resolved := resolveMuseRole(t, tt.model)
+			if resolved.Session.ResolvedModel != tt.model {
+				t.Fatalf("role pinned model %q, want %q", resolved.Session.ResolvedModel, tt.model)
+			}
+			p := &Plugin{resolvedBinary: "muse"}
+			cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+				Config: ports.AgentConfig{Model: resolved.Session.ResolvedModel},
+				Prompt: "fix it",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(cmd, tt.want) {
+				t.Fatalf("cmd = %#v, want %#v", cmd, tt.want)
+			}
+		})
+	}
+}
+
+// The role body is the whole point of a role-bound Muse session: it must reach
+// Muse's developer-prompt channel (the only override Meta's provider accepts),
+// stay pinned as an artifact so restore reproduces it, and arrive alongside
+// hooks addressed to this session's AO route.
+func TestGetLaunchCommandCarriesRolePromptArtifactAndHooks(t *testing.T) {
+	t.Setenv(aoRunFileEnvVar, "")
+	resolved := resolveMuseRole(t, "muse-spark")
+	if resolved.Session.TemplateArtifactID == "" || resolved.Session.TemplateSHA256 == "" {
+		t.Fatalf("role resolved without a template pin: %+v", resolved.Session)
+	}
+	prompt := resolved.Template.SystemPrompt()
+	if !strings.Contains(prompt, "Muse Implementor") || !strings.Contains(prompt, "stay in scope") {
+		t.Fatalf("role system prompt lost the template body:\n%s", prompt)
+	}
+
+	dataDir := t.TempDir()
+	const sessionID = "mer-muse-1"
+	p := &Plugin{resolvedBinary: "muse"}
+	cmd, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		Config:       ports.AgentConfig{Model: resolved.Session.ResolvedModel},
+		DataDir:      dataDir,
+		SessionID:    sessionID,
+		SystemPrompt: prompt,
+		Prompt:       "fix it",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooksPath, err := museManagedHooksPath(dataDir, sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"env",
+		museDeveloperPromptEnvVar + "=" + prompt,
+		museManagedHooksEnvVar + "=" + hooksPath,
+		"muse", "--trust-workspace", "--model", "muse-spark", "fix it",
+	}
+	if !reflect.DeepEqual(cmd, want) {
+		t.Fatalf("cmd = %#v, want %#v", cmd, want)
+	}
+
+	if err := p.GetAgentHooks(context.Background(), ports.WorkspaceHookConfig{
+		DataDir: dataDir, SessionID: sessionID, SystemPrompt: prompt,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(hooksPath) //nolint:gosec // test-owned path
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file museHooksFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	route := "AO_SESSION_ID='" + sessionID + "' AO_DATA_DIR=" + museShellQuote(dataDir) + " "
+	for nativeEvent, groups := range file.Hooks {
+		for _, group := range groups {
+			for _, hook := range group.Hooks {
+				if !strings.Contains(hook.Command, route) {
+					t.Fatalf("hooks[%q] command %q missing AO route %q", nativeEvent, hook.Command, route)
+				}
+			}
+		}
 	}
 }
 

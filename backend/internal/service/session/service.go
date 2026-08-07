@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"strings"
 	"time"
 
@@ -892,6 +893,24 @@ func toAPIError(err error) error {
 		return apierr.Conflict("RUNTIME_SESSION_CONFLICT",
 			"Another AO instance already owns this session's terminal. Stop the other instance, "+
 				"or run this one with its own AO_DATA_DIR so it gets an isolated terminal server", nil)
+	// Also a size the caller controls, not a fault. AO bounds the task prompt
+	// but not the composed system prompt, and a harness that delivers its prompt
+	// in argv puts both into the terminal launch command — so a role-pinned
+	// spawn, whose role template is the bulk of that system prompt, is what
+	// pushes it past the terminal runtime's limit. Naming the two inputs is the
+	// remedy; INTERNAL_ERROR named nothing.
+	case errors.Is(err, chatsvc.ErrNoController):
+		// The sentinel and this answer both existed already — the conversation
+		// routes have returned it all along — but /sessions/{id}/send reached
+		// toAPIError, which had no case, so the same fact arrived as a 500 on
+		// one route and an actionable 409 on the other. Message copied verbatim
+		// from writeConversationError so the two read identically.
+		return apierr.Conflict("CHAT_CONTROLLER_NOT_READY",
+			"the agent controller for this session is not running", nil)
+	case errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong):
+		return apierr.Invalid("LAUNCH_COMMAND_TOO_LONG",
+			"The role's system prompt plus the task prompt are too large for the terminal runtime to launch. "+
+				"Shorten the task prompt, or trim the role's system prompt template", nil)
 	case errors.Is(err, sessionmanager.ErrIncompleteHandle):
 		return apierr.Conflict("SESSION_INCOMPLETE_HANDLE", "Session is missing runtime or workspace handles", nil)
 	case errors.Is(err, sessionmanager.ErrNotResumable):

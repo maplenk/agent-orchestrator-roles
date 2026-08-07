@@ -12,6 +12,7 @@
  * has scrolled away from.
  */
 
+import { useTranslation } from "react-i18next";
 import {
 	memo,
 	useCallback,
@@ -802,6 +803,7 @@ function ControllerBanner({
 	openingShell?: boolean;
 	shellError?: string;
 }) {
+	const { t } = useTranslation();
 	// The transition coordinator intentionally stops one controller before it
 	// starts the other. The top-bar handoff state already explains that interval;
 	// presenting its intermediate snapshot as a crash produces a red false alarm.
@@ -835,7 +837,7 @@ function ControllerBanner({
 				{controller.state === "stopped" ? (
 					<>
 						<span className="text-[11px] leading-snug text-muted-foreground">
-							History is kept. Resume the agent or open a shell in the same worktree.
+							History is kept. Restart the agent or open a shell in the same worktree.
 						</span>
 						{resumeError || shellError ? (
 							<span className="text-[11px] leading-snug text-destructive">
@@ -845,7 +847,7 @@ function ControllerBanner({
 						<div className="mt-1.5 flex flex-wrap gap-2">
 							{onResume ? (
 								<Button type="button" size="sm" variant="outline" onClick={onResume} disabled={resuming}>
-									{resuming ? "Resuming…" : "Resume agent"}
+									{resuming ? t("inspector.resumingAgent") : t("inspector.resumeAgent")}
 								</Button>
 							) : null}
 							{onOpenShell ? (
