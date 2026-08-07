@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -519,5 +520,95 @@ func TestChatSpawnPreflightsTheProjectDefaultHarness(t *testing.T) {
 	}
 	if rec.Harness != domain.HarnessCodex {
 		t.Fatalf("session harness = %q, want %q", rec.Harness, domain.HarnessCodex)
+	}
+}
+
+// The pause fence has to cover Chat, not only the terminal pane.
+//
+// sendChat short-circuits above the messenger, and the messenger is where
+// sessionguard lives — so an AO-initiated write to a paused CHAT session went
+// through while the identical write to a paused TUI session was suppressed. The
+// transition-message outbox is exactly such a writer. Found by pausing one
+// session of each mode on a live daemon and sending to both.
+//
+// The rule is the guard's, unchanged: AO's own writes are refused while paused,
+// a human's turn is not. Pause stops AO acting on its own; it does not stop a
+// person talking to their agent.
+func TestChatPauseFencesAutomaticWritesButNotHumanTurns(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		origin     sendOrigin
+		wantRelays int
+		why        string
+	}{
+		{"AO's own relay", sendOriginAuto, 0,
+			"an automatic write to a paused session is the thing pause exists to stop"},
+		{"a person's turn", sendOriginUser, 1,
+			"pause fences AO, not the human who paused it"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launcher := &recordingLauncher{}
+			mgr, st, _ := newChatManager(launcher)
+
+			rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+				ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+				Prompt: "start", RequestedMode: domain.SessionModeChat,
+			})
+			if err != nil {
+				t.Fatalf("Spawn: %v", err)
+			}
+			paused := st.sessions[rec.ID]
+			paused.Metadata.Pause = &domain.SessionPause{
+				IncidentID: "limit-1", Reason: domain.PauseReasonOperator,
+				DetectedBy: domain.PauseDetectionOperator, PausedAt: time.Now().UTC(),
+			}
+			st.sessions[rec.ID] = paused
+
+			before := len(launcher.relayed)
+			if err := mgr.send(context.Background(), rec.ID, "message", "", tc.origin); err != nil {
+				t.Fatalf("send: %v", err)
+			}
+			if got := len(launcher.relayed) - before; got != tc.wantRelays {
+				t.Fatalf("relayed %d turn(s) to a paused chat session, want %d — %s", got, tc.wantRelays, tc.why)
+			}
+		})
+	}
+}
+
+// Restart must work on a chat session, because Restart is half of the pause
+// contract's two controls and on the paused-dead cell it is the only way back.
+//
+// ResumeAgent required a runtime handle, which a chat session has BY DESIGN
+// never had — no pane, nothing to reattach — so every chat restart answered
+// "missing runtime or workspace handles". Found live: on a paused-dead chat
+// session, Resume lifted the pause and correctly left it exited, and Restart
+// then returned 409, leaving no way to bring the agent back.
+func TestResumeAgentRestartsAChatSessionWithNoRuntimeHandle(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, st, runtime := newChatManager(launcher)
+
+	rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "start", RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// The paused-dead cell after Resume: the pause is lifted, the controller is
+	// gone, and the session still has no runtime handle.
+	dead := st.sessions[rec.ID]
+	dead.Activity.State = domain.ActivityExited
+	dead.Metadata.RuntimeHandleID = ""
+	st.sessions[rec.ID] = dead
+
+	startsBefore := len(launcher.started)
+	if _, err := mgr.ResumeAgentWithMode(context.Background(), rec.ID); err != nil {
+		t.Fatalf("ResumeAgent on a chat session: %v", err)
+	}
+	if got := len(launcher.started) - startsBefore; got != 1 {
+		t.Fatalf("started %d chat controller(s), want 1", got)
+	}
+	if runtime.created != 0 {
+		t.Errorf("restarting a chat session created a terminal runtime")
 	}
 }

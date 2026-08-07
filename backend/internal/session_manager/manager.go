@@ -1962,7 +1962,17 @@ func (m *Manager) ResumeAgentWithMode(ctx context.Context, id domain.SessionID) 
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrAgentNotExited)
 	}
 	meta := rec.Metadata
-	if meta.WorkspacePath == "" || meta.Branch == "" || meta.RuntimeHandleID == "" {
+	// A chat session has no runtime handle BY DESIGN — no pane, nothing to
+	// reattach — so requiring one refused every chat restart with "missing
+	// runtime or workspace handles". That is the Restart control the pause
+	// contract insists on keeping separate from Resume, and on the paused-dead
+	// chat cell it was the only way back; relaunchSession already dispatches to
+	// the chat controller from the persisted mode.
+	//
+	// Found by restarting a paused-dead CHAT session on a live daemon: resume
+	// lifted the pause and left it exited, and restart then answered 409.
+	chatMode := domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat
+	if meta.WorkspacePath == "" || meta.Branch == "" || (!chatMode && meta.RuntimeHandleID == "") {
 		return RestoreResult{}, fmt.Errorf("resume agent %s: %w", id, ErrIncompleteHandle)
 	}
 
@@ -3320,13 +3330,25 @@ func (m *Manager) applyWorkspaceProjectPreserved(ctx context.Context, rows []por
 // the session is active or the budget is exhausted. Confirmation never fails
 // the send: it only decides whether to nudge again.
 func (m *Manager) Send(ctx context.Context, id domain.SessionID, message string) error {
-	return m.send(ctx, id, message, "")
+	return m.send(ctx, id, message, "", sendOriginUser)
 }
 
 // send carries an optional idempotency key used by durable transition-message
 // retries. Ordinary callers leave it empty; the outbox preserves the key across
 // restart, rollback, and even a second overlapping handoff.
-func (m *Manager) send(ctx context.Context, id domain.SessionID, message, clientMessageID string) error {
+// sendOrigin says who initiated a chat write, mirroring sessionguard's
+// writeOrigin for the path that does not pass through the guard.
+type sendOrigin int
+
+const (
+	// sendOriginUser is a human's message. It is allowed while paused: pause
+	// stops AO acting on its own, not a person talking to their agent.
+	sendOriginUser sendOrigin = iota
+	// sendOriginAuto is AO's own initiative, and is subject to the pause fence.
+	sendOriginAuto
+)
+
+func (m *Manager) send(ctx context.Context, id domain.SessionID, message, clientMessageID string, origin sendOrigin) error {
 	// A controller transition deliberately has a short interval with no writer.
 	// Queue internal/lifecycle sends durably instead of racing either controller
 	// or dropping coordination work; the transition worker drains this outbox
@@ -3341,7 +3363,7 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 	// refused as "missing runtime handles" — true of the handles, wrong about the
 	// session, and it left `ao send` and orchestrator-to-worker relay unable to
 	// reach a chat worker.
-	if handled, err := m.sendChat(ctx, id, message, clientMessageID); handled {
+	if handled, err := m.sendChat(ctx, id, message, clientMessageID, origin); handled {
 		return err
 	}
 

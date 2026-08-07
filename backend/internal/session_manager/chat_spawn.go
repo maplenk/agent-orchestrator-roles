@@ -192,10 +192,23 @@ func (m *Manager) stopChatBestEffort(ctx context.Context, id domain.SessionID) {
 // receive a message, and one whose controller is gone cannot either. Busy is not
 // a refusal — the controller queues a mid-turn message, which is strictly better
 // than the terminal path's habit of dropping a nudge it cannot safely deliver.
-func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, clientMessageID string) (bool, error) {
+func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, clientMessageID string, origin sendOrigin) (bool, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return false, fmt.Errorf("send %s: session: %w", id, err)
+	}
+	// The pause fence, which the terminal path gets from sessionguard.
+	//
+	// Chat does not go through the messenger, so it does not go through the
+	// guard either — sendChat short-circuits above it. That left AO's own
+	// writes to a paused chat session unfenced while the identical write to a
+	// paused TUI session was suppressed, and the transition-message outbox is
+	// exactly such a writer. The rule is the guard's, unchanged: AO-initiated
+	// writes are refused while paused, human turns are not.
+	if origin == sendOriginAuto && rec.Metadata.Pause != nil {
+		m.logger.Info("chat write suppressed", "sessionID", id, "reason", "paused",
+			"incident", rec.Metadata.Pause.IncidentID)
+		return true, nil
 	}
 	if !ok || domain.NormalizeSessionMode(rec.Mode) != domain.SessionModeChat {
 		return false, nil
