@@ -884,3 +884,114 @@ func TestEveryInterfaceTransitionGuardReportsTheInterfaceFence(t *testing.T) {
 		}
 	}
 }
+
+// Two sagas, one session. The switch saga and the interface transition both
+// stop a controller and start another; nothing stopped them accepting the same
+// session at the same time. beginSwitch excluded a second SWITCH and said
+// nothing about a transition, and the transition neither took that fence nor
+// looked at a durable pending switch.
+//
+// The damage is not theoretical: a transition committing mode=chat while a
+// switch is mid-flight also slips past the switch's chat refusal, because that
+// refusal read the mode before the commit.
+//
+// Both interleavings are asserted, and in each the loser must leave the session
+// alone — one stop, one start, not two.
+func TestSwitchAndInterfaceTransitionCannotBothRun(t *testing.T) {
+	t.Run("transition refused while a switch holds the fence", func(t *testing.T) {
+		manager, _, _, _, log := newTransitionManager(t, domain.SessionModeTUI)
+		if !manager.beginSwitch("session-1") {
+			t.Fatal("could not take the switch fence")
+		}
+		defer manager.endSwitch("session-1")
+
+		_, err := manager.StartInterfaceTransition(context.Background(), "session-1",
+			domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
+		if !errors.Is(err, ErrSwitchInProgress) {
+			t.Fatalf("StartInterfaceTransition = %v, want ErrSwitchInProgress", err)
+		}
+		if strings.Contains(fmt.Sprint(*log), "stop:") {
+			t.Errorf("the refused transition still stopped a controller: %v", *log)
+		}
+	})
+
+	t.Run("transition refused while a switch is durably pending", func(t *testing.T) {
+		manager, store, _, _, log := newTransitionManager(t, domain.SessionModeTUI)
+		rec := store.sessions["session-1"]
+		rec.Metadata.SwitchPending = &domain.SwitchPending{GenerationID: "gen-pending"}
+		store.sessions["session-1"] = rec
+
+		// The in-memory fence is free here — this is the state a switch leaves
+		// behind when it stops its source and awaits recovery, possibly across
+		// a restart, where no goroutine holds anything.
+		_, err := manager.StartInterfaceTransition(context.Background(), "session-1",
+			domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
+		if !errors.Is(err, ErrSwitchInProgress) {
+			t.Fatalf("StartInterfaceTransition = %v, want ErrSwitchInProgress", err)
+		}
+		if strings.Contains(fmt.Sprint(*log), "stop:") {
+			t.Errorf("the refused transition still stopped a controller: %v", *log)
+		}
+		if got := store.sessions["session-1"].Mode; got != domain.SessionModeTUI {
+			t.Errorf("mode = %s, want tui: the refused transition committed a mode", got)
+		}
+	})
+
+	t.Run("switch refused while a transition is active", func(t *testing.T) {
+		manager, store, _, _, log := newTransitionManager(t, domain.SessionModeTUI)
+		// An ACTIVE transition, recorded directly. Starting one and awaiting it
+		// proves nothing here: a settled transition is not active, and a switch
+		// afterwards is legitimate. The state that must refuse a switch is one
+		// still in flight.
+		now := time.Now().UTC()
+		if _, created, err := store.CreateSessionInterfaceTransition(context.Background(),
+			domain.SessionInterfaceTransition{
+				ID: "tr-active", SessionID: "session-1",
+				SourceMode: domain.SessionModeTUI, TargetMode: domain.SessionModeChat,
+				Policy: domain.SessionInterfaceTransitionDrain,
+				Phase:  domain.SessionInterfaceTransitionRequested,
+				CreatedAt: now, UpdatedAt: now,
+			}); err != nil || !created {
+			t.Fatalf("seed active transition: created=%v err=%v", created, err)
+		}
+		stopsAfterTransition := strings.Count(fmt.Sprint(*log), "stop:")
+
+		// The sentinel, not merely "an error": any refusal at all would pass a
+		// nil-check, including ones with nothing to do with the fence — which
+		// is how the first version of this test survived deleting the very
+		// guard it was written for.
+		_, err := manager.SwitchWorker(context.Background(), SwitchRequest{
+			SessionID: "session-1", TargetHarness: domain.HarnessClaudeCode,
+		})
+		if !errors.Is(err, ErrInterfaceTransitionInProgress) {
+			t.Fatalf("SwitchWorker = %v, want ErrInterfaceTransitionInProgress", err)
+		}
+		if got := strings.Count(fmt.Sprint(*log), "stop:"); got != stopsAfterTransition {
+			t.Errorf("the refused switch stopped a controller: %d stops, want %d", got, stopsAfterTransition)
+		}
+	})
+}
+
+// A duplicate interface transition is an INTERFACE conflict. The creator path
+// returned the switch sentinel, so it reported SWITCH_IN_PROGRESS — and the
+// structural guard test walks hasActiveInterfaceTransition callers, which this
+// is not, so it never looked here.
+func TestDuplicateInterfaceTransitionReportsTheInterfaceFence(t *testing.T) {
+	manager, store, _, _, _ := newTransitionManager(t, domain.SessionModeTUI)
+	first, err := manager.StartInterfaceTransition(context.Background(), "session-1",
+		domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	awaitTransition(t, store, first.ID)
+
+	rec := store.sessions["session-1"]
+	rec.Mode = domain.SessionModeTUI // so the duplicate reaches the creator, not "already selected"
+	store.sessions["session-1"] = rec
+
+	_, err = manager.StartInterfaceTransition(context.Background(), "session-1",
+		domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
+	if errors.Is(err, ErrSwitchInProgress) {
+		t.Fatal("a duplicate interface transition reported the SWITCH fence")
+	}
+}

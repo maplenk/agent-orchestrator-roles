@@ -803,3 +803,42 @@ func TestSwitchAndFreshRefuseChatSessionsBeforeStoppingAnything(t *testing.T) {
 		})
 	}
 }
+
+// Recovery re-enters the saga, so it re-applies the saga's refusals. A chat row
+// with a pending switch should be unreachable now that both sagas share a
+// fence, but "should be unreachable" is exactly what recovery exists to
+// disbelieve — its job is states nobody meant to create. Without the check it
+// walks into terminal-oriented probing and finishSwitchTarget with an empty
+// runtime handle, which this saga reads as confirmed death.
+func TestRecoverSwitchRefusesAChatSessionWithoutTouchingAnything(t *testing.T) {
+	launcher := &recordingLauncher{}
+	mgr, st, runtime := newChatManager(launcher)
+
+	rec, _, _, err := mgr.Spawn(context.Background(), ports.SpawnConfig{
+		ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessCodex,
+		Prompt: "start", RequestedMode: domain.SessionModeChat,
+	})
+	if err != nil {
+		t.Fatalf("Spawn: %v", err)
+	}
+	// The corrupt/legacy shape: chat, with a switch pending against it.
+	corrupt := st.sessions[rec.ID]
+	corrupt.Metadata.SwitchPending = &domain.SwitchPending{GenerationID: "gen-1"}
+	st.sessions[rec.ID] = corrupt
+
+	stopsBefore, startsBefore := len(launcher.stopped), len(launcher.started)
+	if _, err := mgr.RecoverSwitchFromPostStop(context.Background(), rec.ID); !errors.Is(err, ErrSwitchChatUnsupported) {
+		t.Fatalf("RecoverSwitchFromPostStop = %v, want ErrSwitchChatUnsupported", err)
+	}
+	if len(launcher.stopped) != stopsBefore || len(launcher.started) != startsBefore {
+		t.Errorf("recovery touched the chat controller: stops %d->%d starts %d->%d",
+			stopsBefore, len(launcher.stopped), startsBefore, len(launcher.started))
+	}
+	if runtime.created != 0 || runtime.destroyed != 0 {
+		t.Errorf("recovery touched a terminal runtime: created=%d destroyed=%d", runtime.created, runtime.destroyed)
+	}
+	// And the pending pin is untouched: refusing is not resolving.
+	if after := st.sessions[rec.ID]; after.Metadata.SwitchPending == nil {
+		t.Error("recovery cleared the pending pin it refused to act on")
+	}
+}

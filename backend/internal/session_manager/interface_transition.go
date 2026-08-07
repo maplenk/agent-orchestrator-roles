@@ -123,12 +123,36 @@ func (m *Manager) StartInterfaceTransition(
 	if !ok {
 		return domain.SessionInterfaceTransition{}, ErrInterfaceHandoffUnsupported
 	}
+	// ONE fence for both sagas, held across the read AND the durable create.
+	//
+	// The switch saga takes beginSwitch; this one did not, so the two could
+	// accept the same session and independently stop its source and start a
+	// target. Separate read-then-check guards would not close that: the window
+	// is between the read and the write, so the guard has to span both. By the
+	// time this releases, the transition row exists, which is what the switch
+	// saga's own check keys on for the asynchronous part that follows.
+	if !m.beginSwitch(id) {
+		return domain.SessionInterfaceTransition{}, fmt.Errorf(
+			"interface transition %s: %w", id, ErrSwitchInProgress)
+	}
+	defer m.endSwitch(id)
+
 	rec, found, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return domain.SessionInterfaceTransition{}, err
 	}
 	if !found {
 		return domain.SessionInterfaceTransition{}, ErrNotFound
+	}
+	// The durable half of the same question. beginSwitch is in-memory and only
+	// covers a saga running in THIS process right now; a switch that stopped
+	// its source and left a pending pin — awaiting recovery, possibly across a
+	// restart — is finished as far as the fence is concerned and very much
+	// unfinished as far as the session is concerned.
+	if rec.Metadata.SwitchPending != nil {
+		return domain.SessionInterfaceTransition{}, fmt.Errorf(
+			"interface transition %s: %w: switch pending gen %s",
+			id, ErrSwitchInProgress, rec.Metadata.SwitchPending.GenerationID)
 	}
 	if rec.IsTerminated {
 		return domain.SessionInterfaceTransition{}, ErrTerminated
@@ -156,7 +180,10 @@ func (m *Manager) StartInterfaceTransition(
 		return domain.SessionInterfaceTransition{}, err
 	}
 	if !created {
-		return transition, ErrSwitchInProgress
+		// A duplicate INTERFACE transition, not a switch. This path is the
+		// creator's own fence, and the structural guard test only walks
+		// hasActiveInterfaceTransition callers, so it never looked here.
+		return transition, ErrInterfaceTransitionInProgress
 	}
 
 	runCtx, cancel := context.WithCancel(context.Background())

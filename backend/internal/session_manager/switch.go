@@ -99,6 +99,21 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchChatUnsupported)
 	}
+	// The OTHER saga. beginSwitch above excludes a second switch; it says
+	// nothing about an interface transition, which stops and starts the same
+	// session's controller from its own goroutine. Two sagas mutating one
+	// session independently is how a source gets stopped twice, or a target
+	// launched while the other is mid-flight — and a transition committing
+	// mode=chat under a running switch also slips past the chat refusal above,
+	// because that read happened before the commit.
+	//
+	// Checked HERE, under beginSwitch, and not before it: a check outside the
+	// fence is a read the other saga can invalidate before this one acts.
+	if active, err := m.hasActiveInterfaceTransition(ctx, req.SessionID); err != nil {
+		return SwitchResult{}, fmt.Errorf("switch %s: interface transition: %w", req.SessionID, err)
+	} else if active {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrInterfaceTransitionInProgress)
+	}
 	if rec.Kind == domain.KindOrchestrator && !ownershipHeld {
 		// Reached the worker entry point. Continuing would hold beginSwitch
 		// without the project gate, so a concurrent EnsureOrchestrator(clean)
@@ -362,6 +377,18 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	}
 	if rec.IsTerminated {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrTerminated)
+	}
+	// Recovery re-enters the saga, so it re-applies the saga's refusals — this
+	// one included. Recovery rechecks kind, cross-harness orchestrator policy,
+	// adapter availability and read-only support, and a chat row reaching here
+	// would otherwise walk into terminal-oriented probing and finishSwitchTarget
+	// with an empty runtime handle, which this saga reads as confirmed death.
+	//
+	// A chat+pending row should be unreachable now that both sagas share a
+	// fence, but "should be unreachable" is what recovery exists to disbelieve:
+	// its whole job is states nobody meant to create.
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchChatUnsupported)
 	}
 	if rec.Metadata.WorkspacePath == "" {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrIncompleteHandle)
