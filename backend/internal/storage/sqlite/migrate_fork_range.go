@@ -40,16 +40,16 @@ type forkMigration struct {
 
 func forkMigrations() []forkMigration {
 	return []forkMigration{
-		{53, 9000, "session_role_fields", hasColumnTx("sessions", "role_id")},
-		{54, 9001, "session_spawn_capability_hash", hasColumnTx("sessions", "spawn_capability_hash")},
+		{53, 9000, "session_role_fields", hasSessionsColumnTx("role_id")},
+		{54, 9001, "session_spawn_capability_hash", hasSessionsColumnTx("spawn_capability_hash")},
 		{55, 9002, "lifecycle_ledger", hasTableTx("lifecycle_ledger")},
-		{56, 9003, "session_switch_pending", hasColumnTx("sessions", "switch_pending_json")},
+		{56, 9003, "session_switch_pending", hasSessionsColumnTx("switch_pending_json")},
 		{57, 9004, "one_active_orchestrator", hasIndexTx("idx_sessions_one_active_orchestrator")},
 		{58, 9005, "orchestrator_replacement_intent", hasTableTx("orchestrator_replacement_intent")},
 		// 0059 rebuilt the ledger to admit a new kind; the rebuilt table's SQL
 		// text is the only trace it left.
 		{59, 9006, "lifecycle_ledger_orchestrator_fresh", tableSQLContainsTx("lifecycle_ledger", "orchestrator_fresh_conversation")},
-		{60, 9007, "session_pause", hasColumnTx("sessions", "pause_json")},
+		{60, 9007, "session_pause", hasSessionsColumnTx("pause_json")},
 	}
 }
 
@@ -159,7 +159,8 @@ func versionRecorded(tx *sql.Tx, version int64) (bool, error) {
 	return applied, nil
 }
 
-func hasColumnTx(table, column string) func(*sql.Tx) (bool, error) {
+func hasSessionsColumnTx(column string) func(*sql.Tx) (bool, error) {
+	const table = "sessions"
 	return func(tx *sql.Tx) (bool, error) {
 		rows, err := tx.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
 		if err != nil {
@@ -213,7 +214,7 @@ func tableSQLContainsTx(table, needle string) func(*sql.Tx) (bool, error) {
 	}
 }
 
-func existsInSchemaTx(tx *sql.Tx, where string, arg string) (bool, error) {
+func existsInSchemaTx(tx *sql.Tx, where, arg string) (bool, error) {
 	var name string
 	err := tx.QueryRow(`SELECT name FROM sqlite_master WHERE `+where, arg).Scan(&name)
 	if errors.Is(err, sql.ErrNoRows) {

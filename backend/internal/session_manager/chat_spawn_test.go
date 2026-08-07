@@ -3,12 +3,13 @@ package sessionmanager
 import (
 	"context"
 	"errors"
-	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
-	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
+	"github.com/aoagents/agent-orchestrator/backend/internal/sessionguard"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"

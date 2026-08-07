@@ -725,17 +725,6 @@ type readinessAgent struct {
 	hints ports.PromptReadinessHints
 }
 
-// readyAfterStartAgent is an after-start agent that DOES offer readiness
-// evidence, which is now the precondition for any after-start delivery. The
-// bare afterStartAgent is refused, deliberately: an adapter that cannot say
-// what its own input prompt looks like is one AO must not paste into.
-func readyAfterStartAgent() readinessAgent {
-	return readinessAgent{hints: ports.PromptReadinessHints{
-		Patterns: []string{"ready>"},
-		Timeout:  time.Second,
-	}}
-}
-
 func (a readinessAgent) PromptReadinessHints(context.Context, ports.LaunchConfig) (ports.PromptReadinessHints, error) {
 	return a.hints, nil
 }

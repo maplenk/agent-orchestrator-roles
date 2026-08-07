@@ -2,10 +2,12 @@ package sessionmanager
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 	"path/filepath"
 	"strings"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
@@ -151,7 +153,11 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 	if err := m.lcm.MarkSpawned(ctx, id, metadata); err != nil {
 		m.stopChatBestEffort(ctx, id)
 		m.rollbackPreparedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, true)
-		m.markSpawnFailedTerminated(ctx, id)
+		// Joined, not dropped: the terminal path does the same, because a
+		// rollback that could not mark the session terminated leaves a live row
+		// for a session that no longer exists, and the caller has to hear about
+		// it alongside the original failure.
+		err = errors.Join(err, m.markSpawnFailedTerminated(ctx, id))
 		return domain.SessionRecord{}, fmt.Errorf("spawn %s: completed: %w", id, err)
 	}
 
@@ -162,7 +168,7 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		if _, err := m.chat.StartChatTurn(ctx, id, in.prompt); err != nil {
 			m.stopChatBestEffort(ctx, id)
 			m.rollbackPreparedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, true)
-			m.markSpawnFailedTerminated(ctx, id)
+			err = errors.Join(err, m.markSpawnFailedTerminated(ctx, id))
 			return domain.SessionRecord{}, fmt.Errorf("spawn %s: deliver prompt: %w", id, err)
 		}
 	}

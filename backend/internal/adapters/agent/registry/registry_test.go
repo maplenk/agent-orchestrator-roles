@@ -171,7 +171,12 @@ func TestAfterStartAdaptersDeclareReadinessEvidence(t *testing.T) {
 				SessionID: "probe", WorkspacePath: t.TempDir(), Prompt: "task",
 			})
 			if err != nil {
-				t.Skipf("delivery strategy unavailable: %v", err)
+				// Fatal, not Skip. An adapter AO cannot classify is an adapter
+				// missing from the inventory this test exists to keep — and a
+				// skip is invisible in a green run, so the next harness could
+				// leave by the same door the last one came in through.
+				t.Fatalf("delivery strategy could not be discovered, so this adapter "+
+					"cannot be classified as safe or refused: %v", err)
 			}
 			if strategy != ports.PromptDeliveryAfterStart {
 				if _, listed := refusedForNoEvidence[harness]; listed {

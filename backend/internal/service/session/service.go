@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"strings"
 	"time"
+
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
