@@ -390,6 +390,22 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchChatUnsupported)
 	}
+	// The other saga, checked here for the same reason the interactive path
+	// checks it: beginSwitch excludes a second SWITCH and says nothing about an
+	// interface transition, which drives the same session's controller from its
+	// own goroutine.
+	//
+	// Recovery reaches states the interactive path cannot. A row carrying BOTH
+	// an incomplete switch and an active transition is unreachable now that the
+	// two sagas share a fence, but it is exactly what a pre-fix, legacy or
+	// hand-edited database can hold — and recovery exists to meet those. Before
+	// the ledger is read or any runtime touched, because after either is too
+	// late to be a refusal.
+	if active, err := m.hasActiveInterfaceTransition(ctx, sessionID); err != nil {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: interface transition: %w", sessionID, err)
+	} else if active {
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrInterfaceTransitionInProgress)
+	}
 	if rec.Metadata.WorkspacePath == "" {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrIncompleteHandle)
 	}

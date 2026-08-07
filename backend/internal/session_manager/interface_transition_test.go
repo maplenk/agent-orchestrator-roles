@@ -948,8 +948,8 @@ func TestSwitchAndInterfaceTransitionCannotBothRun(t *testing.T) {
 			domain.SessionInterfaceTransition{
 				ID: "tr-active", SessionID: "session-1",
 				SourceMode: domain.SessionModeTUI, TargetMode: domain.SessionModeChat,
-				Policy: domain.SessionInterfaceTransitionDrain,
-				Phase:  domain.SessionInterfaceTransitionRequested,
+				Policy:    domain.SessionInterfaceTransitionDrain,
+				Phase:     domain.SessionInterfaceTransitionRequested,
 				CreatedAt: now, UpdatedAt: now,
 			}); err != nil || !created {
 			t.Fatalf("seed active transition: created=%v err=%v", created, err)
@@ -978,20 +978,80 @@ func TestSwitchAndInterfaceTransitionCannotBothRun(t *testing.T) {
 // is not, so it never looked here.
 func TestDuplicateInterfaceTransitionReportsTheInterfaceFence(t *testing.T) {
 	manager, store, _, _, _ := newTransitionManager(t, domain.SessionModeTUI)
-	first, err := manager.StartInterfaceTransition(context.Background(), "session-1",
-		domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
-	if err != nil {
-		t.Fatal(err)
+	// An ACTIVE first transition. Awaiting one and then starting another proved
+	// nothing: a settled transition is not a duplicate, so the second call
+	// could succeed outright and a "not the switch sentinel" assertion would
+	// still pass on nil. The creator path only refuses while one is in flight.
+	now := time.Now().UTC()
+	if _, created, err := store.CreateSessionInterfaceTransition(context.Background(),
+		domain.SessionInterfaceTransition{
+			ID: "tr-first", SessionID: "session-1",
+			SourceMode: domain.SessionModeTUI, TargetMode: domain.SessionModeChat,
+			Policy:    domain.SessionInterfaceTransitionDrain,
+			Phase:     domain.SessionInterfaceTransitionRequested,
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil || !created {
+		t.Fatalf("seed active transition: created=%v err=%v", created, err)
 	}
-	awaitTransition(t, store, first.ID)
 
-	rec := store.sessions["session-1"]
-	rec.Mode = domain.SessionModeTUI // so the duplicate reaches the creator, not "already selected"
-	store.sessions["session-1"] = rec
-
-	_, err = manager.StartInterfaceTransition(context.Background(), "session-1",
+	_, err := manager.StartInterfaceTransition(context.Background(), "session-1",
 		domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
-	if errors.Is(err, ErrSwitchInProgress) {
-		t.Fatal("a duplicate interface transition reported the SWITCH fence")
+	if !errors.Is(err, ErrInterfaceTransitionInProgress) {
+		t.Fatalf("duplicate transition = %v, want ErrInterfaceTransitionInProgress", err)
+	}
+}
+
+// A row carrying BOTH an incomplete switch and an active interface transition.
+//
+// Unreachable now that the two sagas share a fence — and precisely what a
+// pre-fix, legacy or hand-edited database can hold, which is the class recovery
+// exists to meet. Recovery held beginSwitch and rejected chat, but never asked
+// whether a transition was running, so it could drive the runtime while the
+// transition goroutine drove the controller.
+func TestRecoverSwitchRefusesWhenAnInterfaceTransitionIsActive(t *testing.T) {
+	mgr, st, runtime, chat, log := newTransitionManager(t, domain.SessionModeTUI)
+	const id = domain.SessionID("session-1")
+
+	both := st.sessions[id]
+	both.Metadata.SwitchPending = &domain.SwitchPending{GenerationID: "gen-1"}
+	st.sessions[id] = both
+
+	now := time.Now().UTC()
+	if _, created, err := st.CreateSessionInterfaceTransition(context.Background(),
+		domain.SessionInterfaceTransition{
+			ID: "tr-active", SessionID: id,
+			SourceMode: domain.SessionModeTUI, TargetMode: domain.SessionModeChat,
+			Policy:    domain.SessionInterfaceTransitionDrain,
+			Phase:     domain.SessionInterfaceTransitionRequested,
+			CreatedAt: now, UpdatedAt: now,
+		}); err != nil || !created {
+		t.Fatalf("seed active transition: created=%v err=%v", created, err)
+	}
+
+	ledgerBefore := len(st.ledger)
+	logBefore := fmt.Sprint(*log)
+	chatStartBefore := chat.start.SessionID
+	createdBefore, destroyedBefore := runtime.created, runtime.destroyed
+
+	if _, err := mgr.RecoverSwitchFromPostStop(context.Background(), id); !errors.Is(err, ErrInterfaceTransitionInProgress) {
+		t.Fatalf("RecoverSwitchFromPostStop = %v, want ErrInterfaceTransitionInProgress", err)
+	}
+	// No side effects of any kind: not the controller, not the runtime, not the
+	// ledger. A refusal that already wrote something is not a refusal.
+	if got := fmt.Sprint(*log); got != logBefore {
+		t.Errorf("recovery touched a controller: %s -> %s", logBefore, got)
+	}
+	if chat.start.SessionID != chatStartBefore {
+		t.Errorf("recovery started a chat controller")
+	}
+	if runtime.created != createdBefore || runtime.destroyed != destroyedBefore {
+		t.Errorf("recovery touched the runtime: created %d->%d destroyed %d->%d",
+			createdBefore, runtime.created, destroyedBefore, runtime.destroyed)
+	}
+	if len(st.ledger) != ledgerBefore {
+		t.Errorf("recovery wrote %d ledger row(s)", len(st.ledger)-ledgerBefore)
+	}
+	if st.sessions[id].Metadata.SwitchPending == nil {
+		t.Error("recovery cleared the pending pin it refused to act on")
 	}
 }
