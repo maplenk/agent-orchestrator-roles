@@ -437,6 +437,13 @@ Deferred beyond this MVP:
 - per-project containment for an unreadable or forward-versioned stored
   `ProjectConfig` (today one bad row fails `ListProjects`; the follow-up must
   keep other projects available while preserving and write-fencing that row);
+- block-level disambiguation for legacy migration ledgers containing the full
+  original 42–49 fork range plus a lone upstream Muse 53. The existing
+  per-migration fingerprint cannot tell that Muse row from a stale fork 53
+  because 42 already explains the physical schema. Preserve the fail-loud bias:
+  the follow-up must retain lone Muse 53, still free a complete stale 53–60
+  block, preserve already-repaired idempotence, and never silently skip
+  upstream schema;
 - Pi/Muse orchestrator switching; and
 - automatic enforcement of model-quality/instruction-following behavior.
 

@@ -63,7 +63,7 @@ deferred detector/automation work.
 | Item | Status | Notes |
 |------|--------|--------|
 | Fork + pin AO baseline | **Done** | `FORK.md`, `AO_BASELINE_SHA.txt` |
-| Own migration numbers | **Done** | Fork history is now `9000`–`9007`; the fingerprinted pre-goose repair upgrades old 0053–0060 fork databases without stealing upstream's Muse migration 0053. See `UPSTREAM_SYNC2_PLAN.md` |
+| Own migration numbers | **Done for unambiguous histories** | Fork history is now `9000`–`9007`; `a62b2ee7` repairs databases carrying both abandoned fork ranges by preserving 42–49, freeing 53–60, and recording 9000–9007 once. A full 42–49 range plus a lone upstream Muse 53 remains an explicitly deferred ambiguous-ledger case below. See `UPSTREAM_SYNC2_PLAN.md` |
 | GitHub origin | **Done** | `maplenk/agent-orchestrator-roles` |
 | Profiles (orchestrator, implementor, ui-implementor, reviewer, verifier) | **Done** | `profiles/*.md` (shipped host templates) |
 | Capability matrix | **Partial → runtime exists** | `capabilities.For` is source of truth; `CAPABILITY_MATRIX.md` docs mirror |
@@ -77,6 +77,7 @@ deferred detector/automation work.
 | CLI / API roleMap round-trip | **Done** | CLI `roleMap` mirror + set-config; live dogfood set roleMap via CLI |
 | Strict role JSON + durable read safety | **Done** | HTTP/CLI require both permission booleans and reject unknown binding fields; `663f9339` makes malformed persisted bindings fail reads without rewriting their bytes while valid semantics/SHA/bytes remain stable |
 | Per-project unreadable-config containment | **Deferred follow-up** | `ListProjects` currently fails the whole list when any one stored `ProjectConfig` cannot be decoded. This is fail-safe for writes but turns one corrupt or forward-versioned row into an app-wide availability failure, including rollback/mixed-version use. Required contract: keep other projects listable; expose the affected project as config-unreadable; preserve its raw bytes; and refuse config mutations for that row until repaired. Do not restore silent zero-config degradation. |
+| Mixed-history migration ambiguity | **Deferred follow-up** | A database with the complete original fork block 42–49, the fork fingerprints, and a lone upstream Muse row 53 is indistinguishable per migration from a stale fork 53. Current repair follows the reviewed baseline's fail-loud bias and may delete the Muse ledger row, causing goose to attempt Muse again at boot. Do not weaken `a62b2ee7`: a complete 42–49 + 53–60 block must still free 53–60, while a 9000 entry already present on function entry must preserve a later Muse 53. The follow-up needs a block-level discriminator and tests for both populations; if still ambiguous, prefer a loud refusal over silently skipping upstream schema. |
 | Host-authoritative `ao spawn --role` | **Done** | CLI + HTTP `roleId`; Resolve rejects free-form harness with role |
 | Strict: role required for workers; no harness override | **Done** | `roles/resolve.go` |
 | Strict orch auto-bind `orchestratorRole` | **Done** | Pins routing/delegation policy; explicit read-only remains capability-gated |
@@ -377,4 +378,5 @@ The MVP has no remaining implementation or live-acceptance action. Preserve
 the distinct evidence sets (`166e9e63`/`322f9c18`, `3c3aef51`, and installed
 role-pipeline `f4b28012`) and promote no capability. Any next slice is
 post-MVP: address the three known wall-clock tests, contain unreadable project
-config per row, or pursue a deliberately scoped deferred capability.
+config per row, resolve the documented mixed-history migration ambiguity, or
+pursue a deliberately scoped deferred capability.
