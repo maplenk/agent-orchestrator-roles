@@ -142,6 +142,7 @@ func TestBootUnsafeChildren(t *testing.T) {
 		{"launch cleanup", ErrLaunchCleanupUnresolved},
 		{"restore marker", ErrRestoreMarkerUnresolved},
 		{"orchestrator evidence", ErrOrchestratorEvidenceUnresolved},
+		{"runtime reap", ErrRuntimeReapUnresolved},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !errors.Is(tc.err, ErrBootUnsafe) {

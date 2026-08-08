@@ -1264,6 +1264,14 @@ var ErrLaunchCleanupUnresolved = fmt.Errorf("%w: launch cleanup unresolved", Err
 // read model that boot has already disproved is worse than not serving.
 var ErrPausedLivenessUnresolved = fmt.Errorf("%w: paused session liveness not recorded", ErrBootUnsafe)
 
+// ErrRuntimeReapUnresolved means boot could not prove that a terminated
+// session's recorded runtime is absent. A shutdown-saved row is eligible for
+// RestoreAll immediately after the reap pass, so treating probe uncertainty as
+// an ordinary skip can relaunch the row beside the runtime the failed probe did
+// not disprove. The same classification covers a known-live runtime whose
+// Destroy failed: in both cases restore must not run during this boot.
+var ErrRuntimeReapUnresolved = fmt.Errorf("%w: terminated runtime reap unresolved", ErrBootUnsafe)
+
 // reapFailedLaunchRuntime tears down the runtime of a launch that could not be
 // adopted, and reports whether its death is CONFIRMED.
 //
@@ -2561,7 +2569,12 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 // reconcileReap kills the leaked tmux session of a session the DB already marks
 // terminated. This covers the teardown that marked the row terminated but failed
 // to kill the runtime (e.g. ForceDestroy/Destroy errored after MarkTerminated).
-// Destroy is idempotent, so an already-gone session is a no-op.
+// Destroy is idempotent, so an already-gone session is a no-op. Probe failures
+// are boot-unsafe rather than ordinary per-row failures: this pass exists to
+// establish that RestoreAll cannot launch beside an old runtime, and an error
+// establishes nothing. ErrRuntimeUnavailable is intentionally included because
+// it covers both absence-like and reachability failures; authoritative adapter
+// absence is expressed only as (false, nil).
 func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) error {
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID == "" {
@@ -2569,16 +2582,13 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 	}
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		if errors.Is(err, ports.ErrRuntimeUnavailable) {
-			return nil // no server means no leaked session to reap
-		}
-		return fmt.Errorf("reconcile reap %s: probe: %w", rec.ID, err)
+		return fmt.Errorf("%w: session %s probe: %w", ErrRuntimeReapUnresolved, rec.ID, err)
 	}
 	if !alive {
 		return nil
 	}
 	if err := m.runtime.Destroy(ctx, handle); err != nil {
-		return fmt.Errorf("reconcile reap %s: destroy: %w", rec.ID, err)
+		return fmt.Errorf("%w: session %s destroy: %w", ErrRuntimeReapUnresolved, rec.ID, err)
 	}
 	return nil
 }
@@ -2598,14 +2608,13 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 //     collide with a leaked tmux of the same name.
 //  4. Restore pass: relaunch shutdown-saved sessions (existing RestoreAll).
 //
-// Best-effort throughout, with ONE exception: a pass that leaves a runtime
-// executing which nothing is scheduled to sweep (ErrLaunchCleanupUnresolved) is
-// collected and returned rather than logged. Every other per-session failure is
-// logged and never aborts the pass. Both loss points feed the same return —
-// post_stop recovery below, whose session stays ACTIVE and is therefore
-// invisible to every later pass, and RestoreAll's terminated-session restores.
-// The daemon treats that return as FATAL, ahead of every client-facing surface
-// (daemon.go, pinned by boot_order_test.go).
+// Best-effort passes continue collecting safe work, but every ErrBootUnsafe
+// child is returned before RestoreAll. That ordering is load-bearing: a
+// terminated row whose old runtime could not be disproved must not be relaunched
+// beside it. RestoreAll's own boot-unsafe outcomes are still returned after the
+// restore pass because they arise during that pass. The daemon treats either
+// return as FATAL, ahead of every client-facing surface (daemon.go, pinned by
+// boot_order_test.go).
 func (m *Manager) Reconcile(ctx context.Context) error {
 	m.startTransitionMessageDispatcher(ctx)
 	_, err := m.recoverInterruptedInterfaceTransitions(ctx)
@@ -2691,12 +2700,18 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			m.logger.Error("reconcile: reap pass failed, skipping", "sessionID", rec.ID, "error", err)
 		}
 	}
-	// RestoreAll's error joins the unresolved boot-safety errors rather than
-	// replacing them: a boot that could not resolve a restore marker must stay
-	// unsafe even if the restore pass itself succeeded.
-	//
-	// errors.Join drops nils, so a healthy pass still returns nil.
-	if err := errors.Join(append(unresolved, m.RestoreAll(ctx))...); err != nil {
+	// Restore is the first pass that launches terminated rows. Any boot-unsafe
+	// finding collected before this point means the precondition for launching
+	// them was not established. Continue the earlier per-row passes so unrelated
+	// cleanup can make progress, then stop here before workspace adoption or
+	// runtime creation.
+	if len(unresolved) > 0 {
+		return errors.Join(unresolved...)
+	}
+	// RestoreAll can itself discover a boot-unsafe condition while the restore
+	// pass is running. Surface it unchanged; every pre-restore finding already
+	// returned above.
+	if err := m.RestoreAll(ctx); err != nil {
 		return err
 	}
 	// Upstream's transition outbox runs only on a boot that reached here
