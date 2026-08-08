@@ -839,6 +839,15 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchPostStop) &&
+		errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong):
+		// Preserve both facts from finishSwitchTarget's joined error. The
+		// source is already gone, so the ordinary spawn-size message omits a
+		// critical recovery constraint; the generic post-stop answer, on the
+		// other hand, hides the exact size remedy.
+		return apierr.Invalid("LAUNCH_COMMAND_TOO_LONG",
+			"The source stopped and its handoff is retained for recovery, but the target launch command is too large. "+
+				"Use file-backed system instructions where the harness supports them, or shorten the task or role prompt before recovering the same generation", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchPostStop):
 		return apierr.Conflict("SWITCH_POST_STOP",
 			"Source stopped but target switch did not complete; handoff retained for recovery", nil)

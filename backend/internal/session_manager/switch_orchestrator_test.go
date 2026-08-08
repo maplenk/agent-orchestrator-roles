@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/tmux"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
 )
 
 // 2B-1: the orchestrator is the longest-lived session in a project and the
@@ -64,6 +70,47 @@ func orchestratorSwitchHarness(t *testing.T) (*Manager, *fakeStore, domain.Sessi
 	})
 	m.switchCapsOverride = testSwitchCaps
 	return m, st, id
+}
+
+type harnessAgentResolver map[domain.AgentHarness]ports.Agent
+
+func (r harnessAgentResolver) Agent(harness domain.AgentHarness) (ports.Agent, bool) {
+	agent, ok := r[harness]
+	return agent, ok
+}
+
+// tmuxPreflightRuntime subjects every target RuntimeConfig to the real tmux
+// adapter's 15,360-byte launch-command preflight. /usr/bin/false is reached
+// only after that preflight passes; its ordinary execution error is ignored so
+// the existing deterministic fake can model the rest of a successful launch.
+type tmuxPreflightRuntime struct {
+	*fakeRuntime
+	preflight *tmux.Runtime
+	attempts  []ports.RuntimeConfig
+}
+
+func (r *tmuxPreflightRuntime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
+	r.attempts = append(r.attempts, cfg)
+	if _, err := r.preflight.Create(ctx, cfg); errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		return ports.RuntimeHandle{}, err
+	}
+	return r.fakeRuntime.Create(ctx, cfg)
+}
+
+func pinAcceptanceOrchestratorTemplate(t *testing.T, st *fakeStore) (string, string, []byte) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "profiles", "orchestrator.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := roles.ParseTemplate(raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutTemplateArtifact(ctx, tmpl.ArtifactID, tmpl.SHA256, raw, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	return tmpl.ArtifactID, tmpl.SHA256, raw
 }
 
 // TestFreshOrchestratorConversation_KeepsIdentityInPlace is the core of 2B-1.
@@ -314,6 +361,137 @@ func TestSwitchOrchestrator_CodexClaudeInPlacePreservesIdentityAndRotatesCredent
 				t.Fatalf("orchestrator roster/handoff was omitted or stacked:\n%s", combinedPrompt)
 			}
 		})
+	}
+}
+
+// This is the live strict-role specimen: the repository's full orchestrator
+// template, one worker in the observed roster, and an immediate
+// Codex -> Claude -> Codex roundtrip. The second handoff is large enough that
+// inlining Codex developer_instructions crosses tmux's real 15,360-byte
+// preflight. Codex already supports model_instructions_file, so the target must
+// launch from the manager-owned file and durably acknowledge the same saga.
+func TestSwitchOrchestrator_CodexClaudeCodexRoundTripFitsTmuxCommandBudget(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	artifactID, templateSHA, templateRaw := pinAcceptanceOrchestratorTemplate(t, st)
+	if len(templateRaw) != 3885 {
+		t.Fatalf("acceptance orchestrator template size = %d, want frozen 3885-byte specimen", len(templateRaw))
+	}
+	rec := st.sessions[id]
+	rec.Metadata.Prompt = "Hold for deterministic MVP acceptance."
+	rec.Metadata.Role.TemplateArtifactID = artifactID
+	rec.Metadata.Role.TemplateSHA256 = templateSHA
+	st.sessions[id] = rec
+	st.sessions["mer-worker"] = domain.SessionRecord{
+		ID: "mer-worker", ProjectID: rec.ProjectID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-worker/root",
+			Role:   domain.SessionRoleBinding{RoleID: "implementor"},
+		},
+	}
+
+	binDir := t.TempDir()
+	codexBinary := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(codexBinary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m.agents = harnessAgentResolver{
+		domain.HarnessClaudeCode: &recordingAgent{},
+		domain.HarnessCodex:      codex.New(),
+	}
+	m.dataDir = t.TempDir()
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	runtime := &tmuxPreflightRuntime{
+		fakeRuntime: baseRuntime,
+		preflight:   tmux.New(tmux.Options{Binary: "/usr/bin/false", Shell: "/bin/sh"}),
+	}
+	m.runtime = runtime
+
+	first, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if err != nil {
+		t.Fatalf("Codex -> Claude: %v", err)
+	}
+	second, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+	if err != nil {
+		t.Fatalf("Claude -> Codex: %v", err)
+	}
+	if first.GenerationID == second.GenerationID || second.Session.Harness != domain.HarnessCodex {
+		t.Fatalf("roundtrip generations/target = %q -> %q, harness %q",
+			first.GenerationID, second.GenerationID, second.Session.Harness)
+	}
+	if runtime.created != 2 || runtime.destroyed != 2 || len(runtime.attempts) != 2 {
+		t.Fatalf("runtime creates/destroys/attempts = %d/%d/%d, want 2/2/2",
+			runtime.created, runtime.destroyed, len(runtime.attempts))
+	}
+
+	codexCfg := runtime.attempts[1]
+	var instructionFile string
+	for _, arg := range codexCfg.Argv {
+		if strings.HasPrefix(arg, "model_instructions_file=") {
+			instructionFile = strings.TrimPrefix(arg, "model_instructions_file=")
+		}
+		if strings.HasPrefix(arg, "developer_instructions=") {
+			t.Fatalf("Codex target inlined the full system prompt into argv: %.120s", arg)
+		}
+	}
+	if instructionFile == "" {
+		t.Fatalf("Codex target argv does not use model_instructions_file: %#v", codexCfg.Argv)
+	}
+	instructions, err := os.ReadFile(instructionFile)
+	if err != nil {
+		t.Fatalf("read Codex target instruction file: %v", err)
+	}
+	if !strings.Contains(string(instructions), "Harness: codex.") ||
+		!strings.Contains(string(instructions), "## Role") {
+		t.Fatalf("Codex target instruction file lost role authority: %.500s", instructions)
+	}
+	after := st.sessions[id]
+	if after.Metadata.SwitchPending != nil || after.Metadata.RuntimeLaunchID != second.GenerationID {
+		t.Fatalf("roundtrip did not acknowledge/promote target: %+v", after.Metadata)
+	}
+	if strings.Count(after.Metadata.Prompt, "## Host-compiled handoff") != 1 ||
+		strings.Count(after.Metadata.Prompt, "Hold for deterministic MVP acceptance.") != 1 {
+		t.Fatalf("roundtrip stacked or lost the task handoff:\n%s", after.Metadata.Prompt)
+	}
+	if len(st.ledger) != 8 || st.ledger[7].Phase != domain.LifecyclePhaseTargetAck ||
+		st.ledger[7].GenerationID != second.GenerationID {
+		t.Fatalf("roundtrip ledger did not ack both targets: %+v", st.ledger)
+	}
+}
+
+// Once the source is stopped, the manager intentionally joins the generic
+// recovery state with the exact target-launch cause. Both identities are
+// load-bearing: recovery uses ErrSwitchPostStop, while the API must still give
+// the operator the command-size remedy instead of hiding it.
+func TestSwitchOrchestrator_PostStopCommandTooLongPreservesBothErrorIdentities(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	m.agents = singleAgent{agent: launchArgvAgent{argv: []string{
+		"target-agent", strings.Repeat("oversized-role-and-handoff", 900),
+	}}}
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m.runtime = &tmuxPreflightRuntime{
+		fakeRuntime: baseRuntime,
+		preflight:   tmux.New(tmux.Options{Binary: "/usr/bin/false", Shell: "/bin/sh"}),
+	}
+
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if !errors.Is(err, ErrSwitchPostStop) || !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("error identities = %v, want ErrSwitchPostStop + ErrRuntimeLaunchCommandTooLong", err)
+	}
+	rec := st.sessions[id]
+	if rec.Metadata.SwitchPending == nil || rec.Metadata.RuntimeHandleID != "" {
+		t.Fatalf("post-stop handoff not retained: %+v", rec.Metadata)
+	}
+	if baseRuntime.destroyed != 1 || baseRuntime.created != 0 {
+		t.Fatalf("source destroys/target creates = %d/%d, want 1/0",
+			baseRuntime.destroyed, baseRuntime.created)
 	}
 }
 

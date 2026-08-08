@@ -205,6 +205,28 @@ func TestToAPIError_LaunchCommandTooLongThroughTheFullWrapping(t *testing.T) {
 	}
 }
 
+func TestToAPIError_PostStopLaunchCommandTooLongKeepsRecoveryAndSizeRemedy(t *testing.T) {
+	fromRuntime := fmt.Errorf("runtime: %w: launch command is %d bytes, limit is %d",
+		ports.ErrRuntimeLaunchCommandTooLong, 17291, 15360)
+	joined := fmt.Errorf("switch mer-1: %w", errors.Join(sessionmanager.ErrSwitchPostStop, fromRuntime))
+
+	var apiErr *apierr.Error
+	if !errors.As(toAPIError(joined), &apiErr) {
+		t.Fatal("joined post-stop/command-size failure did not map to an apierr")
+	}
+	if apiErr.Code != "LAUNCH_COMMAND_TOO_LONG" {
+		t.Fatalf("code = %q, want LAUNCH_COMMAND_TOO_LONG", apiErr.Code)
+	}
+	if apiErr.Kind != apierr.KindInvalid {
+		t.Fatalf("kind = %v, want Invalid", apiErr.Kind)
+	}
+	for _, want := range []string{"source stopped", "handoff", "file-backed", "too large"} {
+		if !strings.Contains(strings.ToLower(apiErr.Message), want) {
+			t.Errorf("message %q does not preserve actionable %q context", apiErr.Message, want)
+		}
+	}
+}
+
 // And the sentinels must stay distinct values: making one an alias of the other
 // would restore the shadowing while both cases still appear in the switch.
 func TestSwitchAndInterfaceFenceSentinelsAreDistinct(t *testing.T) {
