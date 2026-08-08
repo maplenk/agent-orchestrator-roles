@@ -2734,6 +2734,71 @@ paths:
       summary: Configure whether PR completion terminates the session
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/output:
+    get:
+      operationId: getSessionOutput
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      - description: Number of trailing terminal lines to return (default 200, maximum
+          1000).
+        in: query
+        name: lines
+        schema:
+          description: Number of trailing terminal lines to return (default 200, maximum
+            1000).
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionOutputResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Read bounded terminal output for a TUI session
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/pause:
     post:
       operationId: pauseSession
@@ -6609,6 +6674,19 @@ components:
       required:
       - supported
       - targetMode
+      type: object
+    SessionOutputResponse:
+      properties:
+        lines:
+          type: integer
+        output:
+          type: string
+        sessionId:
+          type: string
+      required:
+      - sessionId
+      - output
+      - lines
       type: object
     SessionPRCISummary:
       properties:

@@ -127,7 +127,14 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 		return nil, err
 	}
 
-	cmd = []string{binary, "--no-auto-update"}
+	// AO owns the worktree and installs its own project-local hook file before
+	// launching Grok. Grok quite correctly treats that executable project
+	// configuration as untrusted on first use, but leaving the decision to the
+	// interactive trust screen makes every fresh AO worktree unlaunchable: the
+	// task is deliberately never pasted into an unknown prompt. The hidden but
+	// documented --trust flag records trust for this AO-owned workspace before
+	// the TUI reads the managed hooks.
+	cmd = []string{binary, "--no-auto-update", "--trust"}
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	agentbase.AppendModelFlag(&cmd, cfg.Config, "--model")
 
@@ -205,7 +212,7 @@ func (p *Plugin) AreHooksInstalled(ctx context.Context, workspacePath string) (b
 }
 
 // GetRestoreCommand resumes a prior grok session by its captured id, building
-// `grok --no-auto-update [--permission-mode <mode>] -r <agentSessionId>`
+// `grok --no-auto-update --trust [--permission-mode <mode>] -r <agentSessionId>`
 // when we have a hook-captured native id. ok=false otherwise, so the restore
 // manager falls back to a fresh launch with AO's saved system prompt.
 func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig) (cmd []string, ok bool, err error) {
@@ -223,7 +230,7 @@ func (p *Plugin) GetRestoreCommand(ctx context.Context, cfg ports.RestoreConfig)
 	}
 
 	cmd = make([]string, 0, 4)
-	cmd = append(cmd, binary, "--no-auto-update")
+	cmd = append(cmd, binary, "--no-auto-update", "--trust")
 	appendApprovalFlags(&cmd, cfg.Permissions)
 	agentbase.AppendModelFlag(&cmd, cfg.Config, "--model")
 	systemPrompt, err := restoreSystemPromptText(cfg)

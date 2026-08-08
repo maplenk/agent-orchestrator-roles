@@ -75,6 +75,12 @@ type interfaceTransitionCommander interface {
 	CancelInterfaceTransition(context.Context, domain.SessionID) error
 }
 
+// outputCommander is optional on focused service fakes and implemented by the
+// production session manager.
+type outputCommander interface {
+	SessionOutput(context.Context, domain.SessionID, int) (string, error)
+}
+
 // RollbackOutcome reports what happened in a rollback: either the seed row was
 // deleted, or the partially-spawned session was killed (runtime+workspace torn
 // down, row marked terminated).
@@ -767,6 +773,20 @@ func (s *Service) Get(ctx context.Context, id domain.SessionID) (domain.Session,
 	return s.toSession(ctx, rec)
 }
 
+// SessionOutput reads terminal scrollback without assembling the fallible
+// session/PR read model after the manager has returned it.
+func (s *Service) SessionOutput(ctx context.Context, id domain.SessionID, lines int) (string, error) {
+	manager, ok := s.manager.(outputCommander)
+	if !ok {
+		return "", apierr.Internal("SESSION_OUTPUT_UNAVAILABLE", "Session terminal output is not available in this build")
+	}
+	out, err := manager.SessionOutput(ctx, id, lines)
+	if err != nil {
+		return "", toAPIError(err)
+	}
+	return out, nil
+}
+
 // toAPIError maps the session engine's sentinel errors to their REST API
 // equivalents; an unrecognized error passes through and surfaces as a 500.
 func toAPIError(err error) error {
@@ -836,6 +856,11 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchPaused):
 		return apierr.Conflict("SWITCH_PAUSED",
 			"This session is paused. Resume it before switching harness or starting a fresh conversation", nil)
+	case errors.Is(err, sessionmanager.ErrSessionOutputUnavailable):
+		return apierr.Conflict("SESSION_OUTPUT_UNAVAILABLE",
+			"Terminal output is available only for terminal-mode sessions; use the conversation view for Chat sessions", nil)
+	case errors.Is(err, sessionmanager.ErrSessionOutputLinesInvalid):
+		return apierr.Invalid("INVALID_OUTPUT_LINES", "lines must be between 1 and 1000", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)

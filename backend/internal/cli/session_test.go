@@ -93,6 +93,8 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1":
 			_, _ = io.WriteString(w, `{"session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1/output":
+			_, _ = io.WriteString(w, `{"sessionId":"demo-1","output":"FINAL REPORT\nall checks passed","lines":73}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
 			_, _ = io.WriteString(w, `{"status":"ok","project":{"id":"demo","name":"Demo","path":"/repo/demo","repo":"https://github.com/aoagents/agent-orchestrator","defaultBranch":"main"}}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/pr/claim":
@@ -313,6 +315,43 @@ func TestSessionGet_JSONOutputDecodes(t *testing.T) {
 	}
 	if got.Session.ID != "demo-1" || got.Session.ProjectID != "demo" || got.Session.Status != "working" {
 		t.Fatalf("unexpected session JSON: %#v", got.Session)
+	}
+}
+
+func TestSessionOutputReadsTerminalReportWithOperatorCredential(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: serverPort(t, srv.URL), StartedAt: time.Unix(100, 0).UTC(),
+		OperatorSpawnToken: "op-output-tok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"AO_SESSION_ID", "AO_SPAWN_CAPABILITY", "AO_MANAGED_SESSION", "AO_OPERATOR_SPAWN_TOKEN"} {
+		t.Setenv(k, "")
+	}
+
+	out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "output", "demo-1", "--lines", "73")
+	if err != nil {
+		t.Fatalf("session output failed: %v\nstderr=%s", err, errOut)
+	}
+	if out != "FINAL REPORT\nall checks passed\n" {
+		t.Fatalf("output = %q", out)
+	}
+	if got := log.all(); !reflect.DeepEqual(got, []string{"GET /api/v1/sessions/demo-1/output?lines=73"}) {
+		t.Fatalf("requests = %#v", got)
+	}
+	if log.lastHeaders()["X-AO-Operator-Spawn-Token"] != "op-output-tok" {
+		t.Fatalf("headers=%v want operator credential", log.lastHeaders())
+	}
+}
+
+func TestSessionOutputRejectsInvalidLinesLocally(t *testing.T) {
+	_, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "output", "demo-1", "--lines", "0")
+	if err == nil || !strings.Contains(err.Error(), "--lines must be between 1 and 1000") {
+		t.Fatalf("err=%v stderr=%q", err, errOut)
 	}
 }
 

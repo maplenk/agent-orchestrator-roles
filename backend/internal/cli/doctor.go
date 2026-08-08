@@ -63,6 +63,7 @@ type harnessProbe struct {
 var doctorHarnesses = []harnessProbe{
 	{Name: "claude-code", BinaryName: "claude", VersionArg: "--version"},
 	{Name: "codex", BinaryName: "codex", VersionArg: "--version"},
+	{Name: "grok", BinaryName: "grok", VersionArg: "--version"},
 	{Name: "muse", BinaryName: "muse", VersionArg: "--version", ExpectedVersionPrefix: "Muse Code "},
 }
 

@@ -144,6 +144,7 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.AddCommand(newSessionListCommand(ctx))
 	cmd.AddCommand(newSessionGetCommand(ctx))
+	cmd.AddCommand(newSessionOutputCommand(ctx))
 	cmd.AddCommand(newSessionKillCommand(ctx))
 	cmd.AddCommand(newSessionRestoreCommand(ctx))
 	cmd.AddCommand(newSessionRenameCommand(ctx))
@@ -152,6 +153,40 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionSwitchCommand(ctx))
 	cmd.AddCommand(newSessionContinueCommand(ctx))
 	cmd.AddCommand(newSessionFreshCommand(ctx))
+	return cmd
+}
+
+func newSessionOutputCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionOutputOptions
+	cmd := &cobra.Command{
+		Use:   "output <id>",
+		Short: "Read a TUI session's terminal report",
+		Args:  oneSessionIDArg,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := normalizeSessionID(args[0])
+			if err != nil {
+				return err
+			}
+			if opts.lines < 1 || opts.lines > 1000 {
+				return usageError{errors.New("usage: --lines must be between 1 and 1000")}
+			}
+			var out sessionOutputResponse
+			path := fmt.Sprintf("sessions/%s/output?lines=%d", url.PathEscape(id), opts.lines)
+			if err := ctx.getJSONWithHeaders(cmd.Context(), path, &out, spawnCallerHeaders()); err != nil {
+				return err
+			}
+			if opts.json {
+				return writeJSON(cmd.OutOrStdout(), out)
+			}
+			_, err = fmt.Fprint(cmd.OutOrStdout(), out.Output)
+			if err == nil && out.Output != "" && !strings.HasSuffix(out.Output, "\n") {
+				_, err = fmt.Fprintln(cmd.OutOrStdout())
+			}
+			return err
+		},
+	}
+	cmd.Flags().IntVar(&opts.lines, "lines", 200, "Number of trailing terminal lines (1-1000)")
+	cmd.Flags().BoolVar(&opts.json, "json", false, "Output as JSON")
 	return cmd
 }
 
@@ -173,6 +208,17 @@ type sessionFreshOptions struct {
 	session   string
 	objective string
 	json      bool
+}
+
+type sessionOutputOptions struct {
+	lines int
+	json  bool
+}
+
+type sessionOutputResponse struct {
+	SessionID string `json:"sessionId"`
+	Output    string `json:"output"`
+	Lines     int    `json:"lines"`
 }
 
 type switchWorkerAPIRequest struct {

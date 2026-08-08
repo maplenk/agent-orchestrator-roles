@@ -120,13 +120,14 @@ func TestDoctorChecksHarnessVersions(t *testing.T) {
 		"git":    "/bin/git",
 		"claude": "/bin/claude",
 		"codex":  "/bin/codex",
+		"grok":   "/bin/grok",
 		"muse":   "/bin/muse",
 	}
 	c := doctorContext(t, cmdPath, func(_ context.Context, name string, args ...string) ([]byte, error) {
 		switch name {
 		case "/bin/git":
 			return []byte("git version 2.43.0\n"), nil
-		case "/bin/claude", "/bin/codex", "/bin/muse":
+		case "/bin/claude", "/bin/codex", "/bin/grok", "/bin/muse":
 			if len(args) == 1 && args[0] == "--version" {
 				if name == "/bin/muse" {
 					return []byte("Muse Code 0.1.0 (0.1.0-R708.1)\n"), nil
@@ -146,7 +147,7 @@ func TestDoctorChecksHarnessVersions(t *testing.T) {
 	})
 
 	checks := c.runDoctor(context.Background())
-	for _, name := range []string{"claude-code", "codex", "muse"} {
+	for _, name := range []string{"claude-code", "codex", "grok", "muse"} {
 		check := findDoctorCheck(t, checks, name)
 		if check.Level != doctorPass || !strings.Contains(check.Message, "resolves to") {
 			t.Fatalf("%s check = %+v, want PASS with path/version", name, check)

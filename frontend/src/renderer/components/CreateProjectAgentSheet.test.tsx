@@ -1,26 +1,34 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { agentsQueryKey } from "../hooks/useAgentsQuery";
+import { apiClient } from "../lib/api-client";
 import { CreateProjectAgentSheet, defaultAuthorizedAgent, RequiredAgentField } from "./CreateProjectAgentSheet";
+
+vi.mock("../lib/api-client", () => ({
+	apiClient: { GET: vi.fn(), POST: vi.fn() },
+	apiErrorMessage: () => "agent catalog request failed",
+}));
+
+const testCatalog = {
+	supported: [
+		{ id: "claude-code", label: "claude-code" },
+		{ id: "codex", label: "codex" },
+	],
+	installed: [
+		{ id: "claude-code", label: "claude-code", authStatus: "authorized" as const },
+		{ id: "codex", label: "codex", authStatus: "authorized" as const },
+	],
+	authorized: [
+		{ id: "claude-code", label: "claude-code", authStatus: "authorized" as const },
+		{ id: "codex", label: "codex", authStatus: "authorized" as const },
+	],
+};
 
 function renderSheet(onSubmit = vi.fn().mockResolvedValue(undefined)) {
 	const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-	queryClient.setQueryData(agentsQueryKey, {
-		supported: [
-			{ id: "claude-code", label: "claude-code" },
-			{ id: "codex", label: "codex" },
-		],
-		installed: [
-			{ id: "claude-code", label: "claude-code", authStatus: "authorized" },
-			{ id: "codex", label: "codex", authStatus: "authorized" },
-		],
-		authorized: [
-			{ id: "claude-code", label: "claude-code", authStatus: "authorized" },
-			{ id: "codex", label: "codex", authStatus: "authorized" },
-		],
-	});
+	queryClient.setQueryData(agentsQueryKey, testCatalog);
 	render(
 		<QueryClientProvider client={queryClient}>
 			<CreateProjectAgentSheet
@@ -43,6 +51,19 @@ async function chooseOption(trigger: HTMLElement, optionName: string) {
 }
 
 describe("CreateProjectAgentSheet", () => {
+	beforeEach(() => {
+		vi.clearAllMocks();
+		vi.mocked(apiClient.GET).mockResolvedValue({ data: testCatalog, error: undefined } as never);
+		vi.mocked(apiClient.POST).mockResolvedValue({ data: testCatalog, error: undefined } as never);
+	});
+
+	it("refreshes the provider catalog whenever the sheet opens", async () => {
+		renderSheet();
+
+		await waitFor(() => expect(apiClient.POST).toHaveBeenCalledWith("/api/v1/agents/refresh"));
+		expect(apiClient.POST).toHaveBeenCalledTimes(1);
+	});
+
 	it("chooses the highest-priority authorized default agent", () => {
 		expect(
 			defaultAuthorizedAgent([

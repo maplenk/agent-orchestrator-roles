@@ -46,6 +46,8 @@ func TestBuildSystemPrompt_WorkerIncludesRulesAndOrchestrator(t *testing.T) {
 		"## AO Worker Role",
 		"## Orchestrator Coordination",
 		`ao send --session mer-orchestrator --message "<your message>"`,
+		"When the task finishes, send the concise completion report",
+		"do not create or commit a report file just to communicate it",
 		"## Pull Requests for This Session",
 		"## Docker Containers Started By This Session",
 		"## Project Rules",
@@ -85,6 +87,10 @@ func TestBuildSystemPrompt_OrchestratorRequiresConfirmationAndNativeSubagents(t 
 		"spawn a worker with `--role`",
 		"native subagent or task-delegation support",
 		"keep your context window clean",
+		"Spawn prompts are limited to 4096 bytes",
+		"Never ask a reviewer or verifier to commit a report",
+		"ao session output <worker-session-id>",
+		"becomes idle or exits without an AO completion message",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orchestrator prompt missing %q:\n%s", want, got)

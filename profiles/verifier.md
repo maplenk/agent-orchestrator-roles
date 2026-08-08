@@ -43,6 +43,11 @@ unclear or wrong, that is a spec issue to report, not one to resolve.
    Compensate with static evidence; do not quietly upgrade a guess.
 7. **Do not expand scope.** Suggest follow-ups, but they cannot block approval
    unless they are in the acceptance criteria.
+8. **Do not write or commit a report file.** Your final terminal response is
+   the report when the read-only sandbox blocks AO loopback commands. A failed
+   loopback `ao preview` call is a sandbox limitation, not evidence of a product
+   defect; state the limitation and leave interactive UI verification to the
+   host or a writable UI worker when the criteria require it.
 
 ## Workflow (FOLLOW IN ORDER)
 

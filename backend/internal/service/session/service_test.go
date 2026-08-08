@@ -1074,6 +1074,22 @@ func TestSessionRenameMissingSessionReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestSessionOutputPreservesManagerResultAndTypedErrors(t *testing.T) {
+	cmd := &fakeCommander{output: "terminal report"}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: newFakeStore()})
+	got, err := svc.SessionOutput(context.Background(), "mer-1", 73)
+	if err != nil || got != "terminal report" || cmd.outputCalls != 1 || cmd.outputLines != 73 {
+		t.Fatalf("output=%q err=%v calls=%d lines=%d", got, err, cmd.outputCalls, cmd.outputLines)
+	}
+
+	cmd.outputErr = sessionmanager.ErrSessionOutputUnavailable
+	_, err = svc.SessionOutput(context.Background(), "mer-1", 73)
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindConflict || apiErr.Code != "SESSION_OUTPUT_UNAVAILABLE" {
+		t.Fatalf("err = %#v, want conflict SESSION_OUTPUT_UNAVAILABLE", err)
+	}
+}
+
 // fakeCommander records Kill/Spawn calls so a test can assert the
 // clean-orchestrator ordering without wiring a real session engine.
 type fakeCommander struct {
@@ -1112,6 +1128,10 @@ type fakeCommander struct {
 	ensureClean             bool
 	ensureCfg               ports.SpawnConfig
 	ensureReuse             domain.SessionRecord
+	output                  string
+	outputErr               error
+	outputCalls             int
+	outputLines             int
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -1165,6 +1185,11 @@ func (f *fakeCommander) Send(_ context.Context, id domain.SessionID, message str
 	f.sent = append(f.sent, id)
 	f.sentMessages = append(f.sentMessages, message)
 	return nil
+}
+func (f *fakeCommander) SessionOutput(_ context.Context, _ domain.SessionID, lines int) (string, error) {
+	f.outputCalls++
+	f.outputLines = lines
+	return f.output, f.outputErr
 }
 func (f *fakeCommander) Cleanup(_ context.Context, project domain.ProjectID) (sessionmanager.CleanupResult, error) {
 	f.cleanupProjects = append(f.cleanupProjects, project)

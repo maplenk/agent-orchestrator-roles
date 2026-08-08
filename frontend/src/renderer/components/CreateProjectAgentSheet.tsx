@@ -112,6 +112,7 @@ export function CreateProjectAgentSheet({
 		mutationFn: refreshAgents,
 		onSuccess: (next) => queryClient.setQueryData(agentsQueryKey, next),
 	});
+	const refreshAgentsOnOpen = refreshAgentsMutation.mutate;
 	const agents = agentsQuery.data;
 	const installedAgents = agents?.installed ?? [];
 	const agentOptions = agents?.authorized ?? [];
@@ -136,6 +137,10 @@ export function CreateProjectAgentSheet({
 	const intakeIncomplete = intakeNeedsRule(intake);
 	const canSubmit = workerAgent !== "" && orchestratorAgent !== "" && !intakeIncomplete && !isBusy && !isLoadingAgents;
 	const sheetError = error ? projectSheetError(error) : null;
+
+	useEffect(() => {
+		if (open) refreshAgentsOnOpen();
+	}, [open, refreshAgentsOnOpen]);
 
 	useEffect(() => {
 		if (!open) return;

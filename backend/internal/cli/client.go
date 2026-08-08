@@ -59,6 +59,10 @@ func (c *commandContext) getJSON(ctx context.Context, path string, out any) erro
 	return c.doJSON(ctx, http.MethodGet, path, nil, out)
 }
 
+func (c *commandContext) getJSONWithHeaders(ctx context.Context, path string, out any, headers map[string]string) error {
+	return c.doJSONPathWithHeaders(ctx, http.MethodGet, "/api/v1/"+path, nil, out, headers)
+}
+
 // postJSON sends body as JSON to POST /api/v1/<path> on the running daemon and
 // decodes a 2xx response into out (out may be nil). A non-2xx response becomes
 // an error built from the API error envelope. A missing run-file or a stale one

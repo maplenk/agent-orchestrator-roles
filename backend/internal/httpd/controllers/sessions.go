@@ -118,6 +118,10 @@ type switchPreviewSessionService interface {
 	SwitchPreview(ctx context.Context, rec domain.SessionRecord) (sessionsvc.SwitchPreview, error)
 }
 
+type outputSessionService interface {
+	SessionOutput(context.Context, domain.SessionID, int) (string, error)
+}
+
 // ActivityRecorder applies an agent activity-state signal to a session. It is
 // satisfied directly by *lifecycle.Manager: an activity signal is a pure
 // lifecycle reduction (no runtime/workspace teardown), so it bypasses
@@ -190,6 +194,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions", c.spawn)
 	r.Post("/sessions/cleanup", c.cleanup)
 	r.Get("/sessions/{sessionId}", c.get)
+	r.Get("/sessions/{sessionId}/output", c.output)
 	r.Get("/sessions/{sessionId}/preview", c.preview)
 	r.Post("/sessions/{sessionId}/preview", c.setPreview)
 	r.Delete("/sessions/{sessionId}/preview", c.clearPreview)
@@ -225,6 +230,34 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Get("/orchestrators", c.listOrchestrators)
 	r.Post("/orchestrators", c.spawnOrchestrator)
 	r.Get("/orchestrators/{id}", c.getOrchestrator)
+}
+
+func (c *SessionsController) output(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(outputSessionService)
+	if !ok {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/output")
+		return
+	}
+	if !c.authorizeCallerSessionRead(w, r) {
+		return
+	}
+	lines := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("lines")); raw != "" {
+		value, err := strconv.Atoi(raw)
+		if err != nil || value < 1 || value > 1000 {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_OUTPUT_LINES",
+				"lines must be between 1 and 1000", nil)
+			return
+		}
+		lines = value
+	}
+	id := sessionID(r)
+	out, err := svc.SessionOutput(r.Context(), id, lines)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SessionOutputResponse{SessionID: id, Output: out, Lines: lines})
 }
 
 // RegisterStreams mounts long-lived session streams outside the REST timeout
@@ -1518,6 +1551,56 @@ func (c *SessionsController) authorizeCallerSwitch(w http.ResponseWriter, r *htt
 	if sess.ProjectID != target.ProjectID {
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SWITCH_PROJECT_MISMATCH",
 			"Session callers may only switch workers in their own project", nil)
+		return false
+	}
+	return true
+}
+
+// authorizeCallerSessionRead allows the operator/LAN and a durable canSpawn
+// session principal to read terminal output only inside its own project.
+func (c *SessionsController) authorizeCallerSessionRead(w http.ResponseWriter, r *http.Request) bool {
+	if authctx.IsLANAuthenticated(r.Context()) {
+		return true
+	}
+	opTok := strings.TrimSpace(r.Header.Get(operatorSpawnHeader))
+	if opTok != "" {
+		if c.OperatorAuth != nil && c.OperatorAuth.Valid(opTok) {
+			return true
+		}
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "OPERATOR_SESSION_READ_INVALID",
+			"Operator credential is missing or invalid", nil)
+		return false
+	}
+	caller := strings.TrimSpace(r.Header.Get(callerSessionHeader))
+	if caller == "" {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_AUTH_REQUIRED",
+			"Session output requires operator credential, LAN auth, or session spawn capability headers", nil)
+		return false
+	}
+	callingSession, err := c.Svc.Get(r.Context(), domain.SessionID(caller))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if callingSession.IsTerminated || !spawncred.ValidToken(strings.TrimSpace(r.Header.Get(spawnCapabilityHeader)), callingSession.Metadata.SpawnCapabilityHash) {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_CAPABILITY_INVALID",
+			"A live calling session with its valid spawn capability is required", nil)
+		return false
+	}
+	role := callingSession.Metadata.Role
+	if strings.TrimSpace(role.RoleID) == "" || !role.ResolvedPermissions.CanSpawn {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_FORBIDDEN",
+			"Calling session must have a durable role pin with canSpawn=true", nil)
+		return false
+	}
+	target, err := c.Svc.Get(r.Context(), sessionID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return false
+	}
+	if callingSession.ProjectID != target.ProjectID {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_PROJECT_MISMATCH",
+			"Session callers may read output only for sessions in their own project", nil)
 		return false
 	}
 	return true

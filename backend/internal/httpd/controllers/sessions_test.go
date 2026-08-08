@@ -51,6 +51,10 @@ type fakeSessionService struct {
 	switchPreviewErr error
 	switchPreviewIDs []domain.SessionID
 	switchErr        error
+	output           string
+	outputErr        error
+	outputCalls      int
+	outputLines      int
 }
 
 type fakeManagedPreviewServer struct {
@@ -167,6 +171,12 @@ func (f *fakeSessionService) Get(_ context.Context, id domain.SessionID) (domain
 		return domain.Session{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	}
 	return s, nil
+}
+
+func (f *fakeSessionService) SessionOutput(_ context.Context, _ domain.SessionID, lines int) (string, error) {
+	f.outputCalls++
+	f.outputLines = lines
+	return f.output, f.outputErr
 }
 
 func (f *fakeSessionService) SetPreview(_ context.Context, id domain.SessionID, previewURL string) (domain.Session, error) {

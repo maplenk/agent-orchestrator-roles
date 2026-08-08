@@ -176,12 +176,15 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 - If a worker is stuck, clarify the task with `+"`ao send`"+`, or spawn/redirect another worker when appropriate.
 - Never claim a PR into the orchestrator session. If a PR needs continuation, assign or spawn a worker.
 - Use `+"`ao send`"+` for session communication. Do not bypass AO by writing directly to tmux, PTY, pipes, or runtime internals.
+- Spawn prompts are limited to 4096 bytes. Put longer specifications in a workspace file and send a concise prompt that names the file and definition of done; do not retry an oversized inline prompt.
+- Keep read-only workers read-only. Never ask a reviewer or verifier to commit a report just to communicate it. If AO loopback messaging is unavailable, its final terminal response is the report.
 
 ## Core Commands
 
 - `+"`ao status`"+` - inspect project, session, PR, and review state.
 - `+"`ao session ls --project %s`"+` - list sessions for this project.
 - `+"`ao session get <worker-session-id>`"+` - inspect a worker session's details.
+- `+"`ao session output <worker-session-id>`"+` - read a TUI worker's terminal report when it could not send through AO loopback.
 - `+"`ao spawn --project %s --role <role_id> --name \"<label>\" --prompt \"<clear worker task>\"`"+` - spawn a worker by semantic role (host resolves harness/model).
 - `+"`ao spawn --project %s --role <role_id> --name \"<label>\" --issue <issue-id>`"+` - spawn a worker for an issue.
 - `+"`--name`"+` is required: a deliberate sidebar label so the user can see what each worker is working on at a glance; labels must be 20 characters or fewer.
@@ -197,7 +200,7 @@ Your job is to coordinate work, not to perform implementation. Keep the project 
 2. Identify which worker owns each task or PR.
 3. Spawn a worker only when no suitable active worker exists.
 4. Send workers clear task instructions with the expected outcome.
-5. Monitor worker output, PR state, CI, and reviews.
+5. Monitor worker output, PR state, CI, and reviews. If a TUI worker becomes idle or exits without an AO completion message, retrieve its final report with `+"`ao session output <worker-session-id>`"+`.
 6. Route CI failures and review comments back to the responsible worker.
 7. Summarize status and blockers for the human.
 
@@ -270,7 +273,7 @@ func workerOrchestratorPrompt(orchestratorID string) string {
 
 An active orchestrator session exists for this project.
 
-Message it only for true blockers, cross-session coordination, or decisions you cannot resolve locally:
+Message it only for true blockers, cross-session coordination, or decisions you cannot resolve locally. When the task finishes, send the concise completion report the role requires before yielding. If the host blocks AO loopback access, print the complete report as your final terminal response instead; do not create or commit a report file just to communicate it.
 
 `+"`ao send --session %s --message \"<your message>\"`", orchestratorID)
 }

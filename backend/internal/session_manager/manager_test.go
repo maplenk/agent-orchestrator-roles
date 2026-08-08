@@ -543,6 +543,8 @@ type fakeRuntime struct {
 	outputs            []string
 	outputCalls        int
 	outputErr          error
+	lastOutputHandle   ports.RuntimeHandle
+	lastOutputLines    int
 	// aliveByHandle maps a RuntimeHandle.ID to its liveness; missing = false.
 	aliveByHandle map[string]bool
 	aliveErr      error
@@ -622,8 +624,10 @@ func (r *fakeRuntime) IsAlive(_ context.Context, handle ports.RuntimeHandle) (bo
 	}
 	return r.aliveByHandle[handle.ID], nil
 }
-func (r *fakeRuntime) GetOutput(_ context.Context, _ ports.RuntimeHandle, _ int) (string, error) {
+func (r *fakeRuntime) GetOutput(_ context.Context, handle ports.RuntimeHandle, lines int) (string, error) {
 	r.outputCalls++
+	r.lastOutputHandle = handle
+	r.lastOutputLines = lines
 	if r.outputErr != nil {
 		return "", r.outputErr
 	}

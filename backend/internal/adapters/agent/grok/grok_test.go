@@ -137,7 +137,7 @@ func TestGetLaunchCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	wantPrefix := []string{"grok", "--no-auto-update", "--permission-mode", "bypassPermissions", "--rules", "ao standing instructions"}
+	wantPrefix := []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "bypassPermissions", "--rules", "ao standing instructions"}
 	if !reflect.DeepEqual(cmd, wantPrefix) {
 		t.Fatalf("cmd = %#v, want prefix %#v", cmd, wantPrefix)
 	}
@@ -153,7 +153,7 @@ func TestGetLaunchCommandForwardsModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"grok", "--no-auto-update", "--model", "grok-code-fast"}; !reflect.DeepEqual(cmd, want) {
+	if want := []string{"grok", "--no-auto-update", "--trust", "--model", "grok-code-fast"}; !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
 }
@@ -166,7 +166,7 @@ func TestGetLaunchCommandDefaultPerms(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"grok", "--no-auto-update"}
+	want := []string{"grok", "--no-auto-update", "--trust"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -185,7 +185,7 @@ func TestGetLaunchCommandAcceptEdits(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"grok", "--no-auto-update", "--permission-mode", "acceptEdits"}
+	want := []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "acceptEdits"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -201,7 +201,7 @@ func TestGetLaunchCommandAuto(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"grok", "--no-auto-update", "--permission-mode", "auto"}
+	want := []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "auto"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -216,7 +216,7 @@ func TestGetLaunchCommandDoesNotPassLeadingDashPromptAsSubcommand(t *testing.T) 
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"grok", "--no-auto-update"}
+	want := []string{"grok", "--no-auto-update", "--trust"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -246,7 +246,7 @@ func TestGetLaunchCommandSystemPromptFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	want := []string{"grok", "--no-auto-update", "--rules", "file standing instructions"}
+	want := []string{"grok", "--no-auto-update", "--trust", "--rules", "file standing instructions"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -284,7 +284,7 @@ func TestGetRestoreCommand(t *testing.T) {
 	if !ok {
 		t.Fatal("ok=false, want true")
 	}
-	want := []string{"grok", "--no-auto-update", "--permission-mode", "bypassPermissions", "--rules", "ao restore instructions", "-r", "sess-abc123"}
+	want := []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "bypassPermissions", "--rules", "ao restore instructions", "-r", "sess-abc123"}
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("cmd = %#v, want %#v", cmd, want)
 	}
@@ -299,9 +299,9 @@ func TestGetRestoreCommandMapsPermissionModes(t *testing.T) {
 		permission ports.PermissionMode
 		want       []string
 	}{
-		{"accept edits", ports.PermissionModeAcceptEdits, []string{"grok", "--no-auto-update", "--permission-mode", "acceptEdits", "-r", "sess-abc123"}},
-		{"auto", ports.PermissionModeAuto, []string{"grok", "--no-auto-update", "--permission-mode", "auto", "-r", "sess-abc123"}},
-		{"bypass permissions", ports.PermissionModeBypassPermissions, []string{"grok", "--no-auto-update", "--permission-mode", "bypassPermissions", "-r", "sess-abc123"}},
+		{"accept edits", ports.PermissionModeAcceptEdits, []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "acceptEdits", "-r", "sess-abc123"}},
+		{"auto", ports.PermissionModeAuto, []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "auto", "-r", "sess-abc123"}},
+		{"bypass permissions", ports.PermissionModeBypassPermissions, []string{"grok", "--no-auto-update", "--trust", "--permission-mode", "bypassPermissions", "-r", "sess-abc123"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

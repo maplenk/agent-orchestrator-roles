@@ -84,6 +84,13 @@ var (
 	// restart; worker Continue is the explicit operator-owned failover remedy,
 	// while an orchestrator must first be resumed deliberately.
 	ErrSwitchPaused = errors.New("session: switch is not allowed while paused")
+	// ErrSessionOutputUnavailable means a caller asked for terminal scrollback
+	// from a session that has no terminal controller (currently Chat mode).
+	ErrSessionOutputUnavailable = errors.New("session: terminal output is unavailable for this interface")
+	// ErrSessionOutputLinesInvalid bounds scrollback reads exposed through the
+	// daemon API. Runtime adapters validate too, but the manager owns the public
+	// session operation and therefore its stable error classification.
+	ErrSessionOutputLinesInvalid = errors.New("session: output lines must be between 1 and 1000")
 	// ErrSwitchNotSupported means source/target harness lacks switch_supported.
 	ErrSwitchNotSupported = errors.New("session: harness does not support switch")
 	// ErrSwitchPostStop means the source runtime was already stopped; the
@@ -2389,6 +2396,35 @@ func (m *Manager) getRecord(ctx context.Context, id domain.SessionID) (domain.Se
 		return domain.SessionRecord{}, fmt.Errorf("get %s: %w", id, ErrNotFound)
 	}
 	return rec, nil
+}
+
+// SessionOutput returns the tail of a live TUI session's terminal. This is the
+// read-only-safe result channel for workers whose sandbox cannot call AO's
+// loopback API: the orchestrator can read their final terminal report without
+// weakening workspace isolation or writing a report file into the repository.
+func (m *Manager) SessionOutput(ctx context.Context, id domain.SessionID, lines int) (string, error) {
+	if lines < 1 || lines > 1000 {
+		return "", ErrSessionOutputLinesInvalid
+	}
+	rec, err := m.getRecord(ctx, id)
+	if err != nil {
+		return "", err
+	}
+	if rec.IsTerminated {
+		return "", ErrTerminated
+	}
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return "", ErrSessionOutputUnavailable
+	}
+	handle := runtimeHandle(rec.Metadata)
+	if strings.TrimSpace(handle.ID) == "" {
+		return "", ErrIncompleteHandle
+	}
+	out, err := m.runtime.GetOutput(ctx, handle, lines)
+	if err != nil {
+		return "", fmt.Errorf("read terminal output for %s: %w", id, err)
+	}
+	return out, nil
 }
 
 // SaveAndTeardownAll captures uncommitted work and tears down every live

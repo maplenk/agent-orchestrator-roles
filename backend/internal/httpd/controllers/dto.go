@@ -117,6 +117,11 @@ type ListSessionsQuery struct {
 	Fresh            *bool  `query:"fresh,omitempty" description:"When true, return only fresh non-terminated sessions."`
 }
 
+// SessionOutputQuery is the query string accepted by GET /api/v1/sessions/{sessionId}/output.
+type SessionOutputQuery struct {
+	Lines int `query:"lines,omitempty" description:"Number of trailing terminal lines to return (default 200, maximum 1000)."`
+}
+
 // CleanupSessionsQuery is the query string accepted by POST /api/v1/sessions/cleanup.
 type CleanupSessionsQuery struct {
 	Project string `query:"project,omitempty" description:"Project id filter. When omitted, clean terminated sessions across all projects."`
@@ -327,6 +332,13 @@ type SpawnAttachmentInput struct {
 // SessionResponse is the { session } body shared by session reads and updates.
 type SessionResponse struct {
 	Session SessionView `json:"session"`
+}
+
+// SessionOutputResponse is a bounded terminal scrollback read.
+type SessionOutputResponse struct {
+	SessionID domain.SessionID `json:"sessionId"`
+	Output    string           `json:"output"`
+	Lines     int              `json:"lines"`
 }
 
 // SpawnSessionResponse includes ephemeral measurements of the final assembled
