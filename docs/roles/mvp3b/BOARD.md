@@ -1,11 +1,129 @@
 # Phase 3B manual-failover MVP — orchestrator board
 
 **Contract:** [`../PHASE3B_MVP_CONTRACT.md`](../PHASE3B_MVP_CONTRACT.md) — frozen, nobody edits.
-**Branch:** `roles/multi-sub-v1`
+**Final cross-phase MVP:** [`../MVP_FINAL_SPEC.md`](../MVP_FINAL_SPEC.md) —
+current boundary and acceptance authority.
+**Evidence integration branch:** `codex/mvp-integration`
+**Target roles trunk:** `roles/multi-sub-v1` (merge not claimed here)
+**Accepted implementation/runner:** `166e9e63`
+**Promoted evidence commit:** `322f9c18`
+**Post-evidence review integration:** `72f274a7`
+**Default-data-dir runtime replay:** PASS on exact `3c3aef51`
 **Frozen code:** `backend/internal/domain/failover_contract.go`,
 `backend/internal/session_manager/failover_contract.go` — frozen at `daee190a`
 on `roles/multi-sub-v1` (`go build ./...` green there), amended in place after
 the durability review and green again.
+
+## Final MVP extension — current status (2026-08-08)
+
+The original Phase 3B Wave 1/2 record below is retained. The final MVP added
+the probe close-out and the previously deferred in-place Codex↔Claude
+orchestrator switch. The accepted implementation and live-acceptance runner are
+frozen at `166e9e63` for the promoted evidence set. Post-evidence review fixes
+are integrated separately at `72f274a7`. The full promoted live matrix passed
+on the exact immutable runner SHA; see
+[`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
+
+| Wave | Commit | Result |
+|---|---|---|
+| Probe base (historical) | `be4321d1` | Namespaced tmux `no server running` was treated as authoritative; this design was superseded after review because it did not cover the normal/default install path |
+| Probe consumer close-out | `66d4ceb3` | Restart and live reconciliation no longer coerce unavailable probes into death |
+| Strict-policy amendment | `4ab636fe` | Strict routing/delegation no longer implies read-only; explicit `workspaceWrites:false` remains capability gated |
+| Orchestrator switch core | `e3170a04` | Project-gated in-place Codex↔Claude switch, exact authorization, identity preservation, same-generation recovery |
+| Acceptance harness | `f451308c` | Isolated deterministic worker/orchestrator scenarios and real terminal-input fence probe |
+| Product surface | `fa4d4f90` | Curated switch read model plus existing API/CLI dispatch and desktop switch/fresh controls in eight locales |
+| Reap/restore safety | `8e7c4899` | Unresolved reap is boot-unsafe and blocks restore rather than risking a duplicate runtime |
+| Liveness contract | `85c5f1a6` | Adapter/port docs state authoritative absence versus uncertainty explicitly |
+| Permission presence | `b303bed9` | Both role permission booleans are required at domain, HTTP, and CLI JSON ingress |
+| Review close-out | `051db38b` | Paused-switch refusal, post-ack promotion typing, response hydration, exact target presentation, and model-wire ambiguity fixed |
+| Final lint close-out | `06aab758` | Service and acceptance harness satisfy the final lint gate without changing product scope |
+| Documentation close-out | `4c5e284a` | Canonical MVP spec and active status/board links integrated |
+| Acceptance reproducibility | `90a4ebfa` | Snapshots pin the immutable role-profile checkout and normalize empty SQLite result sets |
+| Runtime-dead acceptance | `35e8a97a` | Scoped target termination validates the isolated root, data path, socket, and handle before the paused-dead probe |
+| Duplicate Continue close-out | `b23e4970`, `ff5c3b1c` | A duplicate caller preserves the in-flight attempt and receives a conflict instead of stranding or replaying it |
+| Codex launch close-out | `f0585f70`, `a4215229` | Switch prompts are file-backed rather than tmux arguments; post-stop launch-size failure is a durable conflict |
+| Final acceptance invariants | `166e9e63` | Correct failed-rung exhaustion, sanitized worker-address proof, and exact injected-failure recovery phases |
+| Promoted live evidence | `322f9c18` | Records the complete immutable-SHA live matrix; does not claim the separate repository gate is green |
+| Typed server absence | `6a07d5d6` | Literal tmux server absence is a typed fact on default and namespaced sockets; ambiguous reachability remains uncertain |
+| Consumer-specific recovery | `24906d35` | Reviewed boot/restart/saga consumers may use typed absence; the steady board reaper keeps it inconclusive |
+| Chat preview correction | `31b6d7ef` | Chat orchestrators advertise no switch target and render no Switch/Fresh controls; direct mutation still returns the typed 409 |
+| Default-data-dir runtime replay | `3c3aef51` | Actual default tmux socket: Restart, boot live reconcile, and boot reap/restore each converge to one active row/runtime with no boot error |
+| Persisted-role read safety | `663f9339` | Malformed durable bindings fail the project read and retain their original bytes, preventing unrelated RMW/import paths from sanitizing or erasing config; valid bytes/semantics/SHA remain stable and HTTP/CLI authoring remains strict |
+| Chat mutation preflight | `72f274a7` | Service rejects Chat switch/fresh after terminated/paused precedence and before same-harness dispatch, role-map authorization, or manager entry |
+| Combined review | `72f274a7` | Independent review approved the integrated runtime, storage, preview, and mutation close-out with no remaining P1/P2 |
+
+### Decisions pinned by review
+
+- Strict mode enforces durable role identity, host-owned routing and spawn
+  authority. It does not implicitly enforce filesystem read-only.
+- Claude Code remains `read_only_enforced=false`; an explicit read-only Claude
+  role is still rejected.
+- Initial switch and recovery authorization each use the authoritative
+  session/project snapshot read at their effectful entry under project
+  ownership. Recovery re-authorizes the durable exact target and never
+  reinterprets its model.
+- A provider-default target remains selectable when unique. If the same target
+  harness also has fixed-model entries, the current empty-string wire cannot
+  distinguish explicit default from omission, so only the exact fixed-model
+  choices are advertised. Same-harness operation remains Fresh Conversation.
+- `limit_detection_supported=false` everywhere; no capability promotion is
+  part of this MVP.
+- A persisted role binding that violates the strict contract is not silently
+  sanitized. Storage fails the read and preserves the original bytes; HTTP and
+  CLI ingress also require both permission booleans and reject unknown binding
+  fields.
+- Chat mode cannot enter the orchestrator switch/fresh saga. Its preview is
+  fail-closed and its desktop controls are hidden; the direct API's typed 409
+  remains the mutation boundary.
+
+### Promoted live gate and completed post-review replay
+
+Complete on `166e9e63`: harness self-test, worker records 1-12, strict
+Codex→Claude→Codex, API and live-mux pending fences, same-generation
+injected-failure crash recovery, unauthorized no-effect, and same-harness Fresh
+without stacking all passed sequentially from fresh isolated roots. Twenty
+sanitized snapshots independently report the exact frozen SHA; record 12's
+capability matrix passed as a separate Go probe.
+
+The promoted evidence is recorded in
+[`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md). Earlier exploratory
+records remain historical and are not represented as combined-SHA evidence.
+
+The later Grok-review fixes are not retroactively part of that evidence. The
+runtime portion's targeted replay passed on exact `3c3aef51` with an isolated `HOME`,
+`AO_DATA_DIR`/`AO_RUN_FILE` unset, and the actual default tmux socket. The run
+proved fresh absent-server boot, one replacement after sole-server loss,
+surviving-runtime adoption without duplication, active-row save/restore, and
+terminated-row reap plus `RestoreAll`; every scenario ended with one active row
+and one runtime, with no boot/reconcile errors. Focused tmux/session-manager/
+steady-reaper tests also passed under `-race`. The later `663f9339` and
+`72f274a7` commits are storage/service-only and do not alter the exercised
+runtime paths.
+
+### Repository-wide final gate
+
+**Open.** Race validation found **zero data races**, and the SQLite race package
+passed in **622.846s**. The Chat rollback failure was a test-only projector race:
+`completeTurn` emitted completion asynchronously and returned before that exact
+AO/provider turn was durably settled. `b21490a1` (integrated as `f8883529`)
+waits for the fresh AO turn ID, provider turn ID, completed state, and non-null
+completion time before rollback proceeds.
+
+The ordinary full backend run passes all other packages, including the MVP
+packages, and fails only the known untouched fake/kilocode/opencode wall-clock
+trio. On exact head `f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2,
+and typecheck pass. Before the test fix, full Vitest was 2039/2040. The sole
+`SessionFilesView` test fails 20/20 in isolation and 1/28 in its full file,
+remaining at `Loading files...`; it reproduces on pre-MVP baseline `be4321d1`
+with the relevant files unchanged, so it is a deterministic pre-existing gate
+failure rather than an MVP regression. `56638949` (integrated as `6473b134`)
+closes it: the exact test passes 20/20, its full file passes 28/28, and the
+never-resolving mutation still fails after 10.635s. API drift passes two
+byte-identical regenerations with a clean diff. The authoritative unsandboxed
+full Vitest run on exact `6473b134` passes **151/151 files and 2040/2040 tests**
+in 312.49s. Do not infer a fully green repository gate from the green race
+package, downgrade an unexplained result to a flake, or rerun the promoted live
+matrix merely because the repository gate is still open.
 
 ## Why every agent keeps a todo file
 
@@ -302,11 +420,20 @@ conclusion that they were load artefacts rather than defects.
 > the local shell wrapper; its two underlying commands (`go test ./...` and
 > `golangci-lint run`) were run directly and both pass. Not a code failure.
 
-## Wave 3 — live dogfood
+## Wave 3 — promoted live dogfood and post-review replay complete
 
-The twelve acceptance records in contract §12, none of which are done yet. They
-need a running daemon and a real paused role-pinned worker; items 1–2 are also
-the first time the desktop Continue control renders against a real `failover`
-block rather than a shaped read model.
+The exploratory records in `LIVE_DOGFOOD.md` remain historical. The complete
+worker 1–12 and orchestrator matrix was rerun from scratch on immutable SHA
+`166e9e63` and promoted by evidence commit `322f9c18`; see
+`FINAL_LIVE_ACCEPTANCE.md`. This closes live acceptance, not the separate
+repository-wide final gate.
 
-`limit_detection_supported` stays `false`; nothing is promoted by this MVP.
+Grok's later probe review produced `6a07d5d6` and `24906d35`: literal tmux
+server absence is typed on both default and namespaced sockets, and only
+reviewed boot/restart/saga consumers use it while the steady reaper remains
+inconclusive. `31b6d7ef` closes the Chat-preview contradiction. The targeted
+default-data-dir replay passed on exact `3c3aef51`; the earlier promoted matrix
+remains a separate dated evidence set and is not rewritten.
+
+`limit_detection_supported` stays `false`; no capability is promoted by this
+MVP.

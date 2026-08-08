@@ -70,15 +70,16 @@ func TestExitDetectionUsesAOProcessSupervisor(t *testing.T) {
 	}
 }
 
-func TestGetLaunchCommandBuildsCrossPlatformArgv(t *testing.T) {
+func TestGetLaunchCommandPrefersSystemPromptFileWhenBothAreSupplied(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "codex"}
 	workspace := canonicalTempDir(t)
+	systemPromptFile := filepath.Join("tmp", "prompt with spaces.md")
 
 	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
 		Permissions:      ports.PermissionModeBypassPermissions,
 		Prompt:           "-fix this",
-		SystemPromptFile: filepath.Join("tmp", "prompt with spaces.md"),
-		SystemPrompt:     "inline wins",
+		SystemPromptFile: systemPromptFile,
+		SystemPrompt:     "large inline prompt must stay out of argv",
 		WorkspacePath:    workspace,
 	})
 	if err != nil {
@@ -98,11 +99,27 @@ func TestGetLaunchCommandBuildsCrossPlatformArgv(t *testing.T) {
 	}
 	want = append(want,
 		"-c", `projects={`+codexTOMLConfigString(workspace)+`={trust_level="trusted"}}`,
-		"-c", "developer_instructions="+codexTOMLConfigString("inline wins"),
+		"-c", "model_instructions_file="+systemPromptFile,
 		"--", "-fix this",
 	)
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("unexpected command\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetLaunchCommandUsesInlineSystemPromptAsFallback(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "codex"}
+
+	cmd, err := plugin.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SystemPrompt: "inline fallback",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSubsequence(cmd, []string{
+		"-c", "developer_instructions=" + codexTOMLConfigString("inline fallback"),
+	}) {
+		t.Fatalf("command %#v does not contain the inline system-prompt fallback", cmd)
 	}
 }
 
@@ -547,11 +564,12 @@ func TestUninstallHooksRemovesLegacyCodexHooks(t *testing.T) {
 func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	plugin := &Plugin{resolvedBinary: "codex"}
 	workspace := canonicalTempDir(t)
+	systemPromptFile := filepath.Join("tmp", "restore-system.md")
 
 	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
 		Permissions:      ports.PermissionModeAuto,
-		SystemPrompt:     "restore inline wins",
-		SystemPromptFile: filepath.Join("tmp", "restore-system.md"),
+		SystemPrompt:     "large restore prompt must stay out of argv",
+		SystemPromptFile: systemPromptFile,
 		Session: ports.SessionRef{
 			Metadata:      map[string]string{ports.MetadataKeyAgentSessionID: "thread-123"},
 			WorkspacePath: workspace,
@@ -578,11 +596,33 @@ func TestGetRestoreCommandReadsAgentSessionID(t *testing.T) {
 	}
 	want = append(want,
 		"-c", `projects={`+codexTOMLConfigString(workspace)+`={trust_level="trusted"}}`,
-		"-c", "developer_instructions="+codexTOMLConfigString("restore inline wins"),
+		"-c", "model_instructions_file="+systemPromptFile,
 		"thread-123",
 	)
 	if !reflect.DeepEqual(cmd, want) {
 		t.Fatalf("restore cmd\nwant: %#v\n got: %#v", want, cmd)
+	}
+}
+
+func TestGetRestoreCommandUsesInlineSystemPromptAsFallback(t *testing.T) {
+	plugin := &Plugin{resolvedBinary: "codex"}
+
+	cmd, ok, err := plugin.GetRestoreCommand(context.Background(), ports.RestoreConfig{
+		SystemPrompt: "restore inline fallback",
+		Session: ports.SessionRef{
+			Metadata: map[string]string{ports.MetadataKeyAgentSessionID: "thread-123"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if !containsSubsequence(cmd, []string{
+		"-c", "developer_instructions=" + codexTOMLConfigString("restore inline fallback"),
+	}) {
+		t.Fatalf("restore command %#v does not contain the inline system-prompt fallback", cmd)
 	}
 }
 

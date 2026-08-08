@@ -49,14 +49,19 @@ the source of truth; `../CAPABILITY_MATRIX.md` mirrors it):
 | pi | yes | no | no |
 | everything else | yes | no | no |
 
-- **`orchestrator` and `reviewer` are Codex.** Both are `workspaceWrites: false`,
-  and Codex is the only harness with `read_only_enforced` (via `--sandbox
-  read-only`). Binding Claude or Pi to either role is rejected at config-save.
+- **`orchestrator` is Claude Code with `workspaceWrites: true`.** Strict mode
+  still pins its role, requires `canSpawn`, rejects caller routing overrides,
+  and injects the coordination-only delegation contract. The instruction not
+  to implement is model-enforced, not a filesystem sandbox claim. Its Codex
+  rung enables the in-place strict orchestrator switch in either direction.
+- **`reviewer` and `verifier` remain Codex read-only roles.** Their explicit
+  `workspaceWrites: false` requires `read_only_enforced`; binding Claude or Pi
+  to either is rejected at config-save.
 - **`ui` is Pi with no failover ladder.** Pi is spawn-capable but not
   switch-capable, so it is fine as a primary — but the primary of a role with a
   ladder is the switch *source*, so giving `ui` a ladder would be rejected. Add
   one only after Pi is switch-promoted.
-- **Only `implementor` has a ladder, and its rung is Codex.** Every rung *and*
+- **`orchestrator` and `implementor` have Codex rungs.** Every rung *and*
   the owning primary must advertise `switch_supported`; today that is
   `claude-code` and `codex` only. `pi` and `grok` rungs are rejected at
   config-save until those cells are promoted.

@@ -1,21 +1,43 @@
 # Master plan: Multi-sub harness orchestration on AO
 
 **Status:** canonical Target B design; implementation is active and tracked in
-[`REMAINING_PLAN.md`](REMAINING_PLAN.md). Current integration acceptance is
-tracked in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
+[`REMAINING_PLAN.md`](REMAINING_PLAN.md). The current MVP boundary and
+integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
+If this long-range design conflicts with the final MVP boundary or current
+execution state, `MVP_FINAL_SPEC.md` and then `REMAINING_PLAN.md` control.
 **Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
 **Not base:** Intent asar; harness-orchestration as daily UI
 **Sources:** Intent RE, AO code/PRs, harness-orchestration PLAN, deep-research-report, Codex plan reviews
 
-**Execution checkpoint (2026-08-07):** Phase 1 foundation and Phase 2A are
-accepted. Phase 2B-0/1/2 landed; 2B-3 is blocked on Claude read-only
-enforcement. Phase 3A's durable pause, operator surface, desktop pause/role
+**Execution checkpoint (2026-08-08):** Phase 1 foundation and Phase 2A are
+accepted. Phase 2B-0/1/2 landed and the final-MVP 2B-3 in-place Codex↔Claude
+orchestrator switch is implemented under the amended strict policy. Phase 3A's durable pause, operator surface, desktop pause/role
 composer and detector boundary landed, but no vendor detector is promoted.
-Sync 2 is accepted on `roles/upstream-sync-2` @ `dd06d31a`: all eight steps are
-done, every required CI job is green, and the two live Step 5 dogfood records
+Sync 2 is closed and merged; its accepted evidence head was
+`roles/upstream-sync-2` @ `dd06d31a`. All eight steps are done, every required
+CI job is green, and the two live Step 5 dogfood records
 (orchestrator fresh conversation, and a genuine post-stop recovery on the
-original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Merging
-it to the roles trunk is the only outstanding action. Phase 3B has not started. The estimates below are original planning estimates, not a claim
+original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Phase
+3B manual worker Continue and the final-MVP 2B-3 core, service/read model, API,
+CLI and desktop surface are complete at immutable code/runner SHA `166e9e63`.
+Independent review is closed and the complete worker/orchestrator live matrix
+is promoted by evidence commit `322f9c18`. The Chat rollback failure was
+classified as test-only asynchronous projection and fixed at integration head
+`f8883529`; SQLite exact checks passed 5/5, its race package passed in 622.846s,
+and race validation found zero data races. The ordinary full backend run fails
+only the known untouched fake/kilocode/opencode wall-clock trio; all other
+packages, including the MVP packages, pass. The repository-wide final gate
+remains non-green while those three failures remain. On exact integration head
+`f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
+before the test fix, full Vitest was 2039/2040. Its sole `SessionFilesView`
+failure is deterministic (0/20 exact-test passes, full file 27/28) and
+reproduces on pre-MVP baseline `be4321d1` with the relevant files unchanged, so
+it is not an MVP regression. Its test fix `56638949`, integrated as `6473b134`,
+passes 20/20 exact and 28/28 full-file runs while retaining the negative
+timeout. API drift passes two identical regenerations with a clean diff. The
+authoritative unsandboxed full Vitest run on exact `6473b134` passes 151/151
+files and 2040/2040 tests in 312.49s.
+The estimates below are original planning estimates, not a claim
 about remaining duration.
 
 ---
@@ -106,7 +128,11 @@ type RoleExecutionPolicy struct {
 
 **Pi:** not eligible for read-only **reviewer** (or any `workspaceWrites: false` role) until Phase 0 marks `read_only_enforced`. Configuration **rejects** rather than silently degrading.
 
-**Orchestrator strict:** `workspaceWrites: false`, `canSpawn: true`; single prompt builder with **one** no-edit rule (remove “confirm then edit”).
+**Orchestrator strict:** `canSpawn: true`; `workspaceWrites` is explicit policy,
+not implied by strictness. The default MVP role is writable so Codex and Claude
+Code can switch in place, while the single no-edit/delegate rule remains
+instruction-enforced. Configuring `workspaceWrites:false` still requires a
+read-only-enforced harness.
 
 **Reviewer:** prefer AO reviewer subsystem; else `workspaceWrites: false` + enforceable harness only.
 
@@ -177,10 +203,10 @@ On switch: write **immutable switch-history record** with prior harness/model + 
   "roles": {
     "orchestrator": {
       "template": "orchestrator",
-      "harness": "codex",
+      "harness": "claude-code",
       "model": null,
-      "permissions": { "workspaceWrites": false, "canSpawn": true },
-      "_comment": "Phase 1: only codex has read_only_enforced. Claude RO deferred until dontAsk/OS sandbox."
+      "permissions": { "workspaceWrites": true, "canSpawn": true },
+      "_comment": "Strict coordination is instruction-enforced. Set workspaceWrites=false only when technical write denial is required."
     },
     "implementor": {
       "template": "implementor",
@@ -207,6 +233,9 @@ On switch: write **immutable switch-history record** with prior harness/model + 
   "failover": {
     "mode": "manual",
     "roles": {
+      "orchestrator": [
+        { "harness": "codex", "model": null }
+      ],
       "implementor": [
         { "harness": "codex", "model": null }
       ]
@@ -352,10 +381,16 @@ Zai and Kimi validated **separately** on Pi.
 10. [x] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
 11. [x] Worker switch saga + fresh-conversation
 12. [x] Lifecycle ledger
-13. [~] Orchestrator switch protocol — in-place fresh and replacement recovery landed; cross-harness is blocked on Claude read-only
+13. [x] Orchestrator switch protocol — in-place fresh, Codex↔Claude switch,
+    gated same-generation recovery, replacement recovery, and final live
+    acceptance are complete
 14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
-15. [ ] Manual continue + opt-in auto-failover
-16. [~] Dogfood against all DoD invariants — Phase 2A/2B/3A evidence exists; Sync 2 is accepted with its required CI green and both live Step 5 records captured. Still partial because invariants 7 and 8 (promoted limit detection, failover runtime) have no dogfood evidence yet
+15. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
+    post-MVP
+16. [~] Dogfood against all DoD invariants — the final MVP worker/orchestrator
+    matrix is promoted at `322f9c18`; vendor limit detection remains outside
+    this MVP and unpromoted. The repository-wide gate is still open on the
+    full-suite distinction named above
 
 ---
 

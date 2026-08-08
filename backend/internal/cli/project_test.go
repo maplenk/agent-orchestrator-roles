@@ -134,6 +134,53 @@ func TestProjectSetConfig_RoleMapJSONPreserved(t *testing.T) {
 	}
 }
 
+func TestProjectSetConfig_RolePermissionBooleansMustBeExplicit(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		harness     string
+		permissions string
+		extra       string
+		wantError   string
+	}{
+		{name: "missing workspaceWrites", harness: "claude-code", permissions: `{"canSpawn":true}`, wantError: "permissions.workspaceWrites: required boolean"},
+		{name: "null workspaceWrites", harness: "claude-code", permissions: `{"workspaceWrites":null,"canSpawn":true}`, wantError: "permissions.workspaceWrites: required boolean"},
+		{name: "missing canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true}`, wantError: "permissions.canSpawn: required boolean"},
+		{name: "null canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":null}`, wantError: "permissions.canSpawn: required boolean"},
+		{name: "unknown binding field", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`, extra: `,"surprise":true`, wantError: "unknown field"},
+		{name: "explicit true", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`},
+		{name: "explicit false", harness: "codex", permissions: `{"workspaceWrites":false,"canSpawn":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := setConfigEnv(t)
+			srv, capture := projectServer(t, http.StatusOK, `{"project":{"id":"demo","path":"/repo/demo"}}`)
+			writeRunFileFor(t, cfg, srv)
+			roleJSON := `{"roleMap":{"role_map_schema_version":1,"strictDelegation":true,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"` + tc.harness + `","permissions":` + tc.permissions + tc.extra + `}}}}`
+
+			_, errOut, err := executeCLI(t, Deps{
+				ProcessAlive: func(int) bool { return true },
+			}, "project", "set-config", "demo", "--config-json", roleJSON)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v\nstderr=%s", err, errOut)
+				}
+				if len(capture.body) == 0 {
+					t.Fatal("valid explicit permissions did not reach the daemon")
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("err = %v, want %q", err, tc.wantError)
+			}
+			if ExitCode(err) != 2 {
+				t.Fatalf("exit code = %d, want usage error 2", ExitCode(err))
+			}
+			if capture.path == "/api/v1/projects/demo/config" {
+				t.Fatalf("invalid config reached project config endpoint: %s", capture.body)
+			}
+		})
+	}
+}
+
 func TestBuildProjectConfigTrackerIntakeFlags(t *testing.T) {
 	got, err := buildProjectConfig(projectSetConfigOptions{
 		trackerIntake:   true,

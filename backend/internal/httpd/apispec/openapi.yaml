@@ -4770,6 +4770,8 @@ components:
           - terminated
           - no_signal
           type: string
+        switch:
+          $ref: '#/components/schemas/SessionSwitchView'
         terminalHandleId:
           type: string
         terminateOnPrMerge:
@@ -4791,6 +4793,7 @@ components:
       - status
       - prs
       - failover
+      - switch
       type: object
     ControllersSpawnAttachmentInput:
       properties:
@@ -6905,6 +6908,74 @@ components:
       required:
       - session
       type: object
+    SessionSwitchPendingView:
+      properties:
+        from:
+          $ref: '#/components/schemas/SessionSwitchTarget'
+        generationId:
+          type: string
+        kind:
+          enum:
+          - switch
+          - fresh_conversation
+          - orchestrator_fresh_conversation
+          type: string
+        to:
+          $ref: '#/components/schemas/SessionSwitchTarget'
+      required:
+      - generationId
+      - kind
+      - from
+      - to
+      type:
+      - object
+      - "null"
+    SessionSwitchTarget:
+      properties:
+        harness:
+          type: string
+        model:
+          type: string
+      required:
+      - harness
+      - model
+      type: object
+    SessionSwitchView:
+      properties:
+        available:
+          type: boolean
+        current:
+          $ref: '#/components/schemas/SessionSwitchTarget'
+        pending:
+          $ref: '#/components/schemas/SessionSwitchPendingView'
+        reason:
+          enum:
+          - ""
+          - no_role_pin
+          - no_role_map
+          - role_not_in_map
+          - no_target
+          - in_progress
+          - paused
+          - terminated
+          - unavailable
+          type: string
+        roleId:
+          type: string
+        targets:
+          items:
+            $ref: '#/components/schemas/SessionSwitchTarget'
+          type: array
+      required:
+      - available
+      - roleId
+      - current
+      - targets
+      - pending
+      - reason
+      type:
+      - object
+      - "null"
     SessionUsageResponse:
       properties:
         harnesses:

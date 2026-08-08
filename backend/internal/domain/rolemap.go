@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,9 +26,10 @@ const (
 
 // RoleExecutionPolicy is host-enforced, not prompt decoration.
 type RoleExecutionPolicy struct {
-	// WorkspaceWrites is false for orchestrator/reviewer-style roles that must
-	// not mutate the worktree. Binding is rejected unless the harness reports
-	// read_only_enforced (capability matrix).
+	// WorkspaceWrites is false only for roles that require technical workspace
+	// write denial. Binding is rejected unless the harness reports
+	// read_only_enforced (capability matrix). Strict delegation by itself is an
+	// instruction/routing policy and does not imply this field is false.
 	WorkspaceWrites bool `json:"workspaceWrites"`
 	// CanSpawn is true only for roles allowed to call daemon spawn (typically
 	// the orchestrator). Workers must be false.
@@ -47,6 +49,51 @@ type RoleBinding struct {
 	Permissions RoleExecutionPolicy `json:"permissions"`
 	// When lists keyword hints for orchestrator role selection (non-authoritative).
 	When []string `json:"when,omitempty"`
+}
+
+// UnmarshalJSON keeps the durable execution policy as plain booleans while
+// requiring config authors to choose both values explicitly. encoding/json
+// otherwise maps a missing or null boolean to false, which would silently turn
+// an omitted workspaceWrites field into a technical read-only request.
+func (b *RoleBinding) UnmarshalJSON(data []byte) error {
+	type policyWire struct {
+		WorkspaceWrites *bool `json:"workspaceWrites"`
+		CanSpawn        *bool `json:"canSpawn"`
+	}
+	type bindingWire struct {
+		Template    string       `json:"template"`
+		Harness     AgentHarness `json:"harness"`
+		Model       string       `json:"model,omitempty"`
+		Permissions *policyWire  `json:"permissions"`
+		When        []string     `json:"when,omitempty"`
+	}
+
+	var wire bindingWire
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil {
+		return err
+	}
+	if wire.Permissions == nil {
+		return fmt.Errorf("permissions: required")
+	}
+	if wire.Permissions.WorkspaceWrites == nil {
+		return fmt.Errorf("permissions.workspaceWrites: required boolean")
+	}
+	if wire.Permissions.CanSpawn == nil {
+		return fmt.Errorf("permissions.canSpawn: required boolean")
+	}
+	*b = RoleBinding{
+		Template: wire.Template,
+		Harness:  wire.Harness,
+		Model:    wire.Model,
+		Permissions: RoleExecutionPolicy{
+			WorkspaceWrites: *wire.Permissions.WorkspaceWrites,
+			CanSpawn:        *wire.Permissions.CanSpawn,
+		},
+		When: wire.When,
+	}
+	return nil
 }
 
 // FailoverTarget is one concrete execution alternative for a semantic role.
@@ -209,14 +256,15 @@ func (m RoleMap) Validate() error {
 			return fmt.Errorf("roles[%s].model: use empty string for provider default, not %q", id, b.Model)
 		}
 	}
-	// Orchestrator must be able to spawn and must not write under strict maps.
+	// A strict orchestrator must be able to delegate. WorkspaceWrites is
+	// deliberately independent: strict mode enforces routing, role identity and
+	// spawn authority, while the orchestrator template instructs the model not
+	// to implement. An explicitly false WorkspaceWrites value is still enforced
+	// by the capability registry at config-save, launch and restore.
 	ob := m.Roles[orch]
 	if m.StrictDelegation {
 		if !ob.Permissions.CanSpawn {
 			return fmt.Errorf("roles[%s].permissions.canSpawn: must be true for orchestrator under strictDelegation", orch)
-		}
-		if ob.Permissions.WorkspaceWrites {
-			return fmt.Errorf("roles[%s].permissions.workspaceWrites: must be false for orchestrator under strictDelegation", orch)
 		}
 	}
 	switch m.Failover.Mode {

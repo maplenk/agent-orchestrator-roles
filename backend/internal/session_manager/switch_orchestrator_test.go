@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/agent/codex"
+	"github.com/aoagents/agent-orchestrator/backend/internal/adapters/runtime/tmux"
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
 )
 
 // 2B-1: the orchestrator is the longest-lived session in a project and the
@@ -27,7 +33,34 @@ func orchestratorSwitchHarness(t *testing.T) (*Manager, *fakeStore, domain.Sessi
 	workerSession(st, id, domain.HarnessCodex, ws, art, sha)
 	rec := st.sessions[id]
 	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.Role.RoleID = "orchestrator"
+	rec.Metadata.Role.ResolvedPermissions = domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: true}
+	rec.Metadata.SpawnCapabilityHash = "source-capability-hash"
 	st.sessions[id] = rec
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{RoleMap: domain.RoleMap{
+			SchemaVersion:    domain.RoleMapSchemaVersion,
+			StrictDelegation: true,
+			OrchestratorRole: "orchestrator",
+			Roles: map[string]domain.RoleBinding{
+				"orchestrator": {
+					Template: "orchestrator",
+					Harness:  domain.HarnessClaudeCode,
+					Permissions: domain.RoleExecutionPolicy{
+						WorkspaceWrites: true,
+						CanSpawn:        true,
+					},
+				},
+			},
+			Failover: domain.FailoverConfig{
+				Mode: domain.FailoverModeManual,
+				Roles: map[string][]domain.FailoverTarget{
+					"orchestrator": {{Harness: domain.HarnessCodex}},
+				},
+			},
+		}},
+	}
 
 	m := New(Deps{
 		Runtime: &fakeRuntime{aliveByHandle: map[string]bool{}},
@@ -37,6 +70,47 @@ func orchestratorSwitchHarness(t *testing.T) (*Manager, *fakeStore, domain.Sessi
 	})
 	m.switchCapsOverride = testSwitchCaps
 	return m, st, id
+}
+
+type harnessAgentResolver map[domain.AgentHarness]ports.Agent
+
+func (r harnessAgentResolver) Agent(harness domain.AgentHarness) (ports.Agent, bool) {
+	agent, ok := r[harness]
+	return agent, ok
+}
+
+// tmuxPreflightRuntime subjects every target RuntimeConfig to the real tmux
+// adapter's 15,360-byte launch-command preflight. /usr/bin/false is reached
+// only after that preflight passes; its ordinary execution error is ignored so
+// the existing deterministic fake can model the rest of a successful launch.
+type tmuxPreflightRuntime struct {
+	*fakeRuntime
+	preflight *tmux.Runtime
+	attempts  []ports.RuntimeConfig
+}
+
+func (r *tmuxPreflightRuntime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
+	r.attempts = append(r.attempts, cfg)
+	if _, err := r.preflight.Create(ctx, cfg); errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		return ports.RuntimeHandle{}, err
+	}
+	return r.fakeRuntime.Create(ctx, cfg)
+}
+
+func pinAcceptanceOrchestratorTemplate(t *testing.T, st *fakeStore) (string, string, []byte) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "profiles", "orchestrator.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := roles.ParseTemplate(raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutTemplateArtifact(ctx, tmpl.ArtifactID, tmpl.SHA256, raw, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	return tmpl.ArtifactID, tmpl.SHA256, raw
 }
 
 // TestFreshOrchestratorConversation_KeepsIdentityInPlace is the core of 2B-1.
@@ -114,6 +188,33 @@ func TestFreshOrchestratorConversation_DoesNotHoldTheFenceWhileWaitingForTheGate
 	m.endSwitch(id)
 }
 
+func TestSwitchOrchestrator_TakesProjectGateBeforeSwitchFence(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	release, err := m.acquireProjectOwnership(context.Background(), st.sessions[id].ProjectID)
+	if err != nil {
+		t.Fatalf("pre-acquire: %v", err)
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+			SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("orchestrator switch completed while the project gate was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if !m.beginSwitch(id) {
+		t.Fatal("switch fence held while waiting for project ownership: lock order is inverted")
+	}
+	m.endSwitch(id)
+}
+
 // TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence pins that
 // the gate is taken at all. Ordering is covered separately above.
 func TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence(t *testing.T) {
@@ -169,18 +270,276 @@ func TestSwitchWorker_RejectsOrchestrator(t *testing.T) {
 	}
 }
 
-// TestSwitchOrchestrator_RejectsCrossHarness: 2B-3, blocked on Claude RO. A
-// strict orchestrator must be workspaceWrites:false and only Codex enforces
-// that, so allowing cross-harness for non-strict projects would ship a
-// capability strict projects can never have.
-func TestSwitchOrchestrator_RejectsCrossHarness(t *testing.T) {
-	m, _, id := orchestratorSwitchHarness(t)
-	_, err := m.switchUnderOwnership(context.Background(), SwitchRequest{
-		SessionID:     id,
-		TargetHarness: domain.HarnessClaudeCode,
-	}, true)
-	if !errors.Is(err, ErrOrchestratorCrossHarness) {
-		t.Fatalf("err = %v, want ErrOrchestratorCrossHarness", err)
+func TestSwitchOrchestrator_CodexClaudeInPlacePreservesIdentityAndRotatesCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		from domain.AgentHarness
+		to   domain.AgentHarness
+	}{
+		{name: "codex to claude", from: domain.HarnessCodex, to: domain.HarnessClaudeCode},
+		{name: "claude to codex", from: domain.HarnessClaudeCode, to: domain.HarnessCodex},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, st, id := orchestratorSwitchHarness(t)
+			st.sessions["mer-worker"] = domain.SessionRecord{
+				ID: "mer-worker", ProjectID: "mer", Kind: domain.KindWorker,
+				Harness:  domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityActive},
+				Metadata: domain.SessionMetadata{Role: domain.SessionRoleBinding{RoleID: "implementor"}},
+			}
+			rec := st.sessions[id]
+			rec.Harness = tc.from
+			rec.Metadata.Role.ResolvedHarness = tc.from
+			st.sessions[id] = rec
+			before := rec
+
+			res, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+				SessionID: id, TargetHarness: tc.to,
+			})
+			if err != nil {
+				t.Fatalf("switch orchestrator: %v", err)
+			}
+			after := st.sessions[id]
+			if res.Kind != domain.LifecycleKindSwitch {
+				t.Fatalf("kind = %q, want existing switch ledger kind", res.Kind)
+			}
+			if after.ID != before.ID || after.ProjectID != before.ProjectID || after.Kind != before.Kind {
+				t.Fatalf("durable identity drifted: before=%+v after=%+v", before, after)
+			}
+			if after.Metadata.WorkspacePath != before.Metadata.WorkspacePath || after.Metadata.Branch != before.Metadata.Branch {
+				t.Fatalf("canonical workspace drifted: before=%+v after=%+v", before.Metadata, after.Metadata)
+			}
+			if after.Metadata.Role.RoleID != before.Metadata.Role.RoleID ||
+				after.Metadata.Role.TemplateArtifactID != before.Metadata.Role.TemplateArtifactID ||
+				after.Metadata.Role.TemplateSHA256 != before.Metadata.Role.TemplateSHA256 ||
+				after.Metadata.Role.ResolvedPermissions != before.Metadata.Role.ResolvedPermissions {
+				t.Fatalf("role/template/permissions drifted: before=%+v after=%+v", before.Metadata.Role, after.Metadata.Role)
+			}
+			if !after.Metadata.Role.ResolvedPermissions.CanSpawn {
+				t.Fatal("CanSpawn was not preserved")
+			}
+			if after.Harness != tc.to || after.Metadata.Role.ResolvedHarness != tc.to {
+				t.Fatalf("target not promoted: session=%q role=%q", after.Harness, after.Metadata.Role.ResolvedHarness)
+			}
+			if before.Metadata.Role.ResolvedModel == "" {
+				t.Fatal("fixture must carry a non-empty source model to prove cross-provider clearing")
+			}
+			if after.Metadata.Role.ResolvedModel != "" {
+				t.Fatalf("source model leaked across harnesses: %q", after.Metadata.Role.ResolvedModel)
+			}
+			if after.Metadata.SpawnCapabilityHash == "" || after.Metadata.SpawnCapabilityHash == before.Metadata.SpawnCapabilityHash {
+				t.Fatalf("spawn credential did not rotate: before=%q after=%q",
+					before.Metadata.SpawnCapabilityHash, after.Metadata.SpawnCapabilityHash)
+			}
+			wantPhases := []domain.LifecycleLedgerPhase{
+				domain.LifecyclePhaseRequested,
+				domain.LifecyclePhasePreStop,
+				domain.LifecyclePhasePostStop,
+				domain.LifecyclePhaseTargetAck,
+			}
+			if len(st.ledger) != len(wantPhases) {
+				t.Fatalf("ledger = %+v, want exactly four switch phases", st.ledger)
+			}
+			for i, want := range wantPhases {
+				if st.ledger[i].Kind != domain.LifecycleKindSwitch || st.ledger[i].Phase != want ||
+					st.ledger[i].GenerationID != res.GenerationID {
+					t.Fatalf("ledger[%d] = %+v, want switch/%s generation %s", i, st.ledger[i], want, res.GenerationID)
+				}
+			}
+			runtime := m.runtime.(*fakeRuntime)
+			if runtime.created != 1 || runtime.destroyed != 1 {
+				t.Fatalf("runtime create/destroy = %d/%d, want one target and one source", runtime.created, runtime.destroyed)
+			}
+			agent := m.agents.(singleAgent).agent.(*recordingAgent)
+			combinedPrompt := agent.lastLaunch.SystemPrompt + "\n" + agent.lastLaunch.Prompt
+			if !strings.Contains(agent.lastLaunch.SystemPrompt, "Harness: "+string(tc.to)+".") {
+				t.Fatalf("authoritative role footer does not name target %q:\n%s", tc.to, agent.lastLaunch.SystemPrompt)
+			}
+			if strings.Count(combinedPrompt, "## Host-compiled handoff") != 1 ||
+				strings.Count(combinedPrompt, "### Observed fleet") != 1 ||
+				strings.Count(combinedPrompt, "mer-worker") != 1 {
+				t.Fatalf("orchestrator roster/handoff was omitted or stacked:\n%s", combinedPrompt)
+			}
+		})
+	}
+}
+
+// This is the live strict-role specimen: the repository's full orchestrator
+// template, one worker in the observed roster, and an immediate
+// Codex -> Claude -> Codex roundtrip. The second handoff is large enough that
+// inlining Codex developer_instructions crosses tmux's real 15,360-byte
+// preflight. Codex already supports model_instructions_file, so the target must
+// launch from the manager-owned file and durably acknowledge the same saga.
+func TestSwitchOrchestrator_CodexClaudeCodexRoundTripFitsTmuxCommandBudget(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	artifactID, templateSHA, templateRaw := pinAcceptanceOrchestratorTemplate(t, st)
+	if len(templateRaw) != 3885 {
+		t.Fatalf("acceptance orchestrator template size = %d, want frozen 3885-byte specimen", len(templateRaw))
+	}
+	rec := st.sessions[id]
+	rec.Metadata.Prompt = "Hold for deterministic MVP acceptance."
+	rec.Metadata.Role.TemplateArtifactID = artifactID
+	rec.Metadata.Role.TemplateSHA256 = templateSHA
+	st.sessions[id] = rec
+	st.sessions["mer-worker"] = domain.SessionRecord{
+		ID: "mer-worker", ProjectID: rec.ProjectID, Kind: domain.KindWorker,
+		Harness: domain.HarnessClaudeCode, Activity: domain.Activity{State: domain.ActivityIdle},
+		Metadata: domain.SessionMetadata{
+			Branch: "ao/mer-worker/root",
+			Role:   domain.SessionRoleBinding{RoleID: "implementor"},
+		},
+	}
+
+	binDir := t.TempDir()
+	codexBinary := filepath.Join(binDir, "codex")
+	if err := os.WriteFile(codexBinary, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	m.agents = harnessAgentResolver{
+		domain.HarnessClaudeCode: &recordingAgent{},
+		domain.HarnessCodex:      codex.New(),
+	}
+	m.dataDir = t.TempDir()
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	runtime := &tmuxPreflightRuntime{
+		fakeRuntime: baseRuntime,
+		preflight:   tmux.New(tmux.Options{Binary: "/usr/bin/false", Shell: "/bin/sh"}),
+	}
+	m.runtime = runtime
+
+	first, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if err != nil {
+		t.Fatalf("Codex -> Claude: %v", err)
+	}
+	second, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+	if err != nil {
+		t.Fatalf("Claude -> Codex: %v", err)
+	}
+	if first.GenerationID == second.GenerationID || second.Session.Harness != domain.HarnessCodex {
+		t.Fatalf("roundtrip generations/target = %q -> %q, harness %q",
+			first.GenerationID, second.GenerationID, second.Session.Harness)
+	}
+	if runtime.created != 2 || runtime.destroyed != 2 || len(runtime.attempts) != 2 {
+		t.Fatalf("runtime creates/destroys/attempts = %d/%d/%d, want 2/2/2",
+			runtime.created, runtime.destroyed, len(runtime.attempts))
+	}
+
+	codexCfg := runtime.attempts[1]
+	var instructionFile string
+	for _, arg := range codexCfg.Argv {
+		if strings.HasPrefix(arg, "model_instructions_file=") {
+			instructionFile = strings.TrimPrefix(arg, "model_instructions_file=")
+		}
+		if strings.HasPrefix(arg, "developer_instructions=") {
+			t.Fatalf("Codex target inlined the full system prompt into argv: %.120s", arg)
+		}
+	}
+	if instructionFile == "" {
+		t.Fatalf("Codex target argv does not use model_instructions_file: %#v", codexCfg.Argv)
+	}
+	instructions, err := os.ReadFile(instructionFile)
+	if err != nil {
+		t.Fatalf("read Codex target instruction file: %v", err)
+	}
+	if !strings.Contains(string(instructions), "Harness: codex.") ||
+		!strings.Contains(string(instructions), "## Role") {
+		t.Fatalf("Codex target instruction file lost role authority: %.500s", instructions)
+	}
+	after := st.sessions[id]
+	if after.Metadata.SwitchPending != nil || after.Metadata.RuntimeLaunchID != second.GenerationID {
+		t.Fatalf("roundtrip did not acknowledge/promote target: %+v", after.Metadata)
+	}
+	if strings.Count(after.Metadata.Prompt, "## Host-compiled handoff") != 1 ||
+		strings.Count(after.Metadata.Prompt, "Hold for deterministic MVP acceptance.") != 1 {
+		t.Fatalf("roundtrip stacked or lost the task handoff:\n%s", after.Metadata.Prompt)
+	}
+	if len(st.ledger) != 8 || st.ledger[7].Phase != domain.LifecyclePhaseTargetAck ||
+		st.ledger[7].GenerationID != second.GenerationID {
+		t.Fatalf("roundtrip ledger did not ack both targets: %+v", st.ledger)
+	}
+}
+
+// Once the source is stopped, the manager intentionally joins the generic
+// recovery state with the exact target-launch cause. Both identities are
+// load-bearing: recovery uses ErrSwitchPostStop, while the API must still give
+// the operator the command-size remedy instead of hiding it.
+func TestSwitchOrchestrator_PostStopCommandTooLongPreservesBothErrorIdentities(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	m.agents = singleAgent{agent: launchArgvAgent{argv: []string{
+		"target-agent", strings.Repeat("oversized-role-and-handoff", 900),
+	}}}
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	m.runtime = &tmuxPreflightRuntime{
+		fakeRuntime: baseRuntime,
+		preflight:   tmux.New(tmux.Options{Binary: "/usr/bin/false", Shell: "/bin/sh"}),
+	}
+
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if !errors.Is(err, ErrSwitchPostStop) || !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("error identities = %v, want ErrSwitchPostStop + ErrRuntimeLaunchCommandTooLong", err)
+	}
+	rec := st.sessions[id]
+	if rec.Metadata.SwitchPending == nil || rec.Metadata.RuntimeHandleID != "" {
+		t.Fatalf("post-stop handoff not retained: %+v", rec.Metadata)
+	}
+	if baseRuntime.destroyed != 1 || baseRuntime.created != 0 {
+		t.Fatalf("source destroys/target creates = %d/%d, want 1/0",
+			baseRuntime.destroyed, baseRuntime.created)
+	}
+}
+
+func TestSwitchOrchestrator_RejectsUnauthorizedExactModelBeforeEffects(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode, TargetModel: "not-authorized",
+	})
+	if !errors.Is(err, domain.ErrSwitchTargetUnauthorized) {
+		t.Fatalf("err = %v, want domain.ErrSwitchTargetUnauthorized", err)
+	}
+	if len(st.ledger) != 0 || m.runtime.(*fakeRuntime).destroyed != 0 {
+		t.Fatalf("unauthorized target reached effects: ledger=%+v runtime=%+v", st.ledger, m.runtime)
+	}
+}
+
+func TestSwitchOrchestrator_RejectsRolelessOrchestratorBeforeEffects(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	rec.Metadata.Role = domain.SessionRoleBinding{}
+	st.sessions[id] = rec
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if !errors.Is(err, domain.ErrSwitchTargetUnauthorized) {
+		t.Fatalf("err = %v, want domain.ErrSwitchTargetUnauthorized", err)
+	}
+	if len(st.ledger) != 0 || m.runtime.(*fakeRuntime).destroyed != 0 {
+		t.Fatalf("roleless target reached effects: ledger=%+v runtime=%+v", st.ledger, m.runtime)
+	}
+}
+
+func TestSwitchOrchestrator_ExplicitReadOnlyRoleRejectsClaudeBeforeEffects(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedHarness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites = false
+	st.sessions[id] = rec
+
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if !errors.Is(err, ErrReadOnlyUnsupported) {
+		t.Fatalf("err = %v, want ErrReadOnlyUnsupported", err)
+	}
+	if len(st.ledger) != 0 || m.runtime.(*fakeRuntime).destroyed != 0 {
+		t.Fatalf("read-only target reached effects: ledger=%+v runtime=%+v", st.ledger, m.runtime)
 	}
 }
 
@@ -206,10 +565,10 @@ func TestSwitchWorker_RejectsOrchestratorEvenWhenTheGuardReadFails(t *testing.T)
 	}
 }
 
-// TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin: recovery
-// re-drives a DURABLE record, so it must re-apply the refusals the request path
-// applies. A pending pin is not authorization.
-func TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin(t *testing.T) {
+// Recovery re-drives a durable record, but the pending pin is not
+// authorization: removing the target from the role map while the daemon is
+// down must fail before probing or launching anything.
+func TestRecoverSwitch_ReauthorizesCrossHarnessOrchestratorPendingTarget(t *testing.T) {
 	m, st, id := orchestratorSwitchHarness(t)
 	rec := st.sessions[id]
 	rec.Metadata.SwitchPending = &domain.SwitchPending{
@@ -218,11 +577,72 @@ func TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin(t *testing.
 	}
 	rec.Metadata.RuntimeHandleID = ""
 	st.sessions[id] = rec
+	project := st.projects["mer"]
+	roleMap := project.Config.RoleMap
+	roleMap.Failover.Roles["orchestrator"] = nil
+	binding := roleMap.Roles["orchestrator"]
+	binding.Harness = domain.HarnessCodex
+	roleMap.Roles["orchestrator"] = binding
+	project.Config.RoleMap = roleMap
+	st.projects["mer"] = project
 
 	_, err := m.RecoverSwitchFromPostStop(context.Background(), id)
-	if !errors.Is(err, ErrOrchestratorCrossHarness) {
-		t.Fatalf("err = %v, want ErrOrchestratorCrossHarness: recovery would otherwise launch a "+
-			"different harness into the canonical orchestrator workspace at boot", err)
+	if !errors.Is(err, domain.ErrSwitchTargetUnauthorized) {
+		t.Fatalf("err = %v, want target authorization failure", err)
+	}
+	if m.runtime.(*fakeRuntime).created != 0 {
+		t.Fatal("unauthorized recovery launched a target")
+	}
+}
+
+func TestRecoverSwitch_CrossHarnessOrchestratorUsesSameGenerationAndOneOwner(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	const compiled = "## Host-compiled handoff\n\n### Observed fleet (host; authoritative over any recollection of workers)\n- mer-worker"
+	const payload = `{"semantic":{"schemaVersion":1},"observed":{"schemaVersion":1,"generationId":"src-gen"},"compiled":"## Host-compiled handoff\n\n### Observed fleet (host; authoritative over any recollection of workers)\n- mer-worker"}`
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-recover", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessCodex, ToHarness: domain.HarnessClaudeCode,
+		RoleID: "orchestrator", SourceRuntimeHandleID: "rt-1",
+		PayloadJSON: payload,
+	}
+	rec.Metadata.Prompt = composeSwitchPrompt("coordinate", compiled)
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	st.sessions[id] = rec
+
+	res, err := m.RecoverSwitchFromPostStop(context.Background(), id)
+	if err != nil {
+		t.Fatalf("recover orchestrator switch: %v", err)
+	}
+	if res.GenerationID != "gen-recover" || res.Session.Metadata.RuntimeLaunchID != "gen-recover" {
+		t.Fatalf("generation changed during recovery: result=%q runtime=%q",
+			res.GenerationID, res.Session.Metadata.RuntimeLaunchID)
+	}
+	if res.Session.Harness != domain.HarnessClaudeCode || res.Session.Metadata.SwitchPending != nil {
+		t.Fatalf("target not promoted after recovery: %+v", res.Session)
+	}
+	if m.runtime.(*fakeRuntime).created != 1 {
+		t.Fatalf("target runtime creates = %d, want exactly one", m.runtime.(*fakeRuntime).created)
+	}
+	agent := m.agents.(singleAgent).agent.(*recordingAgent)
+	combinedPrompt := agent.lastLaunch.SystemPrompt + "\n" + agent.lastLaunch.Prompt
+	if !strings.Contains(agent.lastLaunch.SystemPrompt, "Harness: claude-code.") {
+		t.Fatalf("recovered target footer does not name Claude:\n%s", agent.lastLaunch.SystemPrompt)
+	}
+	if strings.Count(combinedPrompt, "## Host-compiled handoff") != 1 ||
+		strings.Count(combinedPrompt, "### Observed fleet") != 1 ||
+		strings.Count(combinedPrompt, "mer-worker") != 1 {
+		t.Fatalf("recovery omitted or stacked the durable orchestrator handoff:\n%s", combinedPrompt)
+	}
+	activeOwners := 0
+	for _, got := range st.sessions {
+		if got.ProjectID == "mer" && got.Kind == domain.KindOrchestrator && !got.IsTerminated {
+			activeOwners++
+		}
+	}
+	if activeOwners != 1 {
+		t.Fatalf("active orchestrators = %d, want exactly one", activeOwners)
 	}
 }
 

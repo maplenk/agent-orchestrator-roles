@@ -533,13 +533,13 @@ func (r *Runtime) paneSessionIDs(ctx context.Context, id string) []int {
 
 // IsAlive reports whether the handle's session still exists via `tmux
 // has-session`. Exit 0 means alive. A non-zero exit with output naming this
-// session as missing is a definitive false, nil. A server-level failure ("no
-// server running", "error connecting") wraps ports.ErrRuntimeUnavailable: the
-// probe learned nothing about this session — the agent process may well still
-// be running as an orphan of the dead server — so it must never be read as
-// per-session death (issue #3475). Any other non-zero exit is a plain probe
-// error so callers (the reaper feeding the LCM) treat it as a failed probe
-// and never kill a session on a transient error.
+// session as missing is a definitive false, nil. Literal "no server running"
+// is an authoritative server-level fact on either a default or namespaced
+// socket and wraps ports.ErrRuntimeServerAbsent. It remains an error so callers
+// must explicitly opt into the fact where their operation makes that safe.
+// "error connecting" is always inconclusive because it can describe
+// permissions or a stale socket; those reachability failures wrap
+// ports.ErrRuntimeUnavailable. Any other non-zero exit is a plain probe error.
 func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool, error) {
 	id, err := handleID(handle)
 	if err != nil {
@@ -552,26 +552,15 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 			if sessionMissingOutput(string(out)) {
 				return false, nil
 			}
-			// An AO-OWNED server that does not exist is authoritative absence,
-			// not an unreachable server. tmux panes live inside the server
-			// process, so if that process is gone every pane it hosted is gone
-			// with it -- there is no state in which the server is absent and a
-			// session of ours survives.
-			//
-			// Scoped to a namespaced socket on purpose. The default server is
-			// shared with whatever tmux the human runs (SocketForDataDir returns
-			// "" for the default data dir, deliberately, for continuity), so its
-			// absence is not a fact about AO's sessions and stays inconclusive.
-			//
-			// Narrower than "unreachable" on purpose too: only the literal
-			// absence message counts. "error connecting" can mean a permission
-			// failure or a stale socket path, which are reachability problems
-			// rather than proof of anything, so they keep returning
-			// ErrRuntimeUnavailable. Issue #3475 is the reason for that care --
-			// reading a server-level outage as N session deaths archived every
-			// session on the board.
-			if r.socket != "" && serverAbsentOutput(string(out)) {
-				return false, nil
+			// Literal absence is distinct from an unreachable server on BOTH
+			// socket kinds. SocketForDataDir returns "" for the normal data dir,
+			// so gating this classification on r.socket would skip the default
+			// installation entirely. Keep it as an error: consumers decide whether
+			// server absence is authoritative for their operation, while board
+			// probes retain their uncertainty shield.
+			if serverAbsentOutput(string(out)) {
+				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
+					id, ports.ErrRuntimeServerAbsent, strings.TrimSpace(string(out)))
 			}
 			if serverUnreachableOutput(string(out)) {
 				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",

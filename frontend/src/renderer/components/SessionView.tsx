@@ -5,6 +5,7 @@ import type { PanelImperativeHandle, PanelSize } from "react-resizable-panels";
 import { BrowserPanelView, useBrowserAnnotationQueue } from "./BrowserPanel";
 import { CenterPane } from "./CenterPane";
 import { SessionChatSurface } from "./chat/SessionChatSurface";
+import { OrchestratorSwitchControl } from "./OrchestratorSwitchControl";
 import { SessionFilesView } from "./SessionFilesView";
 import { SessionInspector } from "./SessionInspector";
 import {
@@ -26,6 +27,7 @@ import {
 	interfaceTransitionIsActive,
 	useSessionInterfaceTransition,
 } from "../hooks/useSessionInterfaceTransition";
+import { useOrchestratorSwitch } from "../hooks/useOrchestratorSwitch";
 import { useWorkspaceQuery } from "../hooks/useWorkspaceQuery";
 import { useWindowFullScreen } from "../hooks/useWindowFullScreen";
 import { apiErrorMessage } from "../lib/api-client";
@@ -101,6 +103,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 
 	const session = workspaces.flatMap((workspace) => workspace.sessions).find((s) => s.id === sessionId);
 	const interfaceSwitch = useSessionInterfaceTransition(session?.id);
+	const orchestratorSwitch = useOrchestratorSwitch(sessionId);
 
 	// Shell terminals opened inside a session live beside its pane as extra tabs,
 	// scoped to the session on screen so each session has its own shell set.
@@ -237,9 +240,16 @@ export function SessionView({ sessionId }: SessionViewProps) {
 		);
 	}, [shellTerminals]);
 	const isOrchestrator = session ? isOrchestratorSession(session) : false;
+	// Chat controllers cannot enter switch or fresh-conversation sagas. The
+	// backend still returns a fail-closed preview for non-desktop consumers, but
+	// the desktop must not render controls whose direct calls are guaranteed 409s.
+	const showOrchestratorSwitch = isOrchestrator && session?.mode !== "chat";
 	// Orchestrators get the full workspace width; only workers need the inspector rail.
 	const hasInspector = Boolean(session && !isOrchestrator);
 	const activeInterfaceTransition = interfaceTransitionIsActive(interfaceSwitch.transition);
+	const orchestratorSwitchPending = Boolean(
+		isOrchestrator && (orchestratorSwitch.isPending || session?.switch?.pending),
+	);
 	const chatControllerTransitioning = Boolean(
 		interfaceSwitch.transition?.targetMode === "chat" &&
 			(activeInterfaceTransition || interfaceSwitch.settling),
@@ -294,6 +304,19 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	) : null;
 	const sessionHeaderActions = (
 		<SessionInterfaceActionGroup>
+			{showOrchestratorSwitch ? (
+				<OrchestratorSwitchControl
+					disabled={
+						!session ||
+						!sessionIsActive(session) ||
+						Boolean(session.pause) ||
+						interfaceSwitch.starting ||
+						activeInterfaceTransition
+					}
+					mutation={orchestratorSwitch}
+					switchState={session?.switch}
+				/>
+			) : null}
 			{interfaceSwitchAction}
 			<ShellTopbar embedded />
 		</SessionInterfaceActionGroup>
@@ -527,6 +550,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 								session={session}
 								headerActions={sessionHeaderActions}
 								controllerTransitioning={chatControllerTransitioning}
+								inputDisabled={orchestratorSwitchPending}
 								onOpenShell={addShellTerminal}
 								openingShell={openShellTerminal.isPending}
 								shellError={
@@ -536,7 +560,8 @@ export function SessionView({ sessionId }: SessionViewProps) {
 						) : (
 							<CenterPane
 								agentInputDisabled={
-									(interfaceSwitch.starting || activeInterfaceTransition) && session?.mode === "tui"
+									orchestratorSwitchPending ||
+									((interfaceSwitch.starting || activeInterfaceTransition) && session?.mode === "tui")
 								}
 								daemonReady={daemonStatus.state === "ready"}
 								onCloseShellTerminal={closeShellTerminalByHandle}

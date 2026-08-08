@@ -12,7 +12,7 @@ roleReminder: >
 # project's roleMap; ParseTemplate reads id/name/description/roleReminder and
 # the body, and discards the three fields below. Kept aligned with
 # docs/roles/examples/role-map.strict.example.json so they never contradict it.
-defaultHarness: codex
+defaultHarness: claude-code
 defaultModel: ""
 ---
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -46,6 +47,10 @@ type fakeSessionService struct {
 	staged           []ports.SpawnAttachment
 	stagedPaths      []string
 	stageErr         error
+	switchPreview    sessionsvc.SwitchPreview
+	switchPreviewErr error
+	switchPreviewIDs []domain.SessionID
+	switchErr        error
 }
 
 type fakeManagedPreviewServer struct {
@@ -211,6 +216,9 @@ func (f *fakeSessionService) Unpin(_ context.Context, id domain.SessionID) (doma
 }
 
 func (f *fakeSessionService) SwitchWorker(_ context.Context, req sessionsvc.SwitchWorkerRequest) (sessionsvc.SwitchWorkerOutcome, error) {
+	if f.switchErr != nil {
+		return sessionsvc.SwitchWorkerOutcome{}, f.switchErr
+	}
 	s, ok := f.sessions[req.SessionID]
 	if !ok {
 		return sessionsvc.SwitchWorkerOutcome{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
@@ -227,6 +235,14 @@ func (f *fakeSessionService) SwitchWorker(_ context.Context, req sessionsvc.Swit
 
 func (f *fakeSessionService) FreshConversation(ctx context.Context, id domain.SessionID, objective string) (sessionsvc.SwitchWorkerOutcome, error) {
 	return f.SwitchWorker(ctx, sessionsvc.SwitchWorkerRequest{SessionID: id, Objective: objective, Fresh: true})
+}
+
+func (f *fakeSessionService) SwitchPreview(_ context.Context, rec domain.SessionRecord) (sessionsvc.SwitchPreview, error) {
+	f.switchPreviewIDs = append(f.switchPreviewIDs, rec.ID)
+	if f.switchPreviewErr != nil {
+		return sessionsvc.SwitchPreview{}, f.switchPreviewErr
+	}
+	return f.switchPreview, nil
 }
 
 func (f *fakeSessionService) PauseSession(_ context.Context, id domain.SessionID, incidentID, reason string) (domain.SessionRecord, error) {
@@ -690,6 +706,147 @@ func TestSessionsAPI_ListSpawnGetAndActions(t *testing.T) {
 	body, status, _ = doRequest(t, srv, "POST", "/api/v1/orchestrators", `{"projectId":"ao"}`)
 	if status != http.StatusCreated {
 		t.Fatalf("orchestrator = %d, want 201; body=%s", status, body)
+	}
+}
+
+func TestSessionsAPI_SwitchPreviewSkipsWorkers(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET sessions = %d; body=%s", status, body)
+	}
+	if len(svc.switchPreviewIDs) != 0 {
+		t.Fatalf("switch preview calls=%v, want zero for ordinary workers", svc.switchPreviewIDs)
+	}
+}
+
+func TestSessionsAPI_OneUnavailableSwitchPreviewDoesNotFailList(t *testing.T) {
+	svc := newFakeSessionService()
+	now := time.Now().UTC()
+	for _, id := range []domain.SessionID{"ao-worker-2", "ao-worker-3"} {
+		svc.sessions[id] = domain.Session{
+			SessionRecord: domain.SessionRecord{
+				ID: id, ProjectID: "ao", Kind: domain.KindWorker,
+				Harness: domain.HarnessCodex, CreatedAt: now, UpdatedAt: now,
+			},
+			Status: domain.StatusIdle,
+		}
+	}
+	svc.sessions["ao-orch"] = domain.Session{
+		SessionRecord: domain.SessionRecord{
+			ID: "ao-orch", ProjectID: "ao", Kind: domain.KindOrchestrator,
+			Harness: domain.HarnessClaudeCode, CreatedAt: now, UpdatedAt: now,
+		},
+		Status: domain.StatusIdle,
+	}
+	svc.switchPreview = sessionsvc.SwitchPreview{
+		Available: true,
+		Targets:   []domain.FailoverTarget{{Harness: domain.HarnessCodex, Model: "o3"}},
+	}
+	svc.switchPreviewErr = errors.New("project read failed")
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET sessions = %d, want 200; body=%s", status, body)
+	}
+	var envelope struct {
+		Sessions []struct {
+			ID     string `json:"id"`
+			Switch *struct {
+				Available bool                              `json:"available"`
+				Targets   []controllers.SessionSwitchTarget `json:"targets"`
+				Reason    string                            `json:"reason"`
+			} `json:"switch"`
+		} `json:"sessions"`
+	}
+	mustJSON(t, body, &envelope)
+	if len(envelope.Sessions) != 4 {
+		t.Fatalf("sessions=%d body=%s", len(envelope.Sessions), body)
+	}
+	if len(svc.switchPreviewIDs) != 1 || svc.switchPreviewIDs[0] != "ao-orch" {
+		t.Fatalf("switch preview calls=%v, want only the broken orchestrator; workers must do zero preview/project reads",
+			svc.switchPreviewIDs)
+	}
+	getBody, getStatus, _ := doRequest(t, srv, "GET", "/api/v1/sessions/ao-orch", "")
+	if getStatus != http.StatusOK || len(svc.switchPreviewIDs) != 2 || svc.switchPreviewIDs[1] != "ao-orch" {
+		t.Fatalf("GET orchestrator status=%d preview calls=%v body=%s", getStatus, svc.switchPreviewIDs, getBody)
+	}
+	mutationStatus, mutationBody := doSwitchPOST(t, srv, "/api/v1/sessions/ao-orch/switch",
+		`{"targetHarness":"codex","targetModel":"o3"}`,
+		map[string]string{"X-AO-Operator-Spawn-Token": "test-operator-spawn-token"})
+	if mutationStatus != http.StatusOK {
+		t.Fatalf("successful switch must not depend on preview: status=%d body=%v", mutationStatus, mutationBody)
+	}
+	if len(svc.switchPreviewIDs) != 2 {
+		t.Fatalf("successful mutation recomputed preview: calls=%v", svc.switchPreviewIDs)
+	}
+	for _, session := range envelope.Sessions {
+		if session.ID != "ao-orch" {
+			continue
+		}
+		if session.Switch == nil || session.Switch.Available || session.Switch.Reason != "unavailable" {
+			t.Fatalf("switch=%+v body=%s", session.Switch, body)
+		}
+		if len(session.Switch.Targets) != 0 {
+			t.Fatalf("unavailable preview carried targets: %+v", session.Switch.Targets)
+		}
+		return
+	}
+	t.Fatalf("orchestrator missing from body=%s", body)
+}
+
+func TestSessionsAPI_ChatOrchestratorPreviewIsUnavailableButDirectSwitchKeepsTypedConflict(t *testing.T) {
+	svc := newFakeSessionService()
+	now := time.Now().UTC()
+	svc.sessions["ao-orch"] = domain.Session{
+		SessionRecord: domain.SessionRecord{
+			ID: "ao-orch", ProjectID: "ao", Kind: domain.KindOrchestrator,
+			Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeChat,
+			CreatedAt: now, UpdatedAt: now,
+		},
+		Status: domain.StatusIdle,
+	}
+	svc.switchPreview = sessionsvc.SwitchPreview{
+		Reason: sessionsvc.SwitchPreviewReasonUnavailable,
+	}
+	svc.switchErr = apierr.Conflict("SWITCH_CHAT_UNSUPPORTED",
+		"Switching harness is not supported for chat sessions yet; move the session to terminal mode first", nil)
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, "GET", "/api/v1/sessions/ao-orch", "")
+	if status != http.StatusOK {
+		t.Fatalf("GET chat orchestrator = %d; body=%s", status, body)
+	}
+	var envelope struct {
+		Session struct {
+			Switch *struct {
+				Available bool                              `json:"available"`
+				Targets   []controllers.SessionSwitchTarget `json:"targets"`
+				Reason    string                            `json:"reason"`
+			} `json:"switch"`
+		} `json:"session"`
+	}
+	mustJSON(t, body, &envelope)
+	if envelope.Session.Switch == nil || envelope.Session.Switch.Available ||
+		envelope.Session.Switch.Reason != sessionsvc.SwitchPreviewReasonUnavailable ||
+		len(envelope.Session.Switch.Targets) != 0 {
+		t.Fatalf("chat switch preview=%+v; body=%s", envelope.Session.Switch, body)
+	}
+	previewCalls := len(svc.switchPreviewIDs)
+
+	mutationStatus, mutationBody := doSwitchPOST(t, srv, "/api/v1/sessions/ao-orch/switch",
+		`{"targetHarness":"codex","targetModel":"o3"}`,
+		map[string]string{"X-AO-Operator-Spawn-Token": "test-operator-spawn-token"})
+	if mutationStatus != http.StatusConflict || mutationBody["code"] != "SWITCH_CHAT_UNSUPPORTED" {
+		t.Fatalf("direct chat switch status=%d body=%v, want 409 SWITCH_CHAT_UNSUPPORTED",
+			mutationStatus, mutationBody)
+	}
+	if len(svc.switchPreviewIDs) != previewCalls {
+		t.Fatalf("direct mutation recomputed advisory preview: before=%d after=%d",
+			previewCalls, len(svc.switchPreviewIDs))
 	}
 }
 

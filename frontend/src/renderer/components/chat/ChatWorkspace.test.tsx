@@ -88,6 +88,15 @@ describe("ChatWorkspace timeline", () => {
 		expect(composer?.parentElement).toHaveClass("mx-auto", "w-full", "max-w-3xl");
 	});
 
+	it("fences chat input while a session lifecycle operation owns the agent", () => {
+		const send = vi.fn();
+		render(<ChatWorkspace snapshot={chatFixtureSettled} inputDisabled onSend={send} />);
+
+		expect(screen.getByLabelText("Message the agent")).toBeDisabled();
+		fireEvent.submit(screen.getByLabelText("Message the agent").closest("form")!);
+		expect(send).not.toHaveBeenCalled();
+	});
+
 	it("offers real recovery actions when the controller stops", async () => {
 		const user = userEvent.setup();
 		const resume = vi.fn();

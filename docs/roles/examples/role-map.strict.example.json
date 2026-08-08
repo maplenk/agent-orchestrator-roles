@@ -5,8 +5,8 @@
   "roles": {
     "orchestrator": {
       "template": "orchestrator",
-      "harness": "codex",
-      "permissions": { "workspaceWrites": false, "canSpawn": true }
+      "harness": "claude-code",
+      "permissions": { "workspaceWrites": true, "canSpawn": true }
     },
     "implementor": {
       "template": "implementor",
@@ -37,6 +37,9 @@
   "failover": {
     "mode": "manual",
     "roles": {
+      "orchestrator": [
+        { "harness": "codex", "model": "" }
+      ],
       "implementor": [
         { "harness": "codex", "model": "" }
       ]

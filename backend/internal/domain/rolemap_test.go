@@ -15,7 +15,7 @@ func sampleStrictMap() RoleMap {
 				Template: "orchestrator",
 				Harness:  HarnessClaudeCode,
 				Permissions: RoleExecutionPolicy{
-					WorkspaceWrites: false,
+					WorkspaceWrites: true,
 					CanSpawn:        true,
 				},
 			},
@@ -66,13 +66,10 @@ func TestRoleMapValidate_RejectsLiteralDefaultModel(t *testing.T) {
 	}
 }
 
-func TestRoleMapValidate_StrictOrchestratorMustNotWrite(t *testing.T) {
+func TestRoleMapValidate_StrictOrchestratorMayBeWritable(t *testing.T) {
 	m := sampleStrictMap()
-	b := m.Roles["orchestrator"]
-	b.Permissions.WorkspaceWrites = true
-	m.Roles["orchestrator"] = b
-	if err := m.Validate(); err == nil {
-		t.Fatal("expected error for orchestrator workspaceWrites")
+	if err := m.Validate(); err != nil {
+		t.Fatalf("strict routing/delegation must not imply technical read-only: %v", err)
 	}
 }
 

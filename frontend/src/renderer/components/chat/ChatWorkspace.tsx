@@ -114,6 +114,8 @@ export interface ChatWorkspaceProps {
 	headerActions?: ReactNode;
 	/** Suppress a transient stopped snapshot while a mode handoff installs Chat. */
 	controllerTransitioning?: boolean;
+	/** A lifecycle operation owns the session and agent writes are fenced. */
+	inputDisabled?: boolean;
 	/** Older durable history is available but not loaded into the DOM yet. */
 	hasOlder?: boolean;
 	loadingOlder?: boolean;
@@ -198,6 +200,7 @@ export function ChatWorkspace({
 	sessionRole = "worker",
 	headerActions,
 	controllerTransitioning,
+	inputDisabled,
 	hasOlder,
 	loadingOlder,
 	onLoadOlder,
@@ -373,8 +376,8 @@ export function ChatWorkspace({
 				hasOlder={hasOlder}
 				loadingOlder={loadingOlder}
 				onLoadOlder={onLoadOlder}
-				onDecide={onDecide}
-				onResolveInput={onResolveInput}
+				onDecide={inputDisabled ? undefined : onDecide}
+				onResolveInput={inputDisabled ? undefined : onResolveInput}
 				busy={busy}
 				onRollback={rollbackTarget}
 			/>
@@ -408,20 +411,20 @@ export function ChatWorkspace({
 									models={models ?? []}
 									settings={snapshot.settings}
 									reroute={snapshot.modelReroute}
-									onChange={onChooseSettings}
+									onChange={inputDisabled ? undefined : onChooseSettings}
 									configOptions={configOptions ?? []}
-									onChangeConfigOption={onChooseConfigOption}
+									onChangeConfigOption={inputDisabled ? undefined : onChooseConfigOption}
 									configPending={configOptionPending}
 									error={configOptionError}
 									disabled={
-										snapshot.controller.state === "stopped" || configOptionPending
+										inputDisabled || snapshot.controller.state === "stopped" || configOptionPending
 									}
 								/>
 							) : null
 						}
 						busy={busy}
 						willQueue={Boolean(turn)}
-						disabled={snapshot.controller.state === "stopped"}
+						disabled={inputDisabled || snapshot.controller.state === "stopped"}
 						skills={skills}
 						filePaths={filePaths}
 						filePathsTruncated={filePathsTruncated}
@@ -429,8 +432,8 @@ export function ChatWorkspace({
 						nativeImages={nativeImages}
 						// Steering is only meaningful into a turn that is running. A queued turn
 						// has not reached the provider, so there is nothing to steer.
-						onSteer={onSteer}
-						canSteer={Boolean(onSteer) && turn?.state === "running"}
+						onSteer={inputDisabled ? undefined : onSteer}
+						canSteer={!inputDisabled && Boolean(onSteer) && turn?.state === "running"}
 						steerPending={steerPending}
 						steerRefusal={steerRefusal}
 					/>

@@ -833,15 +833,39 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchChatUnsupported):
 		return apierr.Conflict("SWITCH_CHAT_UNSUPPORTED",
 			"Switching harness is not supported for chat sessions yet; move the session to terminal mode first", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchPaused):
+		return apierr.Conflict("SWITCH_PAUSED",
+			"This session is paused. Resume it before switching harness or starting a fresh conversation", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchPostStop) &&
+		errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong):
+		// Preserve both facts from finishSwitchTarget's joined error. The
+		// source is already gone, so the ordinary spawn-size message omits a
+		// critical recovery constraint; the generic post-stop answer, on the
+		// other hand, hides the exact size remedy.
+		return apierr.Conflict("LAUNCH_COMMAND_TOO_LONG",
+			"The source stopped and its handoff is retained, but the target launch command is too large. "+
+				"Recovery will keep failing until the target adapter's file-backed launch support or command-size handling is fixed. "+
+				"Otherwise, terminate and recreate the session with a shorter assignment", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchPostStop):
 		return apierr.Conflict("SWITCH_POST_STOP",
 			"Source stopped but target switch did not complete; handoff retained for recovery", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchUncertain):
 		return apierr.Conflict("SWITCH_UNCERTAIN",
 			"Switch runtime state is uncertain; inspect session and recover carefully", nil)
+	case errors.Is(err, domain.ErrSwitchTargetModelRequired):
+		// The orchestrator manager re-resolves under the project gate. A map
+		// revision between the service precheck and that gated read can make a
+		// previously unique model ambiguous; preserve the same stable client code.
+		return apierr.Invalid("TARGET_MODEL_REQUIRED",
+			"Multiple models are now authorized for this harness; choose an exact target from the latest session read model", nil)
+	case errors.Is(err, domain.ErrSwitchTargetUnauthorized):
+		// Backend authorization remains the final word even though the desktop
+		// only submits targets it received from the read model.
+		return apierr.Forbidden("SWITCH_TARGET_UNAUTHORIZED",
+			"The harness/model target is no longer authorized by this session's role map")
 	// Phase 3B manual failover. These are host-resolution or recovery states,
 	// never permission for the caller to pick a different target.
 	case errors.Is(err, domain.ErrFailoverNoTarget):
@@ -983,14 +1007,21 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, fmt.Errorf("pr facts %s: %w", rec.ID, err)
 	}
-	prs = deduplicatePRFacts(prs)
+	return s.sessionFromRecord(rec, deduplicatePRFacts(prs)), nil
+}
+
+// sessionFromRecord assembles the infallible portion of the session read
+// model. Mutation responses use it after their durable point of no return when
+// optional PR-fact hydration fails: reporting a committed switch as a 500 can
+// make a retry launch another generation over the target that already acked.
+func (s *Service) sessionFromRecord(rec domain.SessionRecord, prs []domain.PRFacts) domain.Session {
 	return domain.Session{
 		SessionRecord:    rec,
 		Status:           deriveStatus(rec, prs, s.now(), s.harnessSignals(rec.Harness)),
 		SCMStatus:        deriveSCMStatus(prs),
 		TerminalHandleID: rec.Metadata.RuntimeHandleID,
 		PRs:              prs,
-	}, nil
+	}
 }
 
 // now tolerates a zero-value Service (tests construct the struct literally

@@ -3,6 +3,12 @@
 Date: 2026-08-06. Branch `roles/multi-sub-v1`, commits `d6d96c89` (pause panel),
 `5de2df0c` (delegation carries a role), `2a46fde8` (strict composer).
 
+> **Historical policy note (2026-08-08):** the strict validation facts below
+> are accurate for the recorded dogfood SHA and are not rewritten. The final
+> MVP later separated strict routing/delegation from implicit read-only in
+> `4ab636fe`. A writable strict Claude orchestrator is now valid; an explicitly
+> read-only Claude role remains unsupported.
+
 Two surfaces landed: the **paused session panel** and the **strict delegation
 composer**. Both were exercised against a real daemon on a **fresh, isolated
 data dir**, not fixtures — the renderer's browser preview mode

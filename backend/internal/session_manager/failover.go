@@ -213,6 +213,7 @@ func (m *Manager) ContinueFailover(
 		TargetHarness:     target.Harness,
 		TargetModel:       target.Model,
 		ForceGenerationID: generation,
+		PauseIncidentID:   incident,
 		Semantic: domain.SemanticHandoffV1{
 			SchemaVersion:    domain.SemanticHandoffSchemaVersion,
 			SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
@@ -233,8 +234,9 @@ func failoverEligible(rec domain.SessionRecord) error {
 		return ErrTerminated
 	}
 	if rec.Kind != domain.KindWorker {
-		// Orchestrators do not failover in this MVP: a cross-harness
-		// orchestrator switch is blocked on Claude read-only.
+		// Worker Continue remains its own operator-paused ladder. Orchestrators
+		// switch through the gated orchestrator switch surface, not this incident
+		// state machine.
 		return ErrNotWorker
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
@@ -244,13 +246,16 @@ func failoverEligible(rec domain.SessionRecord) error {
 }
 
 // adoptFailoverAttempt is contract section 6 rules 5 and 6: a duplicate
-// Continue returns the in-flight attempt rather than starting a new one, and an
-// incomplete post_stop belonging to that attempt is COMPLETED on the same
-// generation instead of being redone on a fresh rung.
+// Continue never starts a new attempt, and an incomplete post_stop belonging to
+// an abandoned attempt is COMPLETED on the same generation instead of being
+// redone on a fresh rung. A live owner is different: it returns
+// ErrSwitchInProgress without mutating the attempt because fence occupancy does
+// not prove that owner's switch will eventually acknowledge the target.
 //
-// Neither branch advances the ladder. Both finish the same rung on the same
-// generation, which is exactly why neither is an automatic retry: only a
-// human's Continue ever selects a new rung.
+// No path advances the ladder. An abandoned attempt is finished on its stored
+// rung and generation; a live one is left untouched for its current owner.
+// Neither is an automatic retry: only a human's Continue ever selects a new
+// rung.
 func (m *Manager) adoptFailoverAttempt(
 	ctx context.Context,
 	store failoverAttemptStore,
@@ -287,6 +292,7 @@ func (m *Manager) adoptFailoverAttempt(
 			TargetHarness:     attempt.ToHarness,
 			TargetModel:       attempt.ToModel,
 			ForceGenerationID: attempt.GenerationID,
+			PauseIncidentID:   attempt.IncidentID,
 			Semantic: domain.SemanticHandoffV1{
 				SchemaVersion:    domain.SemanticHandoffSchemaVersion,
 				SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
@@ -294,8 +300,12 @@ func (m *Manager) adoptFailoverAttempt(
 			},
 		})
 		if errors.Is(switchErr, ErrSwitchInProgress) {
-			// The duplicate case, now positively identified rather than assumed.
-			return failoverResult(rec, attempt, true), nil
+			// A live fence distinguishes an abandoned requested attempt from a
+			// transition running right now, but it does not prove the owner is
+			// this attempt or that it will eventually succeed. Preserve the
+			// requested row and surface the conflict; only target_ack plus pin
+			// clear is a completed Continue result.
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", rec.ID, switchErr)
 		}
 		if switchErr != nil {
 			return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
@@ -313,6 +323,16 @@ func (m *Manager) adoptFailoverAttempt(
 	}
 
 	res, err := m.RecoverSwitchFromPostStop(ctx, rec.ID)
+	if errors.Is(err, ErrSwitchInProgress) {
+		// The matching generation belongs to the live saga that still owns the
+		// switch fence. A duplicate Continue observes its durable pending pin,
+		// but must not promote the OUTER attempt while the first caller is still
+		// between pre_stop and target_ack. Doing so steals the first caller's
+		// requested->acked CAS after an otherwise successful switch. Nor may it
+		// return success: the owner can still fail and roll back. Preserve state
+		// and let the typed conflict reach the operator.
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: recover post_stop: %w", rec.ID, err)
+	}
 	if err != nil {
 		// Still recoverable, and still the same generation. The attempt stays
 		// non-terminal so the next Continue (or boot recovery) can finish it;

@@ -167,7 +167,11 @@ func (s *Store) GetProject(ctx context.Context, id string) (domain.ProjectRecord
 	if err != nil {
 		return domain.ProjectRecord{}, false, fmt.Errorf("get project %s: %w", id, err)
 	}
-	return projectRowFromGen(p), true, nil
+	r, err := projectRowFromGen(p)
+	if err != nil {
+		return domain.ProjectRecord{}, false, fmt.Errorf("get project %s: %w", id, err)
+	}
+	return r, true, nil
 }
 
 // FindProjectByPath returns a project registered at path, active or archived.
@@ -179,7 +183,11 @@ func (s *Store) FindProjectByPath(ctx context.Context, path string) (domain.Proj
 	if err != nil {
 		return domain.ProjectRecord{}, false, fmt.Errorf("find project by path %s: %w", path, err)
 	}
-	return projectRowFromGen(p), true, nil
+	r, err := projectRowFromGen(p)
+	if err != nil {
+		return domain.ProjectRecord{}, false, fmt.Errorf("find project by path %s: %w", path, err)
+	}
+	return r, true, nil
 }
 
 // ListProjects returns active projects ordered by id.
@@ -190,7 +198,11 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.ProjectRecord, error
 	}
 	out := make([]domain.ProjectRecord, 0, len(rows))
 	for _, p := range rows {
-		out = append(out, projectRowFromGen(p))
+		r, err := projectRowFromGen(p)
+		if err != nil {
+			return nil, fmt.Errorf("list projects: %w", err)
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }
@@ -241,7 +253,11 @@ func (s *Store) ArchiveProject(ctx context.Context, id string, at time.Time) (bo
 	return n > 0, nil
 }
 
-func projectRowFromGen(p gen.Project) domain.ProjectRecord {
+func projectRowFromGen(p gen.Project) (domain.ProjectRecord, error) {
+	config, err := unmarshalProjectConfig(p.Config)
+	if err != nil {
+		return domain.ProjectRecord{}, fmt.Errorf("decode project %s config: %w", p.ID, err)
+	}
 	r := domain.ProjectRecord{
 		ID:            string(p.ID),
 		Path:          p.Path,
@@ -249,12 +265,12 @@ func projectRowFromGen(p gen.Project) domain.ProjectRecord {
 		DisplayName:   p.DisplayName,
 		RegisteredAt:  p.RegisteredAt,
 		Kind:          domain.ProjectKind(p.Kind).WithDefault(),
-		Config:        unmarshalProjectConfig(p.Config),
+		Config:        config,
 	}
 	if p.ArchivedAt.Valid {
 		r.ArchivedAt = p.ArchivedAt.Time
 	}
-	return r
+	return r, nil
 }
 
 // marshalProjectConfig encodes the typed per-project config into the nullable
@@ -272,19 +288,18 @@ func marshalProjectConfig(cfg domain.ProjectConfig) (sql.NullString, error) {
 }
 
 // unmarshalProjectConfig decodes the nullable JSON column back into the typed
-// struct. SQL NULL (an unset config) decodes to a zero value. A damaged config
-// (invalid JSON from a direct DB edit or migration bug) also degrades to a zero
-// config rather than erroring — a corrupt config must never block access to the
-// project row, nor fail an entire ListProjects.
-func unmarshalProjectConfig(s sql.NullString) domain.ProjectConfig {
+// struct. SQL NULL (an unset config) decodes to a zero value. Invalid persisted
+// JSON is an explicit read error: returning a partial or zero config would let
+// an unrelated read-modify-write silently replace the authored value.
+func unmarshalProjectConfig(s sql.NullString) (domain.ProjectConfig, error) {
 	if !s.Valid || s.String == "" {
-		return domain.ProjectConfig{}
+		return domain.ProjectConfig{}, nil
 	}
 	var cfg domain.ProjectConfig
 	if err := json.Unmarshal([]byte(s.String), &cfg); err != nil {
-		return domain.ProjectConfig{}
+		return domain.ProjectConfig{}, fmt.Errorf("unmarshal project config: %w", err)
 	}
-	return cfg
+	return cfg, nil
 }
 
 func nullTime(t time.Time) sql.NullTime {

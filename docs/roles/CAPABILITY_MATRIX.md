@@ -17,7 +17,7 @@ This file is documentation only.
 | Capability | Meaning |
 |------------|---------|
 | `spawn_supported` | Basic spawn path |
-| `switch_supported` | Worker switch/fresh saga with generation ownership + recovery + input gate; Claude/Codex promoted after Phase 2A dogfood |
+| `switch_supported` | In-place switch/fresh saga with generation ownership + recovery + input gate; Claude/Codex support worker and gated orchestrator switching |
 | `limit_detection_supported` | Phase 3 |
 | `read_only_enforced` | OS/sandbox workspace write denial |
 
@@ -35,3 +35,7 @@ is required on **both** sides of a failover ladder:
 A ladder whose owning primary cannot originate a switch is rejected at config-save
 rather than deferring to `ErrSwitchNotSupported` at runtime (DoD invariant 9: no
 silent degrade).
+
+`strictDelegation` does not alter `read_only_enforced`. A writable strict
+orchestrator may use Claude Code; an explicitly `workspaceWrites:false` role
+still rejects it.

@@ -1,82 +1,100 @@
-# Absent tmux server as an authoritative liveness answer
+# Absent tmux server as a typed liveness fact
 
-**Change:** `tmux.Runtime.IsAlive` now returns `(false, nil)` — confirmed dead —
-when the probe fails with tmux's `no server running` **and** the runtime is on a
-namespaced (AO-owned) socket. Everything else is unchanged.
+**Implementation:** `6a07d5d6` (adapter classification) and `24906d35`
+(consumer-specific recovery)
 
-**Why:** tmux panes live inside the server process. If that process does not
-exist, no pane it hosted can be alive. Reading that as inconclusive left a
-session whose agent had exited **permanently un-switchable**: every Continue,
-switch and recovery answered `SWITCH_UNCERTAIN` forever. Phase 3B is the first
-feature to depend on this, because **paused-dead is a first-class MVP state**
-and an exited agent is the ordinary way a session reaches it.
+**Acceptance status:** code, review, and the targeted default-data-dir live
+replay are complete. The prior namespaced-socket dogfood remains historical;
+the supplemental default-socket record ran on exact runtime head `3c3aef51`.
 
-## The rule
+## Why the classification is typed
 
-| Probe outcome | Classification | Rationale |
+tmux panes live inside the tmux server process. Literal `no server running`
+therefore proves that the server, and every pane it hosted, is absent. It is a
+server-wide fact, not N independent per-session answers. Returning
+`(false, nil)` for every handle would let a steady board probe turn one server
+loss into mass session termination — the issue #3475 failure shape.
+
+`tmux.Runtime.IsAlive` instead returns an error wrapping
+`ports.ErrRuntimeServerAbsent`. That sentinel itself wraps
+`ErrRuntimeUnavailable`, so consumers that know only the older, broader error
+remain fail-closed. A reviewed consumer must explicitly opt into the narrower
+fact before it may launch, restore, or conclude cleanup.
+
+The classification applies to both socket kinds. The normal/default data
+directory deliberately uses tmux's default socket (`SocketForDataDir` returns
+an empty socket name there), so restricting the fact to namespaced sockets made
+the original paused-dead fix inert in the configuration users actually run.
+
+## Adapter rule
+
+| Probe outcome | Adapter result | Meaning |
 |---|---|---|
-| `has-session` succeeds | **alive** | unchanged |
-| `can't find session` / `session not found` | **dead** `(false, nil)` | unchanged; the server answered |
-| `no server running`, **namespaced** socket | **dead** `(false, nil)` | **new.** The server AO owns does not exist, so its panes do not either |
-| `no server running`, **default** socket | uncertain (`ErrRuntimeUnavailable`) | that server is shared with the human's own tmux; its absence is not a fact about AO's sessions |
-| `error connecting` (any socket) | uncertain | permission denied / stale socket is a *reachability* failure, not an answer |
-| any other stderr, non-`ExitError`, malformed handle | uncertain / error | unchanged |
+| `has-session` succeeds | `true, nil` | session is alive |
+| `can't find session` / `session not found` | `false, nil` | responding server says this session is absent |
+| literal `no server running`, namespaced socket | error wrapping `ErrRuntimeServerAbsent` | server-wide authoritative absence |
+| literal `no server running`, default socket | error wrapping `ErrRuntimeServerAbsent` | same server-wide fact on the normal install path |
+| `error connecting` | error wrapping `ErrRuntimeUnavailable` only | permission/stale-socket reachability failure; no liveness answer |
+| other stderr, non-`ExitError`, malformed handle | ordinary error | no liveness answer |
 
-Two deliberate narrowings beyond the brief:
+Only the literal absence text is classified. `error connecting` remains
+uncertain even when it mentions `No such file or directory`, because the same
+shape covers permission failures and stale sockets.
 
-1. **Only the literal absence message counts.** `serverUnreachableOutput` still
-   matches `error connecting` too, but that is a failure to obtain an answer, not
-   an answer. It keeps returning `ErrRuntimeUnavailable`.
-2. **Only namespaced sockets.** `SocketForDataDir` returns `""` for the default
-   data directory *on purpose* (continuity for an existing install's panes), so
-   the default server is shared with whatever tmux the human runs.
+## Consumer policy
 
-`destroyRuntimeProbed` is conceptually unchanged: only `(false, nil)` proves
-death. The classification moved into the adapter, which knows tmux's stderr
-vocabulary — `session_manager` does no string matching.
+The sentinel has different safe meanings at different boundaries; there is no
+global “server absent means mark every row dead” rule.
 
-## Blast radius, stated plainly
+| Consumer | `ErrRuntimeServerAbsent` behavior | Why safe |
+|---|---|---|
+| Restart Agent (`restartRuntime`) | treat old runtime as absent and create one replacement | a pane cannot survive the absent server; all other probe errors still refuse a second launch |
+| Boot live reconciliation (`reconcileLive`) | enter the existing save/teardown/restore path | boot is recovering a runtime that could not have survived; ambiguous reachability still leaves the row untouched |
+| Boot terminated-row reap (`reconcileReap`) | conclude there is no leaked runtime to collide with restore | the row is already terminated and the missing server cannot host its old pane |
+| Switch/failover teardown (`destroyRuntimeProbed`) | after targeting the handle for destruction, accept absence as confirmed teardown | the effectful saga is resolving one already-selected source handle |
+| Steady board reaper (`observe/reaper.Tick`) | keep `ProbeFailed`; never convert the error to `ProbeDead` | one server-wide event must not archive the board as N independent deaths |
 
-The socket is per **data directory**, not per session. One namespaced server
-hosts every session of a daemon, so if that server dies, this change confirms
-death for **all of them at once**. That is factually correct — those panes are
-genuinely gone — but it is the shape of issue #3475, where "a killed tmux server
-read as 28 session deaths archived the whole board".
+The steady reaper also retains its mass-death circuit breaker
+(`massDeadMinSessions = 5`, `massDeadFraction = 0.5`) for ordinary
+`(false, nil)` session answers. Typed server absence does not consume or bypass
+that breaker; it remains an error in this path.
 
-Two things bound it:
+## What the tests pin
 
-- **The reaper's mass-death circuit breaker** (`reaper.go`, `massDeadMinSessions
-  = 5`, `massDeadFraction = 0.5`) already downgrades any pass where ≥5 sessions
-  and >50% of the board conclude dead into `ProbeFailed`. That is #3475's actual
-  guard, it sits above the adapter, and this change does not touch it. Boards
-  below the threshold get exact behaviour, which is the documented intent.
-- **Uncertainty still never becomes death.** A probe *error* remains
-  `ProbeFailed` at the reaper and `SWITCH_UNCERTAIN` at the saga. Only an
-  authoritative absence answer changed meaning.
+Adapter tests use a real `*exec.ExitError`, because stderr classification runs
+only when `errors.As` finds that type. They cover:
 
-## Tests
+1. literal absence on default and namespaced sockets wraps
+   `ErrRuntimeServerAbsent` and, transitively, `ErrRuntimeUnavailable`;
+2. a missing session on a responding server remains `false, nil`;
+3. `error connecting`, permission errors, stale sockets, unknown output, and
+   malformed handles never become death;
+4. restart creates one replacement on typed default-socket absence;
+5. boot live reconciliation saves and restores once on the same boot;
+6. boot reap permits restore without trying to destroy a server that is gone;
+7. switch teardown accepts typed namespaced-server absence; and
+8. the steady reaper classifies both `ErrRuntimeServerAbsent` and ordinary
+   `ErrRuntimeUnavailable` as inconclusive.
 
-In `internal/adapters/runtime/tmux/liveness_absence_test.go`:
+## Live evidence
 
-1. missing namespaced server → confirmed dead
-2. missing session on a live server → confirmed dead (pre-existing, pinned)
-3. unexpected failure (`error connecting` ×2, unknown stderr, empty) → uncertain
-4. absent **default** server → uncertain, `ErrRuntimeUnavailable`
-5. existing session → alive
-6. malformed handle → error, not a death verdict
-7. `killSessionMissingOutput` stays generous — teardown must still treat both
-   absence and unreachability as nothing-to-kill
+The promoted matrix in [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md)
+ran before this typed default-socket correction and remains a separate dated
+evidence set. The supplemental replay used an isolated `HOME` with
+`AO_DATA_DIR` and `AO_RUN_FILE` unset, explicit profiles, an isolated
+`TMUX_TMPDIR`, and tmux's actual default socket on exact `3c3aef51`.
 
-In `internal/observe/reaper/reaper_test.go`:
+The record proved:
 
-8. an unreachable runtime stays `ProbeFailed`, never `ProbeDead` — the half of
-   the split that must not move
-9. (pre-existing) `TestTick_MassDeathPassIsReportedAsInconclusive` still guards
-   #3475 above this layer
+- a fresh no-server boot reached ready state;
+- after spawning one row/runtime, killing the exact sole server and choosing
+  Restart Agent returned 200/native with one replacement;
+- boot adopted a surviving live runtime without duplication;
+- server loss for an active row reconciled and restored exactly once;
+- a terminated saved row passed `reconcileReap` plus `RestoreAll`, consumed its
+  marker, and ended as one active row with one runtime; and
+- no boot/reconcile errors occurred (only expected GitHub/SCM warnings).
 
-`TestContinueFailover_PausedDeadSourceWorks` covers the paused-dead continuation
-at manager level; the live version is dogfood record 2.
-
-The tests construct a real `*exec.ExitError`, because `IsAlive` only inspects
-output when `errors.As` finds one — a plain error would skip the whole branch and
-pass for the wrong reason.
+Focused sentinel tests for tmux, session manager, and steady reaper passed under
+`-race`. The subsequent `663f9339` and `72f274a7` integration commits touch only
+storage and service behavior, not the runtime classification or its consumers.

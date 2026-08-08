@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,6 +108,50 @@ type roleBinding struct {
 	Model       string              `json:"model,omitempty"`
 	Permissions roleExecutionPolicy `json:"permissions"`
 	When        []string            `json:"when,omitempty"`
+}
+
+// UnmarshalJSON preserves whether required permission booleans were present in
+// --config-json. Without a presence-aware wire, the CLI would turn omission or
+// null into false and send that synthesized value to the daemon.
+func (b *roleBinding) UnmarshalJSON(data []byte) error {
+	type policyWire struct {
+		WorkspaceWrites *bool `json:"workspaceWrites"`
+		CanSpawn        *bool `json:"canSpawn"`
+	}
+	type bindingWire struct {
+		Template    string      `json:"template,omitempty"`
+		Harness     string      `json:"harness,omitempty"`
+		Model       string      `json:"model,omitempty"`
+		Permissions *policyWire `json:"permissions"`
+		When        []string    `json:"when,omitempty"`
+	}
+
+	var wire bindingWire
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil {
+		return err
+	}
+	if wire.Permissions == nil {
+		return errors.New("permissions: required")
+	}
+	if wire.Permissions.WorkspaceWrites == nil {
+		return errors.New("permissions.workspaceWrites: required boolean")
+	}
+	if wire.Permissions.CanSpawn == nil {
+		return errors.New("permissions.canSpawn: required boolean")
+	}
+	*b = roleBinding{
+		Template: wire.Template,
+		Harness:  wire.Harness,
+		Model:    wire.Model,
+		Permissions: roleExecutionPolicy{
+			WorkspaceWrites: *wire.Permissions.WorkspaceWrites,
+			CanSpawn:        *wire.Permissions.CanSpawn,
+		},
+		When: wire.When,
+	}
+	return nil
 }
 
 // failoverTarget mirrors domain.FailoverTarget.

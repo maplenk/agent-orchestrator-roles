@@ -965,19 +965,17 @@ func TestIsAliveReturnsFalseNilOnCantFindSession(t *testing.T) {
 	}
 }
 
-// A server-level failure says nothing about one session: the whole server is
-// gone (or unreachable), and the agent may still be alive as an orphan. It
-// must surface as ports.ErrRuntimeUnavailable — an inconclusive probe — never
-// as a definitive "this session is dead" (issue #3475: reading it as death
-// archived every session on the board in one pass).
-func TestIsAliveReportsNoServerAsRuntimeUnavailable(t *testing.T) {
+func TestIsAliveReportsNoServerAsTypedServerAbsence(t *testing.T) {
 	r, fr := newTestRuntime(0)
 	fr.outputs = [][]byte{[]byte("no server running on /tmp/tmux-1000/default")}
 	fr.err = &exec.ExitError{}
 
 	alive, err := r.IsAlive(context.Background(), ports.RuntimeHandle{ID: "sess-1"})
+	if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
+		t.Fatalf("IsAlive err = %v, want ports.ErrRuntimeServerAbsent", err)
+	}
 	if !errors.Is(err, ports.ErrRuntimeUnavailable) {
-		t.Fatalf("IsAlive err = %v, want ports.ErrRuntimeUnavailable", err)
+		t.Fatalf("IsAlive err = %v, want parent ports.ErrRuntimeUnavailable", err)
 	}
 	if alive {
 		t.Fatal("alive = true, want false")
@@ -992,6 +990,9 @@ func TestIsAliveReportsErrorConnectingAsRuntimeUnavailable(t *testing.T) {
 	alive, err := r.IsAlive(context.Background(), ports.RuntimeHandle{ID: "sess-1"})
 	if !errors.Is(err, ports.ErrRuntimeUnavailable) {
 		t.Fatalf("IsAlive err = %v, want ports.ErrRuntimeUnavailable", err)
+	}
+	if errors.Is(err, ports.ErrRuntimeServerAbsent) {
+		t.Fatalf("IsAlive err = %v, error connecting must not mean absent", err)
 	}
 	if alive {
 		t.Fatal("alive = true, want false")

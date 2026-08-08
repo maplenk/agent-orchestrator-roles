@@ -1,0 +1,4 @@
+#!/bin/bash
+set -euo pipefail
+stub_dir="$(cd "$(dirname "$0")" && pwd -P)"
+AO_ACCEPTANCE_PROVIDER=codex exec "$stub_dir/provider-stub" "$@"

@@ -145,13 +145,15 @@ func TestToAPIError_ChatModeRoleForbidden(t *testing.T) {
 	}
 }
 
-// Two fences, two codes. They were one code for a while: upstream's merged
+// Distinct lifecycle fences keep distinct codes. The switch and interface
+// fences were one code for a while: upstream's merged
 // INTERFACE_TRANSITION_IN_PROGRESS case matched ErrSwitchInProgress and sat
 // ABOVE the fork's SWITCH_IN_PROGRESS case, so the first branch answered for
 // both and every ordinary switch, fresh-conversation and input-fence conflict
 // told the client it was "already switching interfaces". SWITCH_IN_PROGRESS was
-// unreachable — a code with no input is indistinguishable from a code that
-// works, which is why this pins both directions.
+// unreachable. Pause has a different remedy again: explicitly resume rather
+// than waiting for either saga. A code with no input is indistinguishable from
+// a code that works, which is why this pins every direction.
 func TestToAPIError_SwitchAndInterfaceFencesKeepSeparateCodes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -159,6 +161,7 @@ func TestToAPIError_SwitchAndInterfaceFencesKeepSeparateCodes(t *testing.T) {
 		code string
 	}{
 		{"switch saga fence", sessionmanager.ErrSwitchInProgress, "SWITCH_IN_PROGRESS"},
+		{"durable pause fence", sessionmanager.ErrSwitchPaused, "SWITCH_PAUSED"},
 		{"interface transition fence", sessionmanager.ErrInterfaceTransitionInProgress, "INTERFACE_TRANSITION_IN_PROGRESS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -199,6 +202,33 @@ func TestToAPIError_LaunchCommandTooLongThroughTheFullWrapping(t *testing.T) {
 	// what to shorten is no more actionable than the 500 it replaced.
 	if !strings.Contains(apiErr.Message, "system prompt") || !strings.Contains(apiErr.Message, "task prompt") {
 		t.Errorf("message %q names neither the system prompt nor the task prompt", apiErr.Message)
+	}
+}
+
+func TestToAPIError_PostStopLaunchCommandTooLongKeepsRecoveryAndSizeRemedy(t *testing.T) {
+	fromRuntime := fmt.Errorf("runtime: %w: launch command is %d bytes, limit is %d",
+		ports.ErrRuntimeLaunchCommandTooLong, 17291, 15360)
+	joined := fmt.Errorf("switch mer-1: %w", errors.Join(sessionmanager.ErrSwitchPostStop, fromRuntime))
+
+	var apiErr *apierr.Error
+	if !errors.As(toAPIError(joined), &apiErr) {
+		t.Fatal("joined post-stop/command-size failure did not map to an apierr")
+	}
+	if apiErr.Code != "LAUNCH_COMMAND_TOO_LONG" {
+		t.Fatalf("code = %q, want LAUNCH_COMMAND_TOO_LONG", apiErr.Code)
+	}
+	if apiErr.Kind != apierr.KindConflict {
+		t.Fatalf("kind = %v, want Conflict (HTTP 409 after the source stopped)", apiErr.Kind)
+	}
+	for _, want := range []string{
+		"source stopped", "handoff", "file-backed", "terminate", "recreate", "shorter assignment",
+	} {
+		if !strings.Contains(strings.ToLower(apiErr.Message), want) {
+			t.Errorf("message %q does not preserve actionable %q context", apiErr.Message, want)
+		}
+	}
+	if strings.Contains(strings.ToLower(apiErr.Message), "before recovering the same generation") {
+		t.Fatalf("message %q falsely claims a retained generation's prompt can be shortened", apiErr.Message)
 	}
 }
 

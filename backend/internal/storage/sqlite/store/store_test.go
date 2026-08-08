@@ -2,8 +2,10 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -405,6 +407,70 @@ func TestProjectConfigRoundTrips(t *testing.T) {
 	}
 	if got, _, _ := s.GetProject(ctx, "cfg"); !got.Config.IsZero() {
 		t.Fatalf("cleared config = %#v, want zero", got.Config)
+	}
+}
+
+func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.T) {
+	dataDir := t.TempDir()
+	s := sqlitetest.MustOpenAt(t, dataDir)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "legacy-role", Path: "/tmp/legacy-role", RegisteredAt: now,
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	// Simulate a durable row whose role binding is malformed for current ingress:
+	// workspaceWrites is missing and the binding carries an unknown field.
+	rawConfig := `{
+		"defaultBranch":"develop",
+		"env":{"KEEP":"yes"},
+		"agentRules":"preserve me",
+		"roleMap":{
+			"role_map_schema_version":1,
+			"orchestratorRole":"orchestrator",
+			"roles":{"orchestrator":{
+				"template":"orchestrator",
+				"harness":"codex",
+				"permissions":{"canSpawn":true},
+				"legacyField":"persistence-only"
+			}}
+		}
+	}`
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close raw database: %v", err)
+		}
+	})
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET config = ? WHERE id = ?`, rawConfig, "legacy-role"); err != nil {
+		t.Fatalf("seed malformed persisted config: %v", err)
+	}
+
+	// Mirrors the SCM observer's origin-URL backfill: it changes an unrelated
+	// project field and writes the whole row back. The storage read must fail so
+	// the observer never receives a sanitized config it can persist.
+	if got, ok, err := s.GetProject(ctx, "legacy-role"); err == nil || ok || !got.Config.IsZero() {
+		t.Fatalf("get malformed project: got=%#v ok=%v err=%v, want decode error", got, ok, err)
+	}
+
+	var persisted sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT config FROM projects WHERE id = ?`, "legacy-role").Scan(&persisted); err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	if !persisted.Valid || persisted.String == "" {
+		t.Fatalf("persisted config = %#v, want non-zero JSON", persisted)
+	}
+	if persisted.String != rawConfig {
+		t.Fatalf("malformed config was rewritten:\n got: %s\nwant: %s", persisted.String, rawConfig)
+	}
+
+	if projects, err := s.ListProjects(ctx); err == nil || projects != nil {
+		t.Fatalf("list projects = %#v, err=%v; want decode error", projects, err)
 	}
 }
 

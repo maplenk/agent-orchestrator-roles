@@ -1,0 +1,68 @@
+#!/bin/bash
+set -euo pipefail
+
+real_tmux="${AO_ACCEPTANCE_REAL_TMUX:-}"
+data_dir="${AO_DATA_DIR:-}"
+if [[ -z "$real_tmux" || ! -x "$real_tmux" ]]; then
+	printf '%s\n' "AO_ACCEPTANCE_REAL_TMUX must name the real executable" >&2
+	exit 70
+fi
+if [[ -z "$data_dir" ]]; then
+	exec "$real_tmux" "$@"
+fi
+
+root="$(cd "$(dirname "$data_dir")" && pwd -P)"
+if [[ ! -f "$root/.ao-mvp-acceptance" || "$data_dir" != "$root/data" ]]; then
+	printf '%s\n' "acceptance tmux wrapper refused unscoped AO_DATA_DIR=$data_dir" >&2
+	exit 70
+fi
+
+command_name=""
+target=""
+expect_target=0
+expect_name=0
+for arg in "$@"; do
+	if [[ "$expect_target" == 1 ]]; then
+		target="${arg#=}"; expect_target=0; continue
+	fi
+	if [[ "$expect_name" == 1 ]]; then
+		target="$arg"; expect_name=0; continue
+	fi
+	case "$arg" in
+	list-panes | kill-session | new-session | has-session) command_name="$arg" ;;
+	-t) expect_target=1 ;;
+	-s) expect_name=1 ;;
+	esac
+done
+
+fault_dir="$root/control/tmux"
+mkdir -p "$fault_dir"
+
+# Pre-stop failure: hide pane PIDs from Destroy, reject kill-session, then let
+# the following has-session reach real tmux and prove the source is still live.
+if [[ -n "$target" && -f "$fault_dir/keep-destroy.$target" ]]; then
+	case "$command_name" in
+	list-panes | kill-session)
+		printf '%s\n' "acceptance injected conclusive pre-stop failure for $target" >&2
+		exit 72
+		;;
+	esac
+fi
+
+# Hold the manager's switch fence while a concurrent duplicate Continue runs.
+if [[ "$command_name" == "kill-session" && -n "$target" && -f "$fault_dir/delay-destroy.$target" ]]; then
+	delay="$(tr -d '[:space:]' <"$fault_dir/delay-destroy.$target")"
+	case "$delay" in
+	'' | *[!0-9]*) printf '%s\n' "invalid destroy delay" >&2; exit 73 ;;
+	esac
+	sleep "$delay"
+fi
+
+# Post-stop failure: source Destroy has already completed before the switch
+# target reaches new-session, so failing here leaves durable post_stop.
+if [[ "$command_name" == "new-session" && -n "$target" && -f "$fault_dir/fail-create.$target" ]]; then
+	printf '%s\n' "acceptance injected post-stop create failure for $target" >&2
+	exit 74
+fi
+
+exec "$real_tmux" "$@"

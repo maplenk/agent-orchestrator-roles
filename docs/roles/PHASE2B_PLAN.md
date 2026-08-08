@@ -8,9 +8,10 @@ parameterized, `FreshOrchestratorConversation` gates the project before the swit
 fence, and `ObservedOrchestratorV1` compiles the fleet into the handoff.
 **2B-2 landed** (and 2B-1 hardened after review: migration **0059** admits the new ledger kind, which the SQLite CHECK had rejected outright) — replacement intent (migration 0058) is persisted before retirement
 and boot recovery makes a zero-owner interval non-terminal; `finalizeRetirement` is
-now crash-consistent. **2B-3 is BLOCKED/DEFERRED on 1-F (Claude RO)**, not merely unstarted, so
-Phase 2B as a whole is NOT complete. Cross-harness orchestrator switch is
-deliberately refused until Claude RO lands. 2B-1 live evidence:
+now crash-consistent. **2B-3 is implemented and live-accepted for the final MVP:** strict
+orchestration no longer implies technical read-only, so a writable orchestrator
+can switch in place between Codex and Claude Code without promoting Claude's
+`read_only_enforced` cell. 2B-1 live evidence:
 `PHASE2B1_LIVE_DOGFOOD.md`.
 Written after Phase 2A close-out (`5e8476d5`).
 **Canonical design:** `MASTER_PLAN.md` §5.4. **Execution status:** `REMAINING_PLAN.md`.
@@ -39,48 +40,23 @@ side effect of Phase 2B.
 
 ---
 
-## 1. Blocking finding — read before estimating
+## 1. Final MVP policy amendment
 
-**Under `strictDelegation`, an orchestrator can only ever be Codex, so
-cross-harness orchestrator switch is currently impossible on the strict path.**
+`strictDelegation` is the host-enforced routing and delegation boundary: it
+pins the role, rejects caller harness/model overrides, requires orchestrator
+spawn authority, and injects the coordination-only contract. It does **not**
+claim that the orchestrator is physically unable to write.
 
-Chain of constraints, each verified against the runtime registry:
+The orchestrator role may therefore set `workspaceWrites:true`. In that shape,
+both Codex and Claude Code are valid primary/ladder targets and 2B-3 is
+available on the strict product path. The role template still instructs the
+model to coordinate and delegate rather than implement; violation is model
+failure, not a sandbox escape.
 
-1. `RoleMap.Validate` requires the orchestrator role to be
-   `workspaceWrites:false` under strict delegation (`domain/rolemap.go:207-213`).
-2. `workspaceWrites:false` requires `read_only_enforced`
-   (`capabilities.go:117-119`).
-3. Only **Codex** has `read_only_enforced=true` (`capabilities.go:38-44`);
-   Claude is deliberately false pending 1-B.
-4. Failover rungs inherit the owning role's permissions
-   (`capabilities.go:98-105`), so a strict orchestrator ladder also cannot
-   contain Claude.
-5. `SwitchWorker` re-checks RO on the target before launch
-   (`session_manager/switch.go:88-92`).
-
-Probed directly against `ValidateRoleMap` + `RoleAuthorizedSwitchTargets`:
-
-```text
-strict orch primary=codex        -> valid
-strict orch primary=claude-code  -> workspaceWrites=false requires read_only_enforced (got false)
-strict orch primary=pi           -> workspaceWrites=false requires read_only_enforced (got false)
-strict orch codex + claude ladder-> failover.roles[orchestrator][0]: ... read_only_enforced (got false)
-authorized switch targets for orchestrator: [{Harness:codex Model:}]
-```
-
-**Consequence.** For a strict project the only legal in-place operation is
-`codex → codex`, which `resolveSwitchTarget` (`switch.go:613-623`) classifies as
-`fresh_conversation`, not `switch`.
-
-That is still worth building — the orchestrator is the longest-lived session in
-any project and therefore the worst P1 context-exhaustion offender, and
-MASTER_PLAN §5.3 already defines same-harness fresh conversation as the P1
-remedy. But it must be named honestly.
-
-**Roadmap correction.** `AGENT_HANDOFF.md` §8.2 lists 1-B (Claude RO) as
-"parallel optional — does not block 2B". That is true for 2B-1 and 2B-2 below
-and **false for 2B-3**: cross-harness orchestrator switch on strict projects is
-blocked on Claude RO. Non-strict projects are unaffected.
+This does not weaken the executable read-only contract. Any role explicitly
+configured with `workspaceWrites:false` still requires
+`read_only_enforced=true` at config-save, launch, switch, and recovery. Claude
+Code remains `read_only_enforced=false` and is still rejected for that role.
 
 ---
 
@@ -357,7 +333,7 @@ either path preserves now, which is the concrete P1 win for this phase.
 | ~~**2B-0b**~~ | **Coordinator uniqueness**: migration 0057 partial unique index, plus the reconciliation spec in §3.2b (deterministic survivor, marker neutralization, probe-authoritative reap, restore preflight). Closes **D1**. **Remaining acceptance criterion — boot must not serve on an unresolved launch cleanup.** `Reconcile` runs the terminated-session reap pass *before* `RestoreAll`, so a relaunch whose runtime survived teardown is not swept until the next restart. `ErrLaunchCleanupUnresolved` is now carried by every hop **inside** Session Manager: the launch rollback returns it for every unconfirmed death (recorded or not — recording makes a survivor reapable *eventually*, not gone), and both places boot can lose it now collect and return it instead of logging. Those places are **two**, not one, and the second is the easy one to miss: `RestoreAll`'s terminated-session restores, **and** `Reconcile`'s post_stop recovery, whose session stays deliberately ACTIVE (`KeepSessionOnLaunchFailure` — a terminated session is unrecoverable) and is therefore invisible to the live pass, which skips a pending switch, and to `RestoreAll`, which only walks terminated rows. Both feed `Reconcile`'s single return — including through its mandatory re-list, whose failure must be *joined* with what was already collected rather than returned bare. **The daemon hop is now closed too**: `Reconcile`'s error aborts boot when (and only when) it carries `ErrLaunchCleanupUnresolved`, every other failure staying logged so an unrelated store hiccup cannot stop the daemon starting. Making that gate meaningful required **moving it**: it previously ran after `browserruntime.Listen`/`Serve` and `restoreMobileOnBoot`, so a fatal return would still have exposed live surfaces first. Session reconciliation now sits immediately after the reap-queue drain and the shell sweep, ahead of the API server's construction, the preview poller, the browser runtime, the mobile LAN listener, the supervisor and `srv.Run` — pinned by `boot_order_test.go`, which checks both fatal gates against one shared list of client-facing steps. **The `RestoreAll` gate is now closed too**, which was the last ungated path able to create a duplicate: it restores at most one orchestrator per project, holding that project's gate across **both** the survivor decision and the restore, because `workspace.Restore` adopts the shared canonical worktree before any row flips — so the index never sees the damage and splitting the two would reintroduce the race. Losing candidates, and candidates displaced by an already-live owner (Reconcile's adopt pass runs first), have their markers neutralized exactly as 0057 does to its losers — marker rows only, never the preserved ref — since a surviving marker is retried every boot. `activeOrchestratorSessionID` was collapsed onto `newestOrchestratorRecord` as well: first-match-in-list-order returned the OLDEST active orchestrator, so any worker spawned while two were briefly active was told to report to the one being superseded | done | 2B-0a |
 | ~~**2B-1**~~ | **Landed.** Orchestrator in-place **fresh conversation**: parameterize the `KindWorker` guards (`switch.go:64`, `:254`, `manager.go:1673`, `service/session/switch.go:59`), `Reconcile` recovery for orchestrators, `ObservedOrchestratorV1` handoff, new ledger kind | 2–3 d | 2B-0b |
 | ~~**2B-2**~~ | **Landed.** Replacement **durable recoverability**: persist replacement intent before retirement so a zero-owner interval is always auto-recovered (**D2a**/**D2b**, per DoD 5b). Also owns the **two-write retirement failure window**: `finalizeRetirement` marks terminated and releases the workspace claim as separate writes. The **order was inverted** to pick the safer residue — marking terminated first means a crash between the writes leaves a terminated row still naming the canonical workspace, which `reconcileOrchestratorRetirement` repairs on boot. The old ordering left an *active* row with no workspace claim: that occupies the single active-orchestrator slot from migration 0057 and is returned as the project's owner, so the damage is served rather than repaired. Boot repairs **both** residues, since databases written by the old ordering still exist | 1–2 d | 2B-0b |
-| **2B-3** | **Cross-harness** orchestrator switch | 1–2 d | 2B-1. non-strict only; **strict blocked on 1-B (Claude RO)** |
+| **2B-3** | **Implemented and live-accepted.** In-place Codex↔Claude orchestrator switch through the manager-owned project gate, exact role-map authorization, existing switch fence/ledger/handoff, and same-generation recovery. Session/worktree/branch/role/template/permissions stay stable; credential rotates | done | 2B-1 + final MVP strict-policy amendment |
 | *deferred* | Successor-session handoff (new session id, worker rebind push) | — | 2B-2; needs both a live-worker rebind mechanism and worktree-release sequencing (§2.1b), neither of which exists |
 
 Estimate for 2B-0a..2B-3 ≈ **6–11 working days**, versus the 3–5 in
@@ -424,8 +400,9 @@ generation-ownership failures Phase 2A spent its review budget eliminating.
   must not claim it does.
 - **No automated re-engagement / re-nudging.** Explicitly out of scope; see the
   `0038`/`0039` revert.
-- **No cross-harness orchestrator switch on strict projects** until Claude RO
-  (1-B) lands. Non-strict only.
+- **No technical read-only claim for a writable strict orchestrator.** Claude
+  remains `read_only_enforced=false`; an explicitly read-only orchestrator
+  still rejects it.
 - **No live-worker rebind.** Not needed for in-place; required before
   successor-session handoff is viable.
 - **No limit detection or failover.** Phase 3.

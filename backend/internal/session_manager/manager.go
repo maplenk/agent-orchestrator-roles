@@ -79,6 +79,11 @@ var (
 	// controller. Lifting this needs stop and recovery for that controller, not
 	// a relaxed precondition.
 	ErrSwitchChatUnsupported = errors.New("session: switch is not supported for chat sessions yet")
+	// ErrSwitchPaused means an ordinary switch/fresh request tried to relaunch a
+	// session while its durable pause pin was held. Pause forbids AO-initiated
+	// restart; worker Continue is the explicit operator-owned failover remedy,
+	// while an orchestrator must first be resumed deliberately.
+	ErrSwitchPaused = errors.New("session: switch is not allowed while paused")
 	// ErrSwitchNotSupported means source/target harness lacks switch_supported.
 	ErrSwitchNotSupported = errors.New("session: harness does not support switch")
 	// ErrSwitchPostStop means the source runtime was already stopped; the
@@ -90,11 +95,10 @@ var (
 	// ErrNotOrchestrator means an orchestrator-only operation was asked for a
 	// worker session.
 	ErrNotOrchestrator = errors.New("session: orchestrator kind required")
-	// ErrOrchestratorCrossHarness means a cross-harness orchestrator switch was
-	// requested. Deferred to 2B-3 and blocked on Claude read-only enforcement:
-	// a strict orchestrator must be workspaceWrites:false, which only Codex can
-	// satisfy today, so codex→codex (a fresh conversation) is the only legal
-	// strict in-place move.
+	// ErrOrchestratorCrossHarness is retained for wire/error compatibility with
+	// older callers. Cross-harness orchestrator switching now enters through the
+	// gated SwitchOrchestrator path; the worker entry point still rejects an
+	// orchestrator before any runtime effect.
 	ErrOrchestratorCrossHarness = errors.New("session: cross-harness orchestrator switch is not supported yet")
 	// ErrSwitchNothingToRecover means no incomplete post_stop saga exists for
 	// the session (already acked, never reached post_stop, or not a switch).
@@ -1265,6 +1269,14 @@ var ErrLaunchCleanupUnresolved = fmt.Errorf("%w: launch cleanup unresolved", Err
 // read model that boot has already disproved is worse than not serving.
 var ErrPausedLivenessUnresolved = fmt.Errorf("%w: paused session liveness not recorded", ErrBootUnsafe)
 
+// ErrRuntimeReapUnresolved means boot could not prove that a terminated
+// session's recorded runtime is absent. A shutdown-saved row is eligible for
+// RestoreAll immediately after the reap pass, so treating probe uncertainty as
+// an ordinary skip can relaunch the row beside the runtime the failed probe did
+// not disprove. The same classification covers a known-live runtime whose
+// Destroy failed: in both cases restore must not run during this boot.
+var ErrRuntimeReapUnresolved = fmt.Errorf("%w: terminated runtime reap unresolved", ErrBootUnsafe)
+
 // reapFailedLaunchRuntime tears down the runtime of a launch that could not be
 // adopted, and reports whether its death is CONFIRMED.
 //
@@ -2348,12 +2360,13 @@ func (m *Manager) parkFailedRelaunch(ctx context.Context, operation string, id d
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		if !errors.Is(err, ports.ErrRuntimeUnavailable) {
+		if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
+			// Permission failures, stale sockets, and every unclassified probe
+			// error remain inconclusive: never launch beside a possibly-live agent.
 			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
 		}
-		// The runtime infrastructure itself is gone (e.g. the tmux server was
-		// killed). Restore/restart is exactly the recovery path for that
-		// outage, so proceed as "no existing runtime" and create a fresh one.
+		// A pane cannot survive an absent tmux server. Restart Agent may create a
+		// replacement without first destroying a runtime that no longer exists.
 		alive = false
 	}
 	if alive {
@@ -2519,17 +2532,15 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 	if !isChat {
 		if handle.ID != "" {
 			alive, err := m.runtime.IsAlive(ctx, handle)
-			switch {
-			case err == nil:
-			case errors.Is(err, ports.ErrRuntimeUnavailable):
-				// Boot-time pass with no reachable tmux server (normal after a
-				// machine reboot). The runtime is gone either way; fall through
-				// to save-and-teardown, which keeps the restore marker rather
-				// than silently archiving the session.
+			if err != nil {
+				if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
+					// A failed probe is not proof of death. Permission failures,
+					// stale sockets, and every other error leave the session untouched.
+					return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
+				}
+				// Normal after reboot: the tmux server is authoritatively absent.
+				// Reuse the established save/teardown/restore path below.
 				alive = false
-			default:
-				// A failed probe is not proof of death: leave the session as-is.
-				return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
 			}
 			if alive {
 				return nil // adopt: the session survived the crash.
@@ -2570,7 +2581,12 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 // reconcileReap kills the leaked tmux session of a session the DB already marks
 // terminated. This covers the teardown that marked the row terminated but failed
 // to kill the runtime (e.g. ForceDestroy/Destroy errored after MarkTerminated).
-// Destroy is idempotent, so an already-gone session is a no-op.
+// Destroy is idempotent, so an already-gone session is a no-op. Probe failures
+// are boot-unsafe rather than ordinary per-row failures: this pass exists to
+// establish that RestoreAll cannot launch beside an old runtime, and an error
+// establishes nothing. Typed server absence is the one error that proves there
+// is no leaked runtime to collide with restore; every other error remains
+// boot-unsafe.
 func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) error {
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID == "" {
@@ -2578,16 +2594,16 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 	}
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		if errors.Is(err, ports.ErrRuntimeUnavailable) {
-			return nil // no server means no leaked session to reap
+		if errors.Is(err, ports.ErrRuntimeServerAbsent) {
+			return nil
 		}
-		return fmt.Errorf("reconcile reap %s: probe: %w", rec.ID, err)
+		return fmt.Errorf("%w: session %s probe: %w", ErrRuntimeReapUnresolved, rec.ID, err)
 	}
 	if !alive {
 		return nil
 	}
 	if err := m.runtime.Destroy(ctx, handle); err != nil {
-		return fmt.Errorf("reconcile reap %s: destroy: %w", rec.ID, err)
+		return fmt.Errorf("%w: session %s destroy: %w", ErrRuntimeReapUnresolved, rec.ID, err)
 	}
 	return nil
 }
@@ -2607,14 +2623,13 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 //     collide with a leaked tmux of the same name.
 //  4. Restore pass: relaunch shutdown-saved sessions (existing RestoreAll).
 //
-// Best-effort throughout, with ONE exception: a pass that leaves a runtime
-// executing which nothing is scheduled to sweep (ErrLaunchCleanupUnresolved) is
-// collected and returned rather than logged. Every other per-session failure is
-// logged and never aborts the pass. Both loss points feed the same return —
-// post_stop recovery below, whose session stays ACTIVE and is therefore
-// invisible to every later pass, and RestoreAll's terminated-session restores.
-// The daemon treats that return as FATAL, ahead of every client-facing surface
-// (daemon.go, pinned by boot_order_test.go).
+// Best-effort passes continue collecting safe work, but every ErrBootUnsafe
+// child is returned before RestoreAll. That ordering is load-bearing: a
+// terminated row whose old runtime could not be disproved must not be relaunched
+// beside it. RestoreAll's own boot-unsafe outcomes are still returned after the
+// restore pass because they arise during that pass. The daemon treats either
+// return as FATAL, ahead of every client-facing surface (daemon.go, pinned by
+// boot_order_test.go).
 func (m *Manager) Reconcile(ctx context.Context) error {
 	m.startTransitionMessageDispatcher(ctx)
 	_, err := m.recoverInterruptedInterfaceTransitions(ctx)
@@ -2700,12 +2715,18 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			m.logger.Error("reconcile: reap pass failed, skipping", "sessionID", rec.ID, "error", err)
 		}
 	}
-	// RestoreAll's error joins the unresolved boot-safety errors rather than
-	// replacing them: a boot that could not resolve a restore marker must stay
-	// unsafe even if the restore pass itself succeeded.
-	//
-	// errors.Join drops nils, so a healthy pass still returns nil.
-	if err := errors.Join(append(unresolved, m.RestoreAll(ctx))...); err != nil {
+	// Restore is the first pass that launches terminated rows. Any boot-unsafe
+	// finding collected before this point means the precondition for launching
+	// them was not established. Continue the earlier per-row passes so unrelated
+	// cleanup can make progress, then stop here before workspace adoption or
+	// runtime creation.
+	if len(unresolved) > 0 {
+		return errors.Join(unresolved...)
+	}
+	// RestoreAll can itself discover a boot-unsafe condition while the restore
+	// pass is running. Surface it unchanged; every pre-restore finding already
+	// returned above.
+	if err := m.RestoreAll(ctx); err != nil {
 		return err
 	}
 	// Upstream's transition outbox runs only on a boot that reached here

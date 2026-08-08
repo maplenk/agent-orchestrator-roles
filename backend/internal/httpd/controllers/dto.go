@@ -158,6 +158,36 @@ type SessionView struct {
 	// null only for the ordinary session that is both unpaused and has no ladder.
 	// No client resolves or supplies a target.
 	Failover *SessionFailoverView `json:"failover" nullable:"true"`
+	// Switch is the orchestrator-only role-map switch read model. Ordinary
+	// workers keep this null and incur no project lookup.
+	Switch *SessionSwitchView `json:"switch" nullable:"true"`
+}
+
+// SessionSwitchTarget is one exact host-authorized harness/model pair.
+type SessionSwitchTarget struct {
+	Harness domain.AgentHarness `json:"harness"`
+	Model   string              `json:"model"`
+}
+
+// SessionSwitchPendingView exposes only lifecycle facts the operator needs.
+// The persisted handoff payload and source runtime handle never cross the API.
+type SessionSwitchPendingView struct {
+	GenerationID string                     `json:"generationId"`
+	Kind         domain.LifecycleLedgerKind `json:"kind" enum:"switch,fresh_conversation,orchestrator_fresh_conversation"`
+	From         SessionSwitchTarget        `json:"from"`
+	To           SessionSwitchTarget        `json:"to"`
+}
+
+// SessionSwitchView is the safe orchestrator switch preview. `unavailable`
+// means resolution could not produce a usable offer (including a committed
+// session mode that cannot enter the saga) and therefore never carries a target.
+type SessionSwitchView struct {
+	Available bool                      `json:"available"`
+	RoleID    string                    `json:"roleId"`
+	Current   SessionSwitchTarget       `json:"current"`
+	Targets   []SessionSwitchTarget     `json:"targets"`
+	Pending   *SessionSwitchPendingView `json:"pending" nullable:"true"`
+	Reason    string                    `json:"reason" enum:",no_role_pin,no_role_map,role_not_in_map,no_target,in_progress,paused,terminated,unavailable"`
 }
 
 // SessionFailoverTarget is a host-authorized failover destination.

@@ -3,12 +3,19 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 )
+
+type switchPRFailureStore struct{ *fakeStore }
+
+func (s *switchPRFailureStore) ListPRFactsForSession(context.Context, domain.SessionID) ([]domain.PRFacts, error) {
+	return nil, fmt.Errorf("injected PR facts failure")
+}
 
 func seedSwitchSession(st *fakeStore, id domain.SessionID, harness domain.AgentHarness) {
 	st.projects["mer"] = domain.ProjectRecord{
@@ -64,6 +71,53 @@ func TestSwitchWorker_AuthorizesFailoverTarget(t *testing.T) {
 	}
 }
 
+func TestSwitchOutcome_HydrationFailureCannotReverseCommittedSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		run   func(*Service, domain.SessionID) (SwitchWorkerOutcome, error)
+		calls func(*fakeCommander) int
+	}{
+		{
+			name: "switch",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+					SessionID: id, TargetHarness: domain.HarnessCodex,
+				})
+			},
+			calls: func(cmd *fakeCommander) int { return cmd.switchCalls },
+		},
+		{
+			name: "fresh",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.FreshConversation(context.Background(), id, "refresh")
+			},
+			calls: func(cmd *fakeCommander) int { return cmd.freshCalls },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeStore()
+			id := domain.SessionID("mer-1")
+			seedSwitchSession(base, id, domain.HarnessClaudeCode)
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: &switchPRFailureStore{fakeStore: base}})
+
+			out, err := tc.run(svc, id)
+			if err != nil {
+				t.Fatalf("committed mutation reported failure: %v", err)
+			}
+			if tc.calls(cmd) != 1 {
+				t.Fatalf("manager calls = %d, want exactly one", tc.calls(cmd))
+			}
+			if out.Session.ID != id || out.GenerationID == "" || out.Kind == "" {
+				t.Fatalf("committed identity lost from fallback response: %+v", out)
+			}
+			if len(out.Session.PRs) != 0 {
+				t.Fatalf("fallback response invented PR facts: %+v", out.Session.PRs)
+			}
+		})
+	}
+}
+
 func TestSwitchWorker_RejectsUnauthorizedHarness(t *testing.T) {
 	st := newFakeStore()
 	id := domain.SessionID("mer-1")
@@ -109,6 +163,108 @@ func TestSwitchWorker_MapsNotSupported(t *testing.T) {
 	var ae *apierr.Error
 	if !errors.As(err, &ae) || ae.Code != "SWITCH_NOT_SUPPORTED" {
 		t.Fatalf("err=%v want SWITCH_NOT_SUPPORTED", err)
+	}
+}
+
+func TestSwitchWorker_ChatModeRefusesEveryEntryBeforeAuthorizationOrManager(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*Service, domain.SessionID) (SwitchWorkerOutcome, error)
+	}{
+		{
+			name: "fresh endpoint",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.FreshConversation(context.Background(), id, "refresh")
+			},
+		},
+		{
+			name: "same harness switch",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+					SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+				})
+			},
+		},
+		{
+			name: "cross harness switch",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+					SessionID: id, TargetHarness: domain.HarnessCodex,
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			id := domain.SessionID("mer-1")
+			// Deliberately no project config and no durable role pin. Chat-mode
+			// refusal must outrank target authorization for every entry point.
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", Kind: domain.KindOrchestrator,
+				Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeChat,
+			}
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+
+			_, err := tc.run(svc, id)
+			var apiErr *apierr.Error
+			if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindConflict || apiErr.Code != "SWITCH_CHAT_UNSUPPORTED" {
+				t.Fatalf("err=%v, want 409 SWITCH_CHAT_UNSUPPORTED", err)
+			}
+			if cmd.switchCalls != 0 || cmd.orchestratorSwitchCalls != 0 || cmd.freshCalls != 0 || cmd.orchestratorFreshCalls != 0 {
+				t.Fatalf("manager calls worker/orchestrator/fresh/orchestratorFresh = %d/%d/%d/%d, want all zero",
+					cmd.switchCalls, cmd.orchestratorSwitchCalls, cmd.freshCalls, cmd.orchestratorFreshCalls)
+			}
+		})
+	}
+}
+
+func TestSwitchWorker_ChatPreflightPreservesDurableStateOrdering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rec  func(domain.SessionRecord) domain.SessionRecord
+		code string
+	}{
+		{
+			name: "terminated outranks chat",
+			rec: func(rec domain.SessionRecord) domain.SessionRecord {
+				rec.IsTerminated = true
+				return rec
+			},
+			code: "SESSION_TERMINATED",
+		},
+		{
+			name: "pause outranks chat",
+			rec: func(rec domain.SessionRecord) domain.SessionRecord {
+				rec.Metadata.Pause = &domain.SessionPause{IncidentID: "limit-1"}
+				return rec
+			},
+			code: "SWITCH_PAUSED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			id := domain.SessionID("mer-1")
+			rec := domain.SessionRecord{
+				ID: id, ProjectID: "mer", Kind: domain.KindOrchestrator,
+				Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeChat,
+			}
+			st.sessions[id] = tc.rec(rec)
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+
+			_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+				SessionID: id, TargetHarness: domain.HarnessCodex,
+			})
+			var apiErr *apierr.Error
+			if !errors.As(err, &apiErr) || apiErr.Code != tc.code {
+				t.Fatalf("err=%v, want %s", err, tc.code)
+			}
+			if cmd.switchCalls+cmd.orchestratorSwitchCalls+cmd.freshCalls+cmd.orchestratorFreshCalls != 0 {
+				t.Fatal("durable-state refusal reached the manager")
+			}
+		})
 	}
 }
 
@@ -244,7 +400,7 @@ func TestSwitchWorker_CrossHarnessStillRequiresRolePin(t *testing.T) {
 // TestSwitchWorker_OrchestratorCrossHarnessIsConflict: the request is
 // well-formed and the harness is real; what is unavailable is the state
 // transition. Clients distinguish that from malformed input.
-func TestSwitchWorker_OrchestratorCrossHarnessIsConflict(t *testing.T) {
+func TestSwitchWorker_OrchestratorCrossHarnessUsesGatedEntryPoint(t *testing.T) {
 	st := newFakeStore()
 	id := domain.SessionID("mer-1")
 	seedSwitchSession(st, id, domain.HarnessClaudeCode)
@@ -254,22 +410,18 @@ func TestSwitchWorker_OrchestratorCrossHarnessIsConflict(t *testing.T) {
 
 	cmd := &fakeCommander{}
 	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
-	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+	out, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
 		SessionID: id, TargetHarness: domain.HarnessCodex,
 	})
-
-	var apiErr *apierr.Error
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("err = %v, want an apierr", err)
+	if err != nil {
+		t.Fatalf("orchestrator switch: %v", err)
 	}
-	if apiErr.Kind != apierr.KindConflict {
-		t.Fatalf("kind = %v, want Conflict: a refused state transition is not malformed input", apiErr.Kind)
+	if cmd.orchestratorSwitchCalls != 1 || cmd.switchCalls != 0 || cmd.orchestratorFreshCalls != 0 {
+		t.Fatalf("dispatch: orchestratorSwitch=%d workerSwitch=%d fresh=%d",
+			cmd.orchestratorSwitchCalls, cmd.switchCalls, cmd.orchestratorFreshCalls)
 	}
-	if apiErr.Code != "ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED" {
-		t.Errorf("code = %q", apiErr.Code)
-	}
-	if cmd.orchestratorFreshCalls != 0 || cmd.switchCalls != 0 {
-		t.Error("the manager was called despite the refusal")
+	if out.Kind != domain.LifecycleKindSwitch {
+		t.Fatalf("kind=%q want switch", out.Kind)
 	}
 }
 
@@ -320,5 +472,162 @@ func TestSwitchWorker_AmbiguousModelRequiresExplicit(t *testing.T) {
 	}
 	if out.GenerationID == "" {
 		t.Fatal("missing generation")
+	}
+}
+
+func TestSwitchPreview_WorkerDoesNotReadProject(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), st.sessions[id])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("project reads=%d, want zero for ordinary worker", got)
+	}
+	if preview.Available || len(preview.Targets) != 0 {
+		t.Fatalf("worker preview=%+v", preview)
+	}
+}
+
+func TestSwitchPreview_ChatOrchestratorIsUnavailableWithoutProjectRead(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Mode = domain.SessionModeChat
+	st.sessions[id] = rec
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonUnavailable || len(preview.Targets) != 0 {
+		t.Fatalf("chat preview=%+v, want unavailable with no targets", preview)
+	}
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("chat preview read project %d time(s), want zero", got)
+	}
+}
+
+func TestSwitchPreview_ExactRoleMapModels(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.Role.ResolvedModel = "opus"
+	st.sessions[id] = rec
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Roles["implementor"] = []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: "o3"},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+		// Same-harness means Fresh Conversation, not a model switch.
+		{Harness: domain.HarnessClaudeCode, Model: "sonnet"},
+	}
+	st.projects["mer"] = project
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Available || preview.Reason != "" {
+		t.Fatalf("preview=%+v", preview)
+	}
+	if preview.Current.Harness != domain.HarnessClaudeCode || preview.Current.Model != "opus" {
+		t.Fatalf("current=%+v", preview.Current)
+	}
+	want := []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: "o3"},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+	}
+	if len(preview.Targets) != len(want) {
+		t.Fatalf("targets=%+v want %+v", preview.Targets, want)
+	}
+	for i := range want {
+		if preview.Targets[i] != want[i] {
+			t.Fatalf("targets[%d]=%+v want %+v", i, preview.Targets[i], want[i])
+		}
+	}
+}
+
+func TestSwitchPreview_DoesNotAdvertiseAmbiguousProviderDefault(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	st.sessions[id] = rec
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Roles["implementor"] = []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: ""},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+	}
+	st.projects["mer"] = project
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []domain.FailoverTarget{{Harness: domain.HarnessCodex, Model: "o4"}}
+	if len(preview.Targets) != 1 || preview.Targets[0] != want[0] {
+		t.Fatalf("preview advertised an API-unrepresentable default target: %+v", preview.Targets)
+	}
+	if !preview.Available {
+		t.Fatalf("fixed exact target should remain available: %+v", preview)
+	}
+}
+
+func TestSwitchPreview_PausedOrchestratorRefusesAllLifecycleActions(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: "limit-1"}
+	st.sessions[id] = rec
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonPaused || len(preview.Targets) != 0 {
+		t.Fatalf("paused preview = %+v", preview)
+	}
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("paused preview read project %d time(s), want zero", got)
+	}
+}
+
+func TestSwitchPreview_PendingUsesDurableTargetWithoutProjectRead(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-pending", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		FromModel: "opus", ToModel: "o3", PayloadJSON: `{"secret":"not a read model"}`,
+	}
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonInProgress || preview.Pending == nil {
+		t.Fatalf("preview=%+v", preview)
+	}
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("project reads=%d, want zero for durable pending state", got)
 	}
 }

@@ -3,8 +3,20 @@
 > **Superseded checkpoint (written 2026-08-04).** Keep this for the detailed
 > Phase 1/2 history, but do not follow its branch, CI-debt or “start Phase 3A”
 > instructions. Current execution status is in
-> [`REMAINING_PLAN.md`](REMAINING_PLAN.md); the Sync 2 record and what follows it
-> are in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
+> [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md) and
+> [`REMAINING_PLAN.md`](REMAINING_PLAN.md).
+
+> **Current close-out (2026-08-08):** implementation and runner are accepted at
+> `166e9e63`; promoted live evidence is `322f9c18`. The exact race run found
+> zero data races. Chat rollback is classified and fixed test-only at
+> `f8883529`, and the SQLite race package passed in 622.846s. The ordinary full
+> backend run fails only the known untouched fake/kilocode/opencode wall-clock
+> trio. On exact head `f8883529`, static checks and typecheck pass; one frontend
+> test fails deterministically and API drift passes. The failure reproduces on
+> pre-MVP baseline `be4321d1` with the relevant files unchanged. Test-only fix
+> `56638949`, integrated as `6473b134`, passes 20/20 exact and 28/28 full-file
+> runs with the negative timeout retained. Do not restart an older phase or
+> rerun accepted live evidence from the historical priority lists below.
 
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
 **Written:** 2026-08-04 (after Phase 2A close-out accept + `SwitchSupported` promotion).  
@@ -27,10 +39,10 @@
 | **`switch_supported`** | **true** for `claude-code` and `codex` only |
 | **`limit_detection_supported`** | **false** everywhere production — do not flip |
 | **`read_only_enforced`** | **true only for Codex**; Claude/Pi false by design for now |
-| **Phase 2B** | **2B-0a / 0b / 1 / 2 landed** (see `PHASE2B_PLAN.md`); **2B-3 blocked** — a strict orchestrator must be `workspaceWrites:false`, which needs `read_only_enforced`, which only Codex has |
-| **Critical path next** | **Phase 3A — structured limit envelopes + durable pause** (independent of Claude RO) |
-| **Parallel optional** | Phase 1-F strict dogfood / Claude RO (1-B) — no longer merely optional: it is what unblocks 2B-3 |
-| **CI-blocking debt** | `golangci-lint` is **not clean** on this branch and `go.yml` blocks at zero findings — fix before any merge |
+| **Phase 2B** | **2B-0a / 0b / 1 / 2 / final-MVP 2B-3 implemented and live-accepted.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
+| **Critical path next** | Record the verified MVP/static/API/full-frontend gate as complete while keeping it distinct from the still non-green full-repository suite |
+| **Parallel optional** | Phase 1-F / Claude RO (1-B) for explicitly read-only Claude roles; 2B-3 no longer depends on it |
+| **Current clean gate** | **Not fully green repository-wide.** Zero races; SQLite exact 5/5 and package race passed; Chat test race fixed at `f8883529`; static/typecheck/API drift and full frontend (151/151 files, 2040/2040 tests) pass at `6473b134`; ordinary full fails only the known untouched wall-clock trio. Live acceptance passed on `166e9e63` and is recorded at `322f9c18` |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -334,8 +346,12 @@ Do not claim these in docs, PRs, or dogfood:
 3. **Claude RO** (`read_only_enforced=false`)
 4. **Pi switch** or other harness switch
 5. **Limit detection / durable pause / auto-failover runtime**
-6. **Cross-harness orchestrator switch** (2B-3) — blocked on Claude RO. In-place orchestrator fresh conversation (2B-1) and durable replacement recoverability (2B-2) **have** landed; successor-session handoff and live-worker rebind remain deferred non-claims
-7. Full `go test ./...` green as a formal gate (prefer focused packages; expand when doing 1-F)
+6. **Accepted live proof for the final integrated orchestrator switch.** The
+   in-place Codex↔Claude path is implemented; its two live records remain
+   pending on the combined SHA. Successor-session handoff/live-worker rebind
+   remain deferred.
+7. Final combined-SHA acceptance until the clean integration gate and all 14
+   live records (12 workers plus both orchestrator directions) are captured.
 
 ---
 
@@ -374,7 +390,7 @@ Suggested first steps for 2B:
 | 1-C registry | Done for current cells | |
 | 1-D role-map surface | Done | |
 | 1-E template authority | Done Option A | |
-| 1-F full verification + strict dogfood | **Open** | Full test suite, strict orch RO as daily driver |
+| 1-F full verification + strict dogfood | **Open** | Full test suite; writable strict orchestrator plus separately explicit RO roles |
 
 ### 8.3 Phase 3A — Limits + durable pause (~4–6 d)
 
@@ -525,34 +541,23 @@ High-level protocol used successfully:
 
 ## 14. Immediate next action for the successor agent
 
-1. `git fetch && git checkout roles/multi-sub-v1 && git pull` — confirm HEAD ≥ `7545304d`
-2. Read (in order):
-   - this file
-   - `REMAINING_PLAN.md` (snapshot + §2 remaining)
-   - `MASTER_PLAN.md` §5.4 (orch switch) + §8–10
-   - skim `PHASE2A_LIVE_DOGFOOD.md` (lessons 5.5–5.7)
-3. **Start Phase 3A** — 2B-0a/0b/1/2 have landed and 2B-3 is blocked on Claude RO,
-   so 3A (structured limit envelopes → durable pause → zero automatic
-   send/restart) is the critical path unless the human prioritizes Claude RO / 1-F:
-   - Read `PHASE2B_PLAN.md` + `PHASE2B1_LIVE_DOGFOOD.md` first — the switch saga,
-     fences and ledger 3A extends are documented there
-   - Implement in thin vertical slices with tests
-   - Keep `limit_detection_supported` **false** until structured-limit tests exist
-4. On each land: update `REMAINING_PLAN.md`, run focused tests, prefer push after human accept of risky slices
-5. **Never** promote `limit_detection_supported` without Phase 3 evidence
-6. **Do not** reopen 2A switch promotion without a production regression
+1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md`.
+2. Record the verified MVP/static/API and full frontend gate at `6473b134`.
+3. Keep that result distinct from the full repository suite, which remains
+   non-green while the known wall-clock trio fails.
+4. Do not rerun the accepted worker/orchestrator matrix merely because the
+   separate gate is open. Keep `limit_detection_supported=false` and Claude
+   `read_only_enforced=false`; neither is promoted by this MVP.
 
 ---
 
-## 15. Suggested first message to the human
+## 15. Priority is already decided
 
-Confirm priority:
-
-- **A (default):** Phase 2B orchestrator ownership transfer  
-- **B:** Phase 1-B Claude RO  
-- **C:** Phase 1-F full suite + strict dogfood  
-
-Then proceed without re-litigating 2A.
+Do not ask the human to choose among Phase 2B, Claude RO, or Phase 1-F. The
+current priority is the final MVP repository-gate completion in
+`MVP_FINAL_SPEC.md`. Implementation, independent review, and promoted live
+acceptance are already complete. Claude RO is optional post-MVP work for
+explicit read-only roles and no longer gates writable strict switching.
 
 ---
 

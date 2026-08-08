@@ -215,6 +215,72 @@ export function toSessionFailover(raw: unknown): SessionFailoverView | undefined
 	};
 }
 
+/** Host-resolved orchestrator switch state from the generated API schema. */
+export type SessionSwitchView = NonNullable<components["schemas"]["SessionSwitchView"]>;
+export type SessionSwitchTarget = components["schemas"]["SessionSwitchTarget"];
+export type SessionSwitchReason = SessionSwitchView["reason"];
+
+const sessionSwitchReasons: Record<SessionSwitchReason, true> = {
+	"": true,
+	no_role_pin: true,
+	no_role_map: true,
+	role_not_in_map: true,
+	no_target: true,
+	in_progress: true,
+	paused: true,
+	terminated: true,
+	unavailable: true,
+};
+
+function toSessionSwitchTarget(raw: unknown): SessionSwitchTarget | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	const target = raw as { harness?: unknown; model?: unknown };
+	if (typeof target.harness !== "string" || target.harness === "") return null;
+	return { harness: target.harness, model: typeof target.model === "string" ? target.model : "" };
+}
+
+/**
+ * Narrow the switch block before it reaches controls. A malformed or degraded
+ * block always fails closed: it may explain why switching is unavailable, but
+ * it never creates a selectable target.
+ */
+export function toSessionSwitch(raw: unknown): SessionSwitchView | undefined {
+	if (typeof raw !== "object" || raw === null) return undefined;
+	const view = raw as Record<string, unknown>;
+	const reason =
+		typeof view.reason === "string" && Object.hasOwn(sessionSwitchReasons, view.reason)
+			? (view.reason as SessionSwitchReason)
+			: "unavailable";
+	const current = toSessionSwitchTarget(view.current) ?? { harness: "", model: "" };
+	const targets =
+		reason === "unavailable" || !Array.isArray(view.targets)
+			? []
+			: view.targets.map(toSessionSwitchTarget).filter((target): target is SessionSwitchTarget => target !== null);
+	let pending: SessionSwitchView["pending"] = null;
+	if (typeof view.pending === "object" && view.pending !== null) {
+		const rawPending = view.pending as Record<string, unknown>;
+		const from = toSessionSwitchTarget(rawPending.from);
+		const to = toSessionSwitchTarget(rawPending.to);
+		const kind = rawPending.kind;
+		if (
+			from &&
+			to &&
+			typeof rawPending.generationId === "string" &&
+			(kind === "switch" || kind === "fresh_conversation" || kind === "orchestrator_fresh_conversation")
+		) {
+			pending = { generationId: rawPending.generationId, kind, from, to };
+		}
+	}
+	return {
+		available: view.available === true && reason === "" && pending === null && targets.length > 0,
+		roleId: typeof view.roleId === "string" ? view.roleId : "",
+		current,
+		targets,
+		pending,
+		reason,
+	};
+}
+
 /** The daemon-committed controller currently responsible for the session. */
 export type SessionMode = "chat" | "tui";
 
@@ -270,6 +336,8 @@ export type WorkspaceSession = {
 	 * neither resolves the ladder nor names a harness.
 	 */
 	failover?: SessionFailoverView;
+	/** Exact role-map targets and durable pending state for an orchestrator. */
+	switch?: SessionSwitchView;
 	/**
 	 * Live preview target set by the daemon (via `ao preview`) and streamed over
 	 * CDC. When non-empty, the browser panel opens and navigates here.

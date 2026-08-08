@@ -1,7 +1,8 @@
 # Upstream Sync 2 — execution and acceptance plan
 
-**Status:** accepted. All eight steps are done and every required GitHub Actions
-check is green; the only action left is merging back to the roles trunk.
+**Status:** closed historical integration record. All eight steps are done,
+every required GitHub Actions check is green, and the merge to the roles trunk
+completed on 2026-08-07.
 
 **Accepted:** 2026-08-07, at head `dd06d31a` on `roles/upstream-sync-2`.
 
@@ -46,8 +47,8 @@ old fork history to the 9000 range before goose evaluates the upstream chain.
 
 ## Ordered acceptance blockers
 
-Do these before merging the integration branch back to `roles/multi-sub-v1`.
-Items 1–4 are closed; item 5, the merge itself, is the only one still open.
+These were the blockers before merging the integration branch back to
+`roles/multi-sub-v1`. All five are closed.
 
 1. ~~Fix the stale same-URL expectation in `api-client.test.ts`.~~ **Done**
    (`7165c942`). It asserts the URL and method now. The auth behaviour keeps
@@ -76,11 +77,14 @@ Items 1–4 are closed; item 5, the merge itself, is the only one still open.
    stays revertable as one unit. Trunk verified after the merge: backend 4486
    pass, frontend 1992 pass / 0 fail, gofmt clean, typecheck clean.
 
-**Sync 2 is closed.** The next work is Phase 3A-2b vendor detection.
+**Sync 2 is closed.** Current execution moved to
+[`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md) and
+[`REMAINING_PLAN.md`](REMAINING_PLAN.md).
 
 ## After Sync 2
 
-The product critical path resumes in this order:
+This was the roadmap immediately after Sync 2; it is retained as historical
+context and is superseded by `MVP_FINAL_SPEC.md`:
 
 1. **Phase 3A-2b vendor detection:** obtain sanitized, stable vendor fixtures;
    implement one adapter detector at a time; promote
@@ -89,8 +93,8 @@ The product critical path resumes in this order:
 2. **Phase 3B:** manual continue on an authorized failover rung, then bounded
    opt-in automatic failover. Preserve `role_id`; default remains manual.
 3. **Phase 1-B Claude read-only:** genuine enforcement plus negative runtime
-   tests. This unblocks strict-project Phase 2B-3 cross-harness orchestrator
-   switching.
+   tests for explicitly read-only Claude roles. It no longer blocks writable
+   strict-project Phase 2B-3 switching.
 4. **Desktop role-map editor:** the strict composer consumes a role map, but
    creating or editing that map is still API/CLI-only.
 
@@ -98,7 +102,10 @@ The product critical path resumes in this order:
 
 - `limit_detection_supported` remains false for every harness; no vendor limit
   detector has been promoted.
-- Phase 2B-3 remains blocked on Claude read-only enforcement.
+- This historical checkpoint predated the final MVP policy amendment. Phase
+  2B-3 is now implemented for writable strict orchestrators; Claude read-only
+  remains false and is still required for an explicit `workspaceWrites:false`
+  Claude role.
 - Interface-transition UI is not accepted merely because the backend exists.
 - A local matrix with upstream-equivalent timing failures is not a green
   required CI run.
