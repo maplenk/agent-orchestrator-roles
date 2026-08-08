@@ -1,11 +1,64 @@
 # Phase 3B manual-failover MVP — orchestrator board
 
 **Contract:** [`../PHASE3B_MVP_CONTRACT.md`](../PHASE3B_MVP_CONTRACT.md) — frozen, nobody edits.
+**Final cross-phase MVP:** [`../MVP_FINAL_SPEC.md`](../MVP_FINAL_SPEC.md) —
+current boundary and acceptance authority.
 **Branch:** `roles/multi-sub-v1`
 **Frozen code:** `backend/internal/domain/failover_contract.go`,
 `backend/internal/session_manager/failover_contract.go` — frozen at `daee190a`
 on `roles/multi-sub-v1` (`go build ./...` green there), amended in place after
 the durability review and green again.
+
+## Final MVP extension — current status (2026-08-08)
+
+The original Phase 3B Wave 1/2 record below is retained. The final MVP added
+the probe close-out and the previously deferred in-place Codex↔Claude
+orchestrator switch. Production code and independent review fixes are
+integrated through `051db38b`; the clean full gate and final live acceptance
+are pending.
+
+| Wave | Commit | Result |
+|---|---|---|
+| Probe base | `be4321d1` | Namespaced tmux `no server running` is authoritative; shared/default socket and ambiguous stderr remain uncertain |
+| Probe consumer close-out | `66d4ceb3` | Restart and live reconciliation no longer coerce unavailable probes into death |
+| Strict-policy amendment | `4ab636fe` | Strict routing/delegation no longer implies read-only; explicit `workspaceWrites:false` remains capability gated |
+| Orchestrator switch core | `e3170a04` | Project-gated in-place Codex↔Claude switch, exact authorization, identity preservation, same-generation recovery |
+| Acceptance harness | `f451308c` | Isolated deterministic worker/orchestrator scenarios and real terminal-input fence probe |
+| Product surface | `fa4d4f90` | Curated switch read model plus existing API/CLI dispatch and desktop switch/fresh controls in eight locales |
+| Reap/restore safety | `8e7c4899` | Unresolved reap is boot-unsafe and blocks restore rather than risking a duplicate runtime |
+| Liveness contract | `85c5f1a6` | Adapter/port docs state authoritative absence versus uncertainty explicitly |
+| Permission presence | `b303bed9` | Both role permission booleans are required at domain, HTTP, and CLI JSON ingress |
+| Review close-out | `051db38b` | Paused-switch refusal, post-ack promotion typing, response hydration, exact target presentation, and model-wire ambiguity fixed |
+
+### Decisions pinned by review
+
+- Strict mode enforces durable role identity, host-owned routing and spawn
+  authority. It does not implicitly enforce filesystem read-only.
+- Claude Code remains `read_only_enforced=false`; an explicit read-only Claude
+  role is still rejected.
+- Initial switch and recovery authorization each use the authoritative
+  session/project snapshot read at their effectful entry under project
+  ownership. Recovery re-authorizes the durable exact target and never
+  reinterprets its model.
+- A provider-default target remains selectable when unique. If the same target
+  harness also has fixed-model entries, the current empty-string wire cannot
+  distinguish explicit default from omission, so only the exact fixed-model
+  choices are advertised. Same-harness operation remains Fresh Conversation.
+- `limit_detection_supported=false` everywhere; no capability promotion is
+  part of this MVP.
+
+### Remaining gate
+
+1. Run the clean backend, race, lint, frontend and API-drift gate on one exact
+   immutable SHA.
+2. Independently review that immutable result.
+3. Rerun all 12 worker Continue records from scratch.
+4. Capture strict Codex→Claude and Claude→Codex orchestrator switches,
+   terminal/API fencing, same-generation post-stop recovery, one active owner,
+   and same-harness Fresh Conversation on the same SHA.
+
+Nothing below claiming earlier evidence is rewritten to look like final
+combined-SHA acceptance.
 
 ## Why every agent keeps a todo file
 
@@ -304,9 +357,11 @@ conclusion that they were load artefacts rather than defects.
 
 ## Wave 3 — live dogfood
 
-The twelve acceptance records in contract §12, none of which are done yet. They
-need a running daemon and a real paused role-pinned worker; items 1–2 are also
-the first time the desktop Continue control renders against a real `failover`
-block rather than a shaped read model.
+An exploratory run captured five of twelve records before the probe and final
+orchestrator integration changed the code underneath them. They remain useful
+diagnostic evidence in `LIVE_DOGFOOD.md`, but **zero** count as final combined-
+SHA acceptance. All twelve need to be rerun from scratch on the immutable final
+SHA with a real paused role-pinned worker. The orchestrator Codex→Claude and
+Claude→Codex records are additional final-MVP acceptance gates.
 
 `limit_detection_supported` stays `false`; nothing is promoted by this MVP.

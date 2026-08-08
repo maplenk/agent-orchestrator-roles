@@ -6,6 +6,11 @@
 > [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md) and
 > [`REMAINING_PLAN.md`](REMAINING_PLAN.md).
 
+> **Current close-out (2026-08-08):** implementation and review fixes are
+> integrated through `051db38b`. The next action is the clean full gate,
+> independent immutable-SHA review, and final worker/orchestrator live records.
+> Do not restart an older phase from the historical priority lists below.
+
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
 **Written:** 2026-08-04 (after Phase 2A close-out accept + `SwitchSupported` promotion).  
 **Audience:** Implementation agent (Claude/Codex/other) picking up on a clean checkout.
@@ -28,9 +33,9 @@
 | **`limit_detection_supported`** | **false** everywhere production — do not flip |
 | **`read_only_enforced`** | **true only for Codex**; Claude/Pi false by design for now |
 | **Phase 2B** | **2B-0a / 0b / 1 / 2 landed; final-MVP 2B-3 implemented, live acceptance pending.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
-| **Critical path next** | Close probe review, integrate core/surface, run the clean final gate, then capture worker/orchestrator evidence on one SHA |
+| **Critical path next** | Run the clean final gate and independent immutable-SHA review, then capture worker/orchestrator evidence on that SHA |
 | **Parallel optional** | Phase 1-F / Claude RO (1-B) for explicitly read-only Claude roles; 2B-3 no longer depends on it |
-| **Current clean gate** | Probe base `be4321d1`: 4,600 backend tests, gofmt/vet clean, golangci-lint 0 on a cold cache; rerun after integration |
+| **Current clean gate** | Focused integration gates passed through `051db38b`; the full backend/race/lint/frontend/API gate must now run on the exact close-out SHA |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -529,25 +534,21 @@ High-level protocol used successfully:
 
 ## 14. Immediate next action for the successor agent
 
-1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md` and `PHASE2B_PLAN.md`.
-2. Close the probe review and integrate probe → core → surface without
-   weakening unknown-probe handling.
-3. Run the clean final gate on one immutable SHA.
+1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md`.
+2. Run the clean final gate on one immutable SHA at or after `051db38b`.
+3. Give that immutable result an independent review and resolve real findings.
 4. Capture all 12 worker records and both strict orchestrator switch directions
-   on that same SHA. Keep `limit_detection_supported=false` and Claude
-   `read_only_enforced=false`.
+   on the same accepted SHA. Keep `limit_detection_supported=false` and Claude
+   `read_only_enforced=false`; neither is promoted by this MVP.
 
 ---
 
-## 15. Suggested first message to the human
+## 15. Priority is already decided
 
-Confirm priority:
-
-- **A (default):** Phase 2B orchestrator ownership transfer  
-- **B:** Phase 1-B Claude RO  
-- **C:** Phase 1-F full suite + strict dogfood  
-
-Then proceed without re-litigating 2A.
+Do not ask the human to choose among Phase 2B, Claude RO, or Phase 1-F. The
+current priority is the final MVP close-out in `MVP_FINAL_SPEC.md`: gate,
+independent review, then live acceptance. Claude RO is optional post-MVP work
+for explicit read-only roles and no longer gates writable strict switching.
 
 ---
 

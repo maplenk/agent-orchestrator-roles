@@ -8,6 +8,12 @@ docs only)
 **Worker:** `mer3b-1`, spawned `ao spawn --project mer3b --role implementor`
 (real claude-code launch, 9985-byte role system prompt)
 
+> **Historical policy note (2026-08-08):** the non-strict setup and explanation
+> below accurately record this exploratory run. The final MVP later separated
+> strict routing/delegation from implicit read-only in `4ab636fe`; writable
+> strict Claude orchestration is now valid, while an explicit
+> `workspaceWrites:false` Claude role remains unsupported.
+
 Non-strict deliberately: a strict map requires the orchestrator role to be
 `workspaceWrites:false`, which is still blocked on Claude read-only (Phase 1-B).
 The failover path does not depend on strictness — only on a durable role pin.

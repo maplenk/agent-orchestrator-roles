@@ -1,7 +1,8 @@
 # Multi-sub roles — status & remaining plan
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
-**Active integration branch:** `roles/upstream-sync-2` @ `dd06d31a` (PR #1, draft — **accepted 2026-08-07; all required CI green**)
+**Active integration:** final roles MVP @ `051db38b`; clean full gate and live
+acceptance pending before it moves to `roles/multi-sub-v1`
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
 **Current gate:** final MVP integration and live acceptance on one exact SHA
@@ -22,24 +23,24 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 1-B / strict exit | **Open for explicitly read-only Claude roles.** Claude remains `read_only_enforced=false`; writable strict orchestration no longer depends on that capability. |
 | Phase 2A | **Accepted and promoted.** Worker switch/fresh/recovery, ledger, input fences, API/CLI/auth and live dogfood are complete; Claude/Codex `switch_supported=true`. |
 | Phase 2B-0/1/2 | **Landed and dogfooded.** Coordinator uniqueness, fail-closed boot, in-place orchestrator fresh conversation and replacement recoverability are present. |
-| Phase 2B-3 | **Implemented; live acceptance pending.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets and same-generation recovery. |
+| Phase 2B-3 | **Core and product surface implemented; live acceptance pending.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets, same-generation recovery, and a curated desktop/API read model. |
 | Phase 3A pause core and operator surface | **Landed and accepted.** Durable pause, ledger-before-pin, zero automatic restart/send, pause/resume API+CLI, ownership CAS and pause-aware lifecycle are present. |
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
-| Phase 3B | **Manual Continue implemented; final 12-record rerun pending.** Automatic failover is post-MVP. |
+| Phase 3B | **Manual Continue implemented and reviewed; final 12-record rerun pending.** Automatic failover is post-MVP. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
-| CI | Probe base `be4321d1`: 4,600 backend tests, gofmt/vet clean, and golangci-lint 0 issues on a cold cache. Every integrated core/surface commit must re-run the final gate before evidence is accepted. |
+| CI | Focused integration gates passed through `051db38b`. The clean full backend/race/lint/frontend/API gate on that exact SHA remains an acceptance precondition. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
 > Claude Code because strictness enforces role/routing/delegation policy, not a
 > filesystem sandbox. Claude-only installs still cannot configure an explicit
 > `workspaceWrites:false` role; Claude remains `read_only_enforced=false`.
 
-**Next engineering actions, in order:** close the tmux-probe review, integrate
-the core and product-surface slices, run the clean full gate, then capture all
-12 worker Continue records and the Codex→Claude / Claude→Codex orchestrator
-records from scratch on that immutable SHA. Claude read-only remains parallel
-post-MVP work for roles that genuinely require technical write denial.
+**Next engineering actions, in order:** run the clean full gate, independently
+review the exact integrated SHA, then capture all 12 worker Continue records
+and the Codex→Claude / Claude→Codex orchestrator records from scratch on that
+same immutable SHA. Claude read-only remains post-MVP work for roles that
+genuinely require technical write denial.
 
 ---
 
@@ -111,7 +112,9 @@ Detail trackers: `PHASE2A_PLAN.md`, `PHASE2A_DOGFOOD.md`, `PHASE2A_LIVE_DOGFOOD.
 ### Explicit non-claims (honesty)
 
 - **Same-UID host isolation** is **not** claimed.
-- **Phase 1 strict operational dogfood** is **not** complete (Claude RO, full 1-F matrix).
+- **Final writable-strict operational dogfood** is **not** complete until the
+  combined-SHA orchestrator records pass. Claude RO remains a separate optional
+  exit for explicitly read-only Claude roles.
 - **`read_only_enforced`:** **true only for Codex**. Claude/Pi/others false.
 - **`switch_supported`:** **true** for Claude/Codex only; other production harnesses remain false until dedicated promotes.
 - **`limit_detection_supported`:** still **false** for all production harnesses (Phase 3).
@@ -221,25 +224,25 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 ---
 
-### Phase 3B — Manual continue + opt-in failover (~3–5 working days)
+### Phase 3B — Manual Continue implemented; automatic failover deferred
 
 | Task | Detail |
 |------|--------|
-| Manual continue on next ladder rung | Default mode **manual** |
-| Failover preserves `role_id` | Only harness/model change |
-| `maxFailoversPerIncident` | Cap then stay paused |
-| `failover.mode=automatic` | Opt-in only; matrix-gated |
+| Manual continue on next ladder rung | **Implemented and reviewed.** Default mode is manual; final 12-record rerun pending |
+| Failover preserves `role_id` | **Implemented.** Only harness/model/generation and rotated credential change |
+| `maxFailoversPerIncident` | **Implemented** as the frozen host bound; exhaustion stays paused |
+| `failover.mode=automatic` | **Deferred post-MVP.** No scheduler, retry loop, timer, or automatic trigger ships |
 
 ---
 
-### Integration (~3–5 working days)
+### Final integration and acceptance
 
 | Task | Detail |
 |------|--------|
-| Desktop dogfood | Real Electron + isolated or explicit data dir |
-| Crash recovery | Restore + CAS + switch mid-flight (2A path accepted; re-verify under product load) |
-| Multi-platform | macOS primary; Windows/Linux as needed |
-| DoD checklist | MASTER_PLAN §9 all checked |
+| Clean full gate | **Pending** on exact integrated SHA `051db38b` |
+| Worker dogfood | **Pending:** all 12 records from scratch |
+| Orchestrator dogfood | **Pending:** Codex→Claude, Claude→Codex, fencing and same-generation recovery |
+| Promotion | **None.** Limit detection and Claude read-only stay false |
 
 ---
 
@@ -270,8 +273,8 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 2B-2 replacement recoverability ──► LANDED (intent + crash-consistent retirement)
 Sync 2 acceptance ──► DONE (2026-08-07)
 3B manual Continue ──► IMPLEMENTED
-Now ──► close probe review + integrate core/surface
-     ──► clean full gate on one immutable SHA
+Final MVP core + surface ──► IMPLEMENTED / REVIEW FIXES INTEGRATED
+Now ──► clean full gate on one immutable SHA
      ──► 12 worker records + both orchestrator directions
      ║
      ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
@@ -302,7 +305,8 @@ Already satisfied (re-verify on regressions):
 Still open or partial:
 
 7. **Partial:** durable pause and zero automatic send/restart are enforced; no harness yet produces a promoted structured limit event
-8. Failover preserves `role_id`, respects incident bound (runtime path)
+8. **Implemented; live acceptance pending:** failover preserves `role_id` and
+   respects the incident bound
 
 ---
 
@@ -347,8 +351,9 @@ Still open or partial:
 
 ## 7. Immediate next action
 
-1. Close the tmux-probe review and integrate the probe, core and surface slices.
-2. Run the full final gate from a clean checkout of one immutable SHA.
+1. Run the full final gate from a clean checkout of `051db38b` (or its
+   docs-only successor).
+2. Independently review that immutable result and resolve any real finding.
 3. Rerun all 12 worker Continue records plus strict Codex→Claude and
    Claude→Codex orchestrator records on that SHA. Claude read-only remains
    parallel post-MVP work and does not gate 2B-3.

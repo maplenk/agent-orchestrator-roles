@@ -10,7 +10,7 @@ Local working tree: `/Users/tagtaste/Documents/QBApps/agent-orchestrator-roles`
 | Remote name | `upstream` |
 | Pinned SHA | See `AO_BASELINE_SHA.txt` |
 | Roles trunk | `roles/multi-sub-v1` |
-| Active integration | none — Sync 2 merged to `roles/multi-sub-v1` on 2026-08-07 (`5dc2fcfb`) |
+| Active integration | Final roles MVP integrated at `051db38b`; clean gate and live acceptance pending |
 
 Pin before feature work. Own migration numbers on this fork (do not collide with upstream 0042 races from #3548 / #3386).
 
@@ -20,16 +20,25 @@ Intent-grade **role templates** + daemon-resolved **`ao spawn --role`** multi-su
 
 Master plan (design): `MASTER_PLAN.md`
 **Status + remaining execution plan:** `REMAINING_PLAN.md` (completed vs open, order, gates).
-**Current integration steps:** `UPSTREAM_SYNC2_PLAN.md`.
+**Current MVP specification:** `MVP_FINAL_SPEC.md`.
+`UPSTREAM_SYNC2_PLAN.md` is closed historical integration evidence.
 
 ## Delivery
 
 **Target B** — full wishlist.
 - Phase 1 **foundation** accepted: roles, CAS, canSpawn, Codex RO, capability registry, CLI roleMap, template Option A.
-- Phase 1 **strict dogfood exit** remains open (see `REMAINING_PLAN.md`).
-- Claude `read_only_enforced=false` (honest); RO orch/reviewer use **Codex**.
+- Strict routing/delegation is independent of technical read-only. Both
+  permission booleans are explicit; `workspaceWrites:false` remains capability
+  gated.
+- Claude `read_only_enforced=false` (honest); explicitly read-only roles still
+  require Codex or another enforcing harness.
 - Phase 2A is accepted; Phase 2B-0/1/2 and the Phase 3A pause/UI boundary landed.
-**Next:** implement a vendor-backed Phase 3A-2b detector. Sync 2 merged to the trunk on 2026-08-07 as `5dc2fcfb`. Phase 2B-3 remains blocked on Claude read-only.
+- Phase 3B manual Continue and Phase 2B-3 in-place Codex↔Claude orchestrator
+  switch are implemented with API/CLI/desktop surfaces.
+
+**Next:** run the clean final gate and worker/orchestrator live acceptance on
+one exact SHA. Vendor detection, automatic failover, and Claude read-only are
+post-MVP; nothing is promoted by this close-out.
 
 ## Remotes
 

@@ -3,6 +3,8 @@
 **Status:** canonical Target B design; implementation is active and tracked in
 [`REMAINING_PLAN.md`](REMAINING_PLAN.md). The current MVP boundary and
 integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
+If this long-range design conflicts with the final MVP boundary or current
+execution state, `MVP_FINAL_SPEC.md` and then `REMAINING_PLAN.md` control.
 **Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
 **Not base:** Intent asar; harness-orchestration as daily UI
 **Sources:** Intent RE, AO code/PRs, harness-orchestration PLAN, deep-research-report, Codex plan reviews
@@ -11,12 +13,15 @@ integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
 accepted. Phase 2B-0/1/2 landed and the final-MVP 2B-3 in-place Codex↔Claude
 orchestrator switch is implemented under the amended strict policy. Phase 3A's durable pause, operator surface, desktop pause/role
 composer and detector boundary landed, but no vendor detector is promoted.
-Sync 2 is accepted on `roles/upstream-sync-2` @ `dd06d31a`: all eight steps are
-done, every required CI job is green, and the two live Step 5 dogfood records
+Sync 2 is closed and merged; its accepted evidence head was
+`roles/upstream-sync-2` @ `dd06d31a`. All eight steps are done, every required
+CI job is green, and the two live Step 5 dogfood records
 (orchestrator fresh conversation, and a genuine post-stop recovery on the
 original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Phase
-3B manual worker Continue and the final-MVP 2B-3 core are implemented; probe
-review, surface integration, the clean final gate and live acceptance remain.
+3B manual worker Continue and the final-MVP 2B-3 core, service/read model, API,
+CLI and desktop surface are integrated through `051db38b`. Probe-consumer and
+review gaps are closed. The clean final gate, independent immutable-SHA review,
+and live acceptance remain.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 

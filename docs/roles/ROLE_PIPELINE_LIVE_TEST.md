@@ -17,8 +17,10 @@ orchestrator/implementor/verifier desktop flow.
 
 ## Required role map
 
-Use a non-strict project for this harness combination until Claude read-only enforcement
-exists:
+Use a strict project for this harness combination. Strictness enforces durable
+role identity, host-owned routing and delegation; it does not implicitly make
+the orchestrator read-only. The verifier remains explicitly read-only and must
+therefore use an enforcing harness:
 
 | Role | Harness | Model | Workspace writes | Can spawn |
 |---|---|---|---:|---:|
