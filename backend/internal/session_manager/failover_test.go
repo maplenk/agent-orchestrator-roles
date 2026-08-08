@@ -220,6 +220,35 @@ func TestContinueFailover_NoLadderRefusedAndPauseIntact(t *testing.T) {
 	assertNothingDurable(t, st, id, "inc-1")
 }
 
+// The ladder is exhausted rather than absent: every rung has been spent on this
+// incident. Same refusal, and the pin survives -- FAILOVER_NO_TARGET is not a
+// failure of the pause.
+func TestContinueFailover_ExhaustedLadderRefusedAndPauseIntact(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	for i, h := range []domain.AgentHarness{domain.HarnessCodex, domain.HarnessFake} {
+		st.attempts = append(st.attempts, domain.FailoverAttempt{
+			ID: domain.FailoverAttemptID(id, "inc-1", i+1), SessionID: id, ProjectID: "mer",
+			IncidentID: "inc-1", Seq: i + 1, GenerationID: fmt.Sprintf("g%d", i+1),
+			ToHarness: h, State: domain.FailoverAttemptFailed,
+		})
+	}
+	spent := len(st.attempts)
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, domain.ErrFailoverNoTarget) {
+		t.Fatalf("err = %v, want ErrFailoverNoTarget", err)
+	}
+	if len(st.attempts) != spent {
+		t.Fatalf("an exhausted ladder still wrote an attempt row: %d", len(st.attempts))
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("an exhausted ladder lifted the pause")
+	}
+	if rt.created != 0 {
+		t.Fatal("an exhausted ladder reached the runtime")
+	}
+}
+
 // A stale incident must be refused before ANY ledger row, attempt row or
 // runtime change: continuing on evidence nobody looked at is the failure this
 // check exists for.
