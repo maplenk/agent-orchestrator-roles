@@ -245,6 +245,63 @@ The rewritten duplicate test is worth noting: it previously injected the
 protected defect 1. It is now two tests, and the concurrent case takes the real
 fence rather than simulating it.
 
+## Independent review round (2026-08-08)
+
+Reviewed at the frozen SHA `d8421a32`, trunk held still for the duration.
+
+**Reviewer allocation was by who wrote what.** Grok reviewed B's service/HTTP/CLI
+and D's restart path because *Codex* implemented those; a second Grok reviewer
+took A's core and C's UI because *Claude* implemented those. Neither reviewed a
+slice its own family wrote.
+
+**A Codex reviewer stalled** on the core scope — 24 minutes, 167 bytes of
+transcript, no output — and was stopped and replaced by Grok, which completed the
+same scope in ~14 minutes on the first attempt. Stopping the agent reaped its
+whole process tree; no manual kills were needed. The replacement was dispatched
+with a mandatory progress file (`.ao-worktrees/review-grok-core-progress.md`),
+which is now the standing rule: a reviewer that cannot be observed is
+indistinguishable from a wedged one.
+
+### Findings fixed (`064eaeef`, `7c018683`)
+
+| # | Sev | Defect |
+|---|---|---|
+| 1 | P1 | A completed Continue was reported as a **failure** when the follow-up preview read failed — rung spent, pin cleared, target live, and the operator told it failed |
+| 2 | P1 | A **same-harness empty-model rung** could never settle promotion, so a crash between ack and pin clear stuck the session permanently on `FAILOVER_RECOVERY_REQUIRED` with the rung spent |
+| 3 | P2 | The `failover` block was **never null** — the guard compared against a zero value the manager never produces, so every ordinary worker shipped a `no_ladder` block |
+| 4 | P2 | A preview failure **failed the whole read**, so one unreadable project 500'd `GET /sessions` and empty-stated the fleet |
+| 5 | P2 | The ack **CAS result was discarded**, so a lost transition still cleared the pin |
+| 6 | P3 | Unknown-harness rungs skipped silently — **reviewed and KEPT**, with the rationale recorded in code |
+
+Finding 2's fix is pinned by a mutation check: reverting the comparison
+reproduces the reported stuck state exactly, while the cross-harness test keeps
+passing — so the two tests cover distinct branches of `resolveTargetModel`.
+
+### The gap the review did not find, and the fix pass did
+
+**There were no controller-level tests for `/continue` at all.** The service layer
+was tested against a fake commander and the CLI against a fake daemon, but
+nothing exercised the HTTP surface — which is where `authorizeOperatorPause`
+runs, where the strict decoder refuses a caller-supplied target, and where the
+degrade decisions are made. An operator-only endpoint that can move a session to
+another harness had its gate executed by **zero** tests. Reading a gate is not
+running it. Nine tests now cover it.
+
+### Gate on the final SHA `7c018683`
+
+`gofmt` clean · `go vet` clean · `go test ./...` **4592 passed / 131 packages** ·
+`go test -race ./...` **zero DATA RACE reports and zero failing packages** ·
+`golangci-lint` v2.12.2 **0 issues** · frontend typecheck clean · vitest **2028
+passed / 150 files** · api-drift clean.
+
+The race run was the first fully clean sweep — even the two known adapter
+timeout flakes did not recur on an unloaded machine, which supports the earlier
+conclusion that they were load artefacts rather than defects.
+
+> `npm run lint` returns a mangled "ESLint output (JSON parse failed)" line under
+> the local shell wrapper; its two underlying commands (`go test ./...` and
+> `golangci-lint run`) were run directly and both pass. Not a code failure.
+
 ## Wave 3 — live dogfood
 
 The twelve acceptance records in contract §12, none of which are done yet. They
