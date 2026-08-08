@@ -30,6 +30,7 @@ import (
 	sessionsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/session"
 	"github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred"
 	usagesvc "github.com/aoagents/agent-orchestrator/backend/internal/service/usage"
+	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 	"github.com/aoagents/agent-orchestrator/backend/internal/workspacewatch"
 )
 
@@ -94,6 +95,21 @@ type SessionService interface {
 	WorkspaceWatchPaths(ctx context.Context, id domain.SessionID) ([]string, error)
 	ListWorkspaceFiles(ctx context.Context, id domain.SessionID) (sessionsvc.WorkspaceFiles, error)
 	GetWorkspaceFile(ctx context.Context, id domain.SessionID, path string) (sessionsvc.WorkspaceFileDetail, error)
+}
+
+// failoverSessionService is optional on controller test doubles but implemented
+// by the real session service. Keeping it narrow avoids forcing unrelated mocks
+// to grow manual-failover methods while preserving one production path.
+type failoverSessionService interface {
+	ContinueFailover(
+		ctx context.Context,
+		sessionID domain.SessionID,
+		incidentID string,
+	) (sessionsvc.ContinueFailoverOutcome, error)
+	FailoverPreview(
+		ctx context.Context,
+		sessionID domain.SessionID,
+	) (sessionmanager.FailoverPreview, error)
 }
 
 // ActivityRecorder applies an agent activity-state signal to a session. It is
@@ -197,6 +213,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Delete("/sessions/{sessionId}/pin", c.unpin)
 	r.Post("/orchestrators/delegate", c.delegateTask)
 	r.Post("/sessions/{sessionId}/pause", c.pauseSession)
+	r.Post("/sessions/{sessionId}/continue", c.continueSession)
 	r.Post("/sessions/{sessionId}/resume", c.resumeSession)
 	r.Post("/sessions/{sessionId}/activity", c.activity)
 	r.Get("/orchestrators", c.listOrchestrators)
@@ -226,7 +243,12 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(sessions)})
+	views, err := c.sessionViews(r.Context(), sessions)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: views})
 }
 
 func (c *SessionsController) spawn(w http.ResponseWriter, r *http.Request) {
@@ -451,7 +473,12 @@ func (c *SessionsController) get(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: sessionView(sess)})
+	view, err := c.sessionView(r.Context(), sess)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: view})
 }
 
 func (c *SessionsController) preview(w http.ResponseWriter, r *http.Request) {
@@ -1260,6 +1287,57 @@ func (c *SessionsController) pauseSession(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// continueSession moves a paused worker to the next unused host-authorized
+// failover rung. The caller names the incident but never the destination.
+func (c *SessionsController) continueSession(w http.ResponseWriter, r *http.Request) {
+	if c.Svc == nil {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/continue")
+		return
+	}
+	if !c.authorizeOperatorPause(w, r) {
+		return
+	}
+	fs, ok := c.Svc.(failoverSessionService)
+	if !ok {
+		envelope.WriteError(w, r, sessionmanager.ErrFailoverNotWired)
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxPauseBodyBytes)
+	var in ContinueSessionRequest
+	// Empty input reaches the shared incident validator so clients receive the
+	// stable PAUSE_INCIDENT_REQUIRED code. Unknown fields are rejected: accepting
+	// targetHarness here would violate host-authoritative target selection.
+	if err := decodeJSONStrict(r, &in); err != nil && !errors.Is(err, io.EOF) {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
+		return
+	}
+	out, err := fs.ContinueFailover(r.Context(), sessionID(r), in.IncidentID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	preview, err := fs.FailoverPreview(r.Context(), sessionID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, ContinueSessionResponse{
+		OK:           true,
+		SessionID:    sessionID(r),
+		IncidentID:   out.IncidentID,
+		GenerationID: out.GenerationID,
+		Target: SessionFailoverTarget{
+			Harness: out.Target.Harness,
+			Model:   out.Target.Model,
+		},
+		RungIndex:  out.RungIndex,
+		AttemptSeq: out.AttemptSeq,
+		Reused:     out.Reused,
+		Session:    sessionView(out.Session, preview),
+	})
+}
+
 // resumeSession lifts a pause the caller names. It deliberately does NOT start
 // an agent: a session whose agent died while paused resumes to un-paused and
 // still dead, and restarting it is a separate, explicit act by the human.
@@ -1576,7 +1654,12 @@ func (c *SessionsController) listOrchestrators(w http.ResponseWriter, r *http.Re
 		envelope.WriteError(w, r, err)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: sessionViews(sessions)})
+	views, err := c.sessionViews(r.Context(), sessions)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: views})
 }
 
 func (c *SessionsController) getOrchestrator(w http.ResponseWriter, r *http.Request) {
@@ -1593,7 +1676,12 @@ func (c *SessionsController) getOrchestrator(w http.ResponseWriter, r *http.Requ
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "Unknown session", nil)
 		return
 	}
-	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: sessionView(sess)})
+	view, err := c.sessionView(r.Context(), sess)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: view})
 }
 
 func sessionID(r *http.Request) domain.SessionID {
@@ -1747,8 +1835,60 @@ func previewFileURL(r *http.Request, id domain.SessionID, entry string) (string,
 	return previewutil.FileURL("http://"+r.Host, id, entry)
 }
 
-func sessionView(s domain.Session) SessionView {
-	return SessionView{Session: s, Branch: s.Metadata.Branch, PreviewURL: s.Metadata.PreviewURL, PreviewRevision: s.Metadata.PreviewRevision, PRs: sessionPRFacts(s.PRs), Pause: pauseView(s.Metadata.Pause)}
+func sessionView(s domain.Session, previews ...sessionmanager.FailoverPreview) SessionView {
+	var failover *SessionFailoverView
+	if len(previews) > 0 {
+		failover = failoverView(previews[0])
+	}
+	return SessionView{
+		Session:         s,
+		Branch:          s.Metadata.Branch,
+		PreviewURL:      s.Metadata.PreviewURL,
+		PreviewRevision: s.Metadata.PreviewRevision,
+		PRs:             sessionPRFacts(s.PRs),
+		Pause:           pauseView(s.Metadata.Pause),
+		Failover:        failover,
+	}
+}
+
+func (c *SessionsController) sessionView(ctx context.Context, s domain.Session) (SessionView, error) {
+	if s.Kind != domain.KindWorker {
+		return sessionView(s), nil
+	}
+	fs, ok := c.Svc.(failoverSessionService)
+	if !ok {
+		// Existing controller test doubles predate the optional read model. The real
+		// service always takes the branch below.
+		return sessionView(s), nil
+	}
+	preview, err := fs.FailoverPreview(ctx, s.ID)
+	if err != nil {
+		return SessionView{}, err
+	}
+	return sessionView(s, preview), nil
+}
+
+func failoverView(preview sessionmanager.FailoverPreview) *SessionFailoverView {
+	if preview == (sessionmanager.FailoverPreview{}) {
+		return nil
+	}
+	var target *SessionFailoverPreviewTarget
+	if preview.Available {
+		target = &SessionFailoverPreviewTarget{
+			Harness: preview.NextTarget.Harness,
+			Model:   preview.NextTarget.Model,
+		}
+	}
+	return &SessionFailoverView{
+		Available:     preview.Available,
+		RoleID:        preview.RoleID,
+		NextTarget:    target,
+		NextRungIndex: preview.NextRungIndex,
+		AttemptsUsed:  preview.AttemptsUsed,
+		MaxAttempts:   preview.MaxAttempts,
+		IncidentID:    preview.IncidentID,
+		Reason:        string(preview.Reason),
+	}
 }
 
 // pauseView maps the durable pin to the wire shape. Nil in, nil out: "not
@@ -1771,12 +1911,16 @@ func pauseView(p *domain.SessionPause) *SessionPauseView {
 	return out
 }
 
-func sessionViews(sessions []domain.Session) []SessionView {
+func (c *SessionsController) sessionViews(ctx context.Context, sessions []domain.Session) ([]SessionView, error) {
 	out := make([]SessionView, 0, len(sessions))
 	for _, s := range sessions {
-		out = append(out, sessionView(s))
+		view, err := c.sessionView(ctx, s)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, view)
 	}
-	return out
+	return out, nil
 }
 
 func sessionPRFacts(prs []domain.PRFacts) []SessionPRFacts {

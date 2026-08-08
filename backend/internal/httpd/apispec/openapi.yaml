@@ -1589,6 +1589,64 @@ paths:
       summary: Write images into a running session's worktree and return their paths
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/continue:
+    post:
+      operationId: continueSession
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ContinueSessionRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContinueSessionResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Continue a paused worker on the next unused host-authorized failover
+        target
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/conversation:
     get:
       operationId: getSessionConversation
@@ -4532,6 +4590,45 @@ components:
         disabled:
           type: boolean
       type: object
+    ContinueSessionRequest:
+      properties:
+        incidentId:
+          description: The paused incident this continuation answers.
+          type: string
+      required:
+      - incidentId
+      type: object
+    ContinueSessionResponse:
+      properties:
+        attemptSeq:
+          type: integer
+        generationId:
+          type: string
+        incidentId:
+          type: string
+        ok:
+          type: boolean
+        reused:
+          type: boolean
+        rungIndex:
+          type: integer
+        session:
+          $ref: '#/components/schemas/ControllersSessionView'
+        sessionId:
+          type: string
+        target:
+          $ref: '#/components/schemas/SessionFailoverTarget'
+      required:
+      - ok
+      - sessionId
+      - incidentId
+      - generationId
+      - target
+      - rungIndex
+      - attemptSeq
+      - reused
+      - session
+      type: object
     ControllersPauseSessionRequest:
       properties:
         incidentId:
@@ -4602,6 +4699,8 @@ components:
           type: string
         displayName:
           type: string
+        failover:
+          $ref: '#/components/schemas/SessionFailoverView'
         harness:
           type: string
         id:
@@ -4691,6 +4790,7 @@ components:
       - isPinned
       - status
       - prs
+      - failover
       type: object
     ControllersSpawnAttachmentInput:
       properties:
@@ -6367,6 +6467,66 @@ components:
       - sessionId
       - message
       type: object
+    SessionFailoverPreviewTarget:
+      properties:
+        harness:
+          type: string
+        model:
+          type: string
+      required:
+      - harness
+      - model
+      type:
+      - object
+      - "null"
+    SessionFailoverTarget:
+      properties:
+        harness:
+          type: string
+        model:
+          type: string
+      required:
+      - harness
+      - model
+      type: object
+    SessionFailoverView:
+      properties:
+        attemptsUsed:
+          type: integer
+        available:
+          type: boolean
+        incidentId:
+          type: string
+        maxAttempts:
+          type: integer
+        nextRungIndex:
+          type: integer
+        nextTarget:
+          $ref: '#/components/schemas/SessionFailoverPreviewTarget'
+        reason:
+          enum:
+          - ""
+          - no_role_pin
+          - no_ladder
+          - ladder_exhausted
+          - limit_reached
+          - not_paused
+          - switch_unsupported
+          type: string
+        roleId:
+          type: string
+      required:
+      - available
+      - roleId
+      - nextTarget
+      - nextRungIndex
+      - attemptsUsed
+      - maxAttempts
+      - incidentId
+      - reason
+      type:
+      - object
+      - "null"
     SessionInterfaceTransition:
       properties:
         completedAt:

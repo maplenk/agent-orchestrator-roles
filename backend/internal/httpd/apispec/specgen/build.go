@@ -279,6 +279,11 @@ var schemaNames = map[string]string{
 	"ControllersSwitchWorkerRequest":                      "SwitchWorkerRequest",
 	"ControllersSwitchWorkerResponse":                     "SwitchWorkerResponse",
 	"ControllersFreshConversationRequest":                 "FreshConversationRequest",
+	"ControllersContinueSessionRequest":                   "ContinueSessionRequest",
+	"ControllersContinueSessionResponse":                  "ContinueSessionResponse",
+	"ControllersSessionFailoverTarget":                    "SessionFailoverTarget",
+	"ControllersSessionFailoverPreviewTarget":             "SessionFailoverPreviewTarget",
+	"ControllersSessionFailoverView":                      "SessionFailoverView",
 	// httpd/controllers — standalone shell terminal wire envelopes
 	"ControllersShellTerminalHandleIDParam": "ShellTerminalHandleIDParam",
 	"ControllersOpenShellTerminalRequest":   "OpenShellTerminalRequest",
@@ -1545,6 +1550,20 @@ func sessionOperations() []operation {
 			reqBody:    controllers.PauseSessionRequest{},
 			resps: []respUnit{
 				{http.StatusOK, controllers.PauseSessionResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusForbidden, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPost, path: "/api/v1/sessions/{sessionId}/continue", id: "continueSession", tag: "sessions",
+			summary:    "Continue a paused worker on the next unused host-authorized failover target",
+			pathParams: []any{controllers.SessionIDParam{}},
+			reqBody:    controllers.ContinueSessionRequest{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ContinueSessionResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},
 				{http.StatusForbidden, envelope.APIError{}},
 				{http.StatusNotFound, envelope.APIError{}},

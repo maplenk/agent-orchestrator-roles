@@ -1,11 +1,13 @@
 # Agent B — service, HTTP, OpenAPI, CLI
 
-## State: not started
+## State: complete — implementation and scoped verification are green
 
 ## Next action
-Read `docs/roles/PHASE3B_MVP_CONTRACT.md`, then
-`backend/internal/service/session/pause.go` and the pause/switch handlers in
-`httpd/controllers/sessions.go`, and mirror those patterns exactly.
+The orchestrator can integrate and commit Agent B's owned files. No code work is
+left for Agent B. The generated artifacts are current and repeat regeneration is
+idempotent; the coordinator's literal `git diff --exit-code` check exits 1 only
+because both generated files are intentional uncommitted Phase 3B changes versus
+HEAD, not because regeneration introduced additional drift.
 
 ## Brief
 
@@ -92,21 +94,95 @@ npm run api          # from repo root
 ```
 
 ## Done
-_(nothing yet)_
+- [x] Read the frozen Phase 3B contract, frozen cross-agent types, repository hard rules, and pause/switch service + controller patterns.
+- [x] Added the exact narrow `failoverCommander`, Continue/preview service methods, and API-facing outcome without any caller-selected target field.
+- [x] Added the four frozen failover error mappings plus fake-commander coverage for validation, mappings, delegation, preview, and unwired-manager behavior.
+- [x] Ran `go test ./internal/service/session` from `backend/` (243 tests passed).
+- [x] Added the operator-gated Continue route/handler with strict one-field JSON decoding, the shared 4 KiB cap, and the frozen success envelope.
+- [x] Added manager-derived failover previews to worker list/get reads and Continue responses, including explicit nullable `failover`/`nextTarget` schema output.
+- [x] Registered the OpenAPI operation and clean component names, ran `npm run api`, and verified the generated request, response, empty-string reason enum, and nullability.
+- [x] Ran `go test ./internal/httpd/...` from `backend/` (369 tests passed across 6 packages).
+- [x] Added `ao session continue --session <id> --incident <id>` with a one-field request, hand-mirrored response, backend-resolved target output, `spawnCallerHeaders()`, and no harness/model flags.
+- [x] Added CLI coverage for success/body shape/operator headers, both required flags, forbidden target flags, and daemon error envelopes; `go test ./internal/cli -run '^TestSessionContinue_'` passes 6 tests.
 
 ## Remaining
-- [ ] Read contract + pause service/controller patterns
-- [ ] `failoverCommander` + `Service.ContinueFailover`
-- [ ] `toAPIError` arms
-- [ ] Route + handler + DTOs
-- [ ] `failover` read-model block
-- [ ] specgen registry entries
-- [ ] CLI command
-- [ ] `npm run api` regeneration committed
-- [ ] All listed tests green
+- [x] Read contract + pause service/controller patterns
+- [x] `failoverCommander` + `Service.ContinueFailover`
+- [x] `toAPIError` arms
+- [x] Route + handler + DTOs
+- [x] `failover` read-model block
+- [x] specgen registry entries
+- [x] CLI command
+- [x] `npm run api` regeneration
+- [x] All listed tests green (the orchestrator added the required out-of-scope telemetry classification entry)
 
 ## Decisions / gotchas
-_(record anything a cold reader would need)_
+- The request DTO and manager request are both one-field (`incidentId`) structures; no target-selection field may be introduced at any layer.
+- Continue must type-assert the manager through a local `failoverCommander`, so service/tests compile independently of Agent A.
+- The frozen public error table names four new failover codes, including `FAILOVER_RECOVERY_REQUIRED`; `ErrFailoverNotWired` intentionally has no public mapping and follows the existing `ErrSwitchNotWired` precedent, surfacing as a 500 wiring defect.
+- Continue authorization and the 4 KiB cap reuse `authorizeOperatorPause` and `maxPauseBodyBytes` exactly.
+- Registering `ao session continue` required an out-of-scope telemetry classification entry. The orchestrator added `ao session continue` to `legacyActorlessUserCLICommands` in `internal/telemetrymeta/cli.go`; Agent B did not edit that package.
 
-## Verification run so far
-_(none)_
+## Final verification — 2026-08-08
+
+Required scoped command from `backend/`:
+
+```bash
+go build ./... && go test ./internal/service/... ./internal/httpd/... ./internal/cli/...
+```
+
+- `go build ./...` — PASS (exit 0, no output).
+- Aggregate scoped tests — PASS: **1235 tests across 21 packages**.
+- `./internal/service/...` — PASS: **551 tests across 14 packages**.
+- `./internal/httpd/...` — PASS: **369 tests across 6 packages**.
+- `./internal/cli/...` — PASS: **315 tests across 1 package**.
+
+Raw package result lines from the same scoped package set:
+
+```text
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/agent
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/browser
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/chat
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/devimport
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/importer
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/notification
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/pr
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/project
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/review
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/session
+?   github.com/aoagents/agent-orchestrator/backend/internal/service/settings [no test files]
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/shellterm
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/spawncred
+ok  github.com/aoagents/agent-orchestrator/backend/internal/service/usage
+ok  github.com/aoagents/agent-orchestrator/backend/internal/httpd
+?   github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr [no test files]
+ok  github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec
+ok  github.com/aoagents/agent-orchestrator/backend/internal/httpd/apispec/specgen
+ok  github.com/aoagents/agent-orchestrator/backend/internal/httpd/controllers
+?   github.com/aoagents/agent-orchestrator/backend/internal/httpd/envelope [no test files]
+ok  github.com/aoagents/agent-orchestrator/backend/internal/cli
+```
+
+Generated artifacts:
+
+- `npm run api` from the repository root — PASS.
+- Literal `git diff --exit-code backend/internal/httpd/apispec/openapi.yaml frontend/src/api/schema.ts` — exit 1, because these two generated files contain the intentional uncommitted Phase 3B API additions versus HEAD.
+- A repeat `npm run api` produced byte-identical SHA-256 results for both files, proving the working-tree artifacts are current and regeneration is idempotent. Leave the regenerated files on disk for integration.
+
+## Files changed by Agent B across both sessions
+
+- `backend/internal/service/session/failover.go`
+- `backend/internal/service/session/failover_test.go`
+- `backend/internal/service/session/service.go` (failover mappings only)
+- `backend/internal/httpd/controllers/sessions.go`
+- `backend/internal/httpd/controllers/dto.go`
+- `backend/internal/httpd/apispec/specgen/build.go`
+- `backend/internal/httpd/apispec/openapi.yaml` (generated)
+- `backend/internal/cli/session.go`
+- `backend/internal/cli/session_test.go`
+- `frontend/src/api/schema.ts` (generated)
+- `docs/roles/mvp3b/AGENT_B_PROGRESS.md`
+
+## Integration status
+
+No Agent B blocker remains. The orchestrator-owned telemetry classification fix is already present and the scoped build/tests pass with it. Integration only needs to review and commit the uncommitted owned-file changes, including both generated artifacts together.

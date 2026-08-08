@@ -842,6 +842,20 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchUncertain):
 		return apierr.Conflict("SWITCH_UNCERTAIN",
 			"Switch runtime state is uncertain; inspect session and recover carefully", nil)
+	// Phase 3B manual failover. These are host-resolution or recovery states,
+	// never permission for the caller to pick a different target.
+	case errors.Is(err, domain.ErrFailoverNoTarget):
+		return apierr.Conflict("FAILOVER_NO_TARGET",
+			"This incident has no unused authorized failover target", nil)
+	case errors.Is(err, domain.ErrFailoverRoleRequired):
+		return apierr.Invalid("FAILOVER_ROLE_REQUIRED",
+			"This session has no durable role pin, so no failover ladder can be resolved", nil)
+	case errors.Is(err, domain.ErrFailoverLimitReached):
+		return apierr.Conflict("FAILOVER_LIMIT_REACHED",
+			"This incident has reached the manual failover attempt limit", nil)
+	case errors.Is(err, sessionmanager.ErrFailoverRecoveryRequired):
+		return apierr.Conflict("FAILOVER_RECOVERY_REQUIRED",
+			"A different incomplete switch must be recovered before this incident can continue", nil)
 	case errors.Is(err, sessionmanager.ErrNotWorker):
 		return apierr.Invalid("NOT_A_WORKER", "This session kind does not support switch or fresh conversation", nil)
 	case errors.Is(err, sessionmanager.ErrNotOrchestrator):

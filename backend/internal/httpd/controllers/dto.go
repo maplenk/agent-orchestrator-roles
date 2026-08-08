@@ -154,6 +154,32 @@ type SessionView struct {
 	// resume lifts the pin and never starts a process. See
 	// docs/roles/PHASE3A_PAUSE_CONTRACT.md.
 	Pause *SessionPauseView `json:"pause,omitempty"`
+	// Failover is the manager-derived answer to "what would Continue do?". It is
+	// null only for the ordinary session that is both unpaused and has no ladder.
+	// No client resolves or supplies a target.
+	Failover *SessionFailoverView `json:"failover" nullable:"true"`
+}
+
+// SessionFailoverTarget is a host-authorized failover destination.
+type SessionFailoverTarget struct {
+	Harness domain.AgentHarness `json:"harness"`
+	Model   string              `json:"model"`
+}
+
+// SessionFailoverPreviewTarget keeps preview nullability separate from the
+// required target in a successful Continue response.
+type SessionFailoverPreviewTarget SessionFailoverTarget
+
+// SessionFailoverView is the read-time manual-failover preview.
+type SessionFailoverView struct {
+	Available     bool                          `json:"available"`
+	RoleID        string                        `json:"roleId"`
+	NextTarget    *SessionFailoverPreviewTarget `json:"nextTarget" nullable:"true"`
+	NextRungIndex int                           `json:"nextRungIndex"`
+	AttemptsUsed  int                           `json:"attemptsUsed"`
+	MaxAttempts   int                           `json:"maxAttempts"`
+	IncidentID    string                        `json:"incidentId"`
+	Reason        string                        `json:"reason" enum:",no_role_pin,no_ladder,ladder_exhausted,limit_reached,not_paused,switch_unsupported"`
 }
 
 // SessionPauseView is the wire shape of a durable pause.
@@ -190,11 +216,31 @@ type ResumeSessionRequest struct {
 	IncidentID string `json:"incidentId" description:"The incident this resume answers."`
 }
 
+// ContinueSessionRequest is the whole body of POST
+// /api/v1/sessions/{sessionId}/continue. There is deliberately no harness,
+// model, or role field: the host resolves the next authorized rung.
+type ContinueSessionRequest struct {
+	IncidentID string `json:"incidentId" description:"The paused incident this continuation answers."`
+}
+
 // PauseSessionResponse is returned by both pause and resume.
 type PauseSessionResponse struct {
 	OK        bool              `json:"ok"`
 	SessionID domain.SessionID  `json:"sessionId"`
 	Pause     *SessionPauseView `json:"pause,omitempty"`
+}
+
+// ContinueSessionResponse reports the host-resolved continuation outcome.
+type ContinueSessionResponse struct {
+	OK           bool                  `json:"ok"`
+	SessionID    domain.SessionID      `json:"sessionId"`
+	IncidentID   string                `json:"incidentId"`
+	GenerationID string                `json:"generationId"`
+	Target       SessionFailoverTarget `json:"target"`
+	RungIndex    int                   `json:"rungIndex"`
+	AttemptSeq   int                   `json:"attemptSeq"`
+	Reused       bool                  `json:"reused"`
+	Session      SessionView           `json:"session"`
 }
 
 // ListSessionsResponse is the body of GET /api/v1/sessions.

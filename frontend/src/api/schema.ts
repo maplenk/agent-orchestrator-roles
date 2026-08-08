@@ -572,6 +572,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/sessions/{sessionId}/continue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Continue a paused worker on the next unused host-authorized failover target */
+        post: operations["continueSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/sessions/{sessionId}/conversation": {
         parameters: {
             query?: never;
@@ -1499,6 +1516,21 @@ export interface components {
         ContainerReapConfig: {
             disabled?: boolean;
         };
+        ContinueSessionRequest: {
+            /** @description The paused incident this continuation answers. */
+            incidentId: string;
+        };
+        ContinueSessionResponse: {
+            attemptSeq: number;
+            generationId: string;
+            incidentId: string;
+            ok: boolean;
+            reused: boolean;
+            rungIndex: number;
+            session: components["schemas"]["ControllersSessionView"];
+            sessionId: string;
+            target: components["schemas"]["SessionFailoverTarget"];
+        };
         ControllersPauseSessionRequest: {
             /** @description Client-generated stable id for this pause incident. */
             incidentId: string;
@@ -1533,6 +1565,7 @@ export interface components {
             /** Format: date-time */
             createdAt: string;
             displayName?: string;
+            failover: components["schemas"]["SessionFailoverView"];
             harness?: string;
             id: string;
             isPinned: boolean;
@@ -2209,6 +2242,25 @@ export interface components {
             ok: boolean;
             sessionId: string;
         };
+        SessionFailoverPreviewTarget: {
+            harness: string;
+            model: string;
+        } | null;
+        SessionFailoverTarget: {
+            harness: string;
+            model: string;
+        };
+        SessionFailoverView: {
+            attemptsUsed: number;
+            available: boolean;
+            incidentId: string;
+            maxAttempts: number;
+            nextRungIndex: number;
+            nextTarget: components["schemas"]["SessionFailoverPreviewTarget"];
+            /** @enum {string} */
+            reason: "" | "no_role_pin" | "no_ladder" | "ladder_exhausted" | "limit_reached" | "not_paused" | "switch_unsupported";
+            roleId: string;
+        } | null;
         SessionInterfaceTransition: {
             /** Format: date-time */
             completedAt?: null | string;
@@ -4643,6 +4695,78 @@ export interface operations {
             };
             /** @description Not Implemented */
             501: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    continueSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session identifier, e.g. project-1. */
+                sessionId: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ContinueSessionRequest"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ContinueSessionResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Forbidden */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
                 headers: {
                     [name: string]: unknown;
                 };

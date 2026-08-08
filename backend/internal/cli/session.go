@@ -150,6 +150,7 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionCleanupCommand(ctx))
 	cmd.AddCommand(newSessionClaimPRCommand(ctx))
 	cmd.AddCommand(newSessionSwitchCommand(ctx))
+	cmd.AddCommand(newSessionContinueCommand(ctx))
 	cmd.AddCommand(newSessionFreshCommand(ctx))
 	return cmd
 }
@@ -160,6 +161,12 @@ type sessionSwitchOptions struct {
 	targetModel   string
 	objective     string
 	json          bool
+}
+
+type sessionContinueOptions struct {
+	session  string
+	incident string
+	json     bool
 }
 
 type sessionFreshOptions struct {
@@ -187,6 +194,27 @@ type switchWorkerAPIResponse struct {
 	Session      sessionDTO `json:"session"`
 }
 
+type continueSessionAPIRequest struct {
+	IncidentID string `json:"incidentId"`
+}
+
+type continueSessionTargetDTO struct {
+	Harness string `json:"harness"`
+	Model   string `json:"model"`
+}
+
+type continueSessionAPIResponse struct {
+	OK           bool                     `json:"ok"`
+	SessionID    string                   `json:"sessionId"`
+	IncidentID   string                   `json:"incidentId"`
+	GenerationID string                   `json:"generationId"`
+	Target       continueSessionTargetDTO `json:"target"`
+	RungIndex    int                      `json:"rungIndex"`
+	AttemptSeq   int                      `json:"attemptSeq"`
+	Reused       bool                     `json:"reused"`
+	Session      sessionDTO               `json:"session"`
+}
+
 func newSessionSwitchCommand(ctx *commandContext) *cobra.Command {
 	var opts sessionSwitchOptions
 	cmd := &cobra.Command{
@@ -207,6 +235,26 @@ Other harnesses return SWITCH_NOT_SUPPORTED until their capability cells flip.`,
 	f.StringVar(&opts.targetHarness, "harness", "", "Target harness (required; must be role-map authorized)")
 	f.StringVar(&opts.targetModel, "model", "", "Optional target model (must match authorized pair when set)")
 	f.StringVar(&opts.objective, "objective", "", "Optional handoff objective")
+	f.BoolVar(&opts.json, "json", false, "Output as JSON")
+	return cmd
+}
+
+func newSessionContinueCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionContinueOptions
+	cmd := &cobra.Command{
+		Use:   "continue",
+		Short: "Continue a paused worker on its next authorized failover target",
+		Long: `Continue a paused worker on the next unused target from its host-authorized
+failover ladder. The daemon resolves the target; callers cannot select a harness,
+model, or role.`,
+		Args: noArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return ctx.continueSession(cmd.Context(), cmd, opts)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&opts.session, "session", "", "Session id (required)")
+	f.StringVar(&opts.incident, "incident", "", "Paused incident id (required)")
 	f.BoolVar(&opts.json, "json", false, "Output as JSON")
 	return cmd
 }
@@ -252,6 +300,36 @@ func (c *commandContext) switchSession(ctx context.Context, cmd *cobra.Command, 
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "switched %s kind=%s generation=%s harness=%s\n",
 		out.SessionID, out.Kind, out.GenerationID, out.Session.Harness)
+	return nil
+}
+
+func (c *commandContext) continueSession(ctx context.Context, cmd *cobra.Command, opts sessionContinueOptions) error {
+	session := strings.TrimSpace(opts.session)
+	if session == "" {
+		return usageError{errors.New("usage: --session is required")}
+	}
+	incident := strings.TrimSpace(opts.incident)
+	if incident == "" {
+		return usageError{errors.New("usage: --incident is required")}
+	}
+
+	path := "sessions/" + url.PathEscape(session) + "/continue"
+	var out continueSessionAPIResponse
+	if err := c.postJSONWithHeaders(ctx, path, continueSessionAPIRequest{
+		IncidentID: incident,
+	}, &out, spawnCallerHeaders()); err != nil {
+		return err
+	}
+	if opts.json {
+		return writeJSON(cmd.OutOrStdout(), out)
+	}
+
+	target := out.Target.Harness
+	if out.Target.Model != "" {
+		target += "/" + out.Target.Model
+	}
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "continued %s incident=%s generation=%s target=%s rung=%d attempt=%d reused=%t\n",
+		out.SessionID, out.IncidentID, out.GenerationID, target, out.RungIndex, out.AttemptSeq, out.Reused)
 	return nil
 }
 

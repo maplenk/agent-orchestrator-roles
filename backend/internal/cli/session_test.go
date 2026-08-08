@@ -115,6 +115,18 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","session":`+sessionJSON("demo-1", "demo", "worker", "idle", false)+`}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/switch":
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","generationId":"gen-1","kind":"switch","session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/continue":
+			var req map[string]json.RawMessage
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			var incident string
+			if raw, ok := req["incidentId"]; !ok || json.Unmarshal(raw, &incident) != nil || len(req) != 1 || incident != "inc-7" {
+				http.Error(w, "continue request must contain incidentId only", http.StatusBadRequest)
+				return
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","incidentId":"inc-7","generationId":"gen-2","target":{"harness":"codex","model":"o3"},"rungIndex":1,"attemptSeq":2,"reused":true,"session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/fresh-conversation":
 			_, _ = io.WriteString(w, `{"ok":true,"sessionId":"demo-1","generationId":"gen-f","kind":"fresh_conversation","session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
 		case r.Method == http.MethodPatch && r.URL.Path == "/api/v1/sessions/demo-1":
@@ -401,6 +413,99 @@ func TestSessionSwitch_ExternalCLISendsOperatorToken(t *testing.T) {
 	h := log.lastHeaders()
 	if h["X-AO-Operator-Spawn-Token"] != "op-switch-tok" {
 		t.Fatalf("headers=%v want operator token", h)
+	}
+}
+
+func TestSessionContinue_UsesBackendResolvedTarget(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv, log := sessionCommandServer(t)
+	if err := runfile.Write(cfg.runFile, runfile.Info{
+		PID: os.Getpid(), Port: serverPort(t, srv.URL), StartedAt: time.Unix(100, 0).UTC(),
+		OperatorSpawnToken: "op-continue-tok",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"AO_SESSION_ID", "AO_SPAWN_CAPABILITY", "AO_MANAGED_SESSION", "AO_OPERATOR_SPAWN_TOKEN"} {
+		t.Setenv(k, "")
+	}
+
+	out, errOut, err := executeCLI(t, Deps{
+		ProcessAlive: func(int) bool { return true },
+	}, "session", "continue", "--session", "demo-1", "--incident", "inc-7")
+	if err != nil {
+		t.Fatalf("session continue failed: %v\nstderr=%s", err, errOut)
+	}
+	for _, want := range []string{
+		"continued demo-1",
+		"incident=inc-7",
+		"generation=gen-2",
+		"target=codex/o3",
+		"rung=1",
+		"attempt=2",
+		"reused=true",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output=%q, want %q", out, want)
+		}
+	}
+	if got, want := log.all(), []string{"POST /api/v1/sessions/demo-1/continue"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("requests = %#v, want %#v", got, want)
+	}
+	if h := log.lastHeaders(); h["X-AO-Operator-Spawn-Token"] != "op-continue-tok" {
+		t.Fatalf("headers=%v want operator token", h)
+	}
+}
+
+func TestSessionContinue_RequiresSessionAndIncident(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "session", args: []string{"session", "continue", "--incident", "inc-7"}, want: "--session is required"},
+		{name: "incident", args: []string{"session", "continue", "--session", "demo-1"}, want: "--incident is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, errOut, err := executeCLI(t, Deps{}, tc.args...)
+			if err == nil || ExitCode(err) != 2 {
+				t.Fatalf("exit=%d err=%v stderr=%s", ExitCode(err), err, errOut)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err=%q, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestSessionContinue_HasNoTargetFlags(t *testing.T) {
+	_, errOut, err := executeCLI(t, Deps{}, "session", "continue", "--session", "demo-1", "--incident", "inc-7", "--harness", "codex")
+	if err == nil || ExitCode(err) != 2 {
+		t.Fatalf("exit=%d err=%v stderr=%s", ExitCode(err), err, errOut)
+	}
+	if !strings.Contains(err.Error(), "unknown flag: --harness") {
+		t.Fatalf("err=%q", err)
+	}
+}
+
+func TestSessionContinue_SurfacesDaemonError(t *testing.T) {
+	cfg := setConfigEnv(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `{"error":"conflict","code":"FAILOVER_NO_TARGET","message":"This incident has no unused authorized failover target","requestId":"req-failover"}`)
+	}))
+	t.Cleanup(srv.Close)
+	writeRunFileFor(t, cfg, srv)
+
+	_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+		"session", "continue", "--session", "demo-1", "--incident", "inc-7")
+	if err == nil || ExitCode(err) != 1 {
+		t.Fatalf("exit=%d err=%v", ExitCode(err), err)
+	}
+	for _, want := range []string{"FAILOVER_NO_TARGET", "no unused authorized failover target", "req-failover"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err=%q, want %q", err, want)
+		}
 	}
 }
 
