@@ -151,6 +151,36 @@ func TestForkRepairPartialHistory(t *testing.T) {
 	}
 }
 
+// The fork originally shipped at 0042-0049 before moving to 0053-0060. Those
+// first numbers now belong to upstream, so repair must preserve them while
+// recording only the fork migrations whose physical effects are present.
+func TestForkRepairOriginal42HistoryPreservesUpstreamNumbers(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db, 42, 43, 44, 45, 47)
+	seedForkSchema(t, db, 4)
+
+	if err := repairForkMigrationVersions(db); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+
+	got := ledger(t, db)
+	for _, v := range []int64{42, 43, 44, 45, 47} {
+		if !got[v] {
+			t.Errorf("upstream-reclaimed version %d was removed", v)
+		}
+	}
+	for _, v := range []int64{9000, 9001, 9002, 9003} {
+		if !got[v] {
+			t.Errorf("physically applied migration %d was not repaired", v)
+		}
+	}
+	for _, v := range []int64{9004, 9005, 9006, 9007} {
+		if got[v] {
+			t.Errorf("migration %d was recorded without its physical effect", v)
+		}
+	}
+}
+
 // A database that only ever ran upstream. Version 53 here is the MUSE
 // migration, and the fork's fingerprints are absent. Touching it would delete a
 // legitimate entry and re-run Muse against an already-widened CHECK.

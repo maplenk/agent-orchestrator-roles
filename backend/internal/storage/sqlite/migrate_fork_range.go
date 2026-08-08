@@ -31,25 +31,29 @@ import (
 // database it means the role columns. Rewriting the ledger on the version
 // number alone would delete a legitimate upstream entry and re-run Muse.
 type forkMigration struct {
-	oldVersion int64
-	newVersion int64
-	name       string
+	// firstVersion is the migration's original fork-local number. Those numbers
+	// were later claimed by upstream, so a repair may copy their timestamp into
+	// the 9000 ledger but must never delete them.
+	firstVersion int64
+	oldVersion   int64
+	newVersion   int64
+	name         string
 	// applied reports whether this migration's effect is physically present.
 	applied func(*sql.Tx) (bool, error)
 }
 
 func forkMigrations() []forkMigration {
 	return []forkMigration{
-		{53, 9000, "session_role_fields", hasSessionsColumnTx("role_id")},
-		{54, 9001, "session_spawn_capability_hash", hasSessionsColumnTx("spawn_capability_hash")},
-		{55, 9002, "lifecycle_ledger", hasTableTx("lifecycle_ledger")},
-		{56, 9003, "session_switch_pending", hasSessionsColumnTx("switch_pending_json")},
-		{57, 9004, "one_active_orchestrator", hasIndexTx("idx_sessions_one_active_orchestrator")},
-		{58, 9005, "orchestrator_replacement_intent", hasTableTx("orchestrator_replacement_intent")},
+		{42, 53, 9000, "session_role_fields", hasSessionsColumnTx("role_id")},
+		{43, 54, 9001, "session_spawn_capability_hash", hasSessionsColumnTx("spawn_capability_hash")},
+		{44, 55, 9002, "lifecycle_ledger", hasTableTx("lifecycle_ledger")},
+		{45, 56, 9003, "session_switch_pending", hasSessionsColumnTx("switch_pending_json")},
+		{46, 57, 9004, "one_active_orchestrator", hasIndexTx("idx_sessions_one_active_orchestrator")},
+		{47, 58, 9005, "orchestrator_replacement_intent", hasTableTx("orchestrator_replacement_intent")},
 		// 0059 rebuilt the ledger to admit a new kind; the rebuilt table's SQL
 		// text is the only trace it left.
-		{59, 9006, "lifecycle_ledger_orchestrator_fresh", tableSQLContainsTx("lifecycle_ledger", "orchestrator_fresh_conversation")},
-		{60, 9007, "session_pause", hasSessionsColumnTx("pause_json")},
+		{48, 59, 9006, "lifecycle_ledger_orchestrator_fresh", tableSQLContainsTx("lifecycle_ledger", "orchestrator_fresh_conversation")},
+		{49, 60, 9007, "session_pause", hasSessionsColumnTx("pause_json")},
 	}
 }
 
@@ -81,14 +85,40 @@ func repairForkMigrationVersions(db *sql.DB) error {
 	defer func() { _ = tx.Rollback() }()
 
 	for _, m := range forkMigrations() {
-		// Already repaired. Checked FIRST, and this is what makes the repair
-		// idempotent: once 9000 is recorded, a later version 53 row is
-		// upstream's Muse migration and must be left alone even though the
-		// fork's fingerprint is still (correctly) present.
+		// The fork first shipped these migrations at 0042-0049, before moving
+		// them to 0053-0060. Real databases from that first range still carry the
+		// physical role schema but no 9000 entries. Upstream has since reclaimed
+		// 42-49, so preserve those ledger rows and only add the 9000 identity when
+		// the fork-specific physical fingerprint proves the migration ran.
 		newRecorded, err := versionRecorded(tx, m.newVersion)
 		if err != nil {
 			return fmt.Errorf("fork migration repair: %s: %w", m.name, err)
 		}
+		if !newRecorded {
+			firstRecorded, err := versionRecorded(tx, m.firstVersion)
+			if err != nil {
+				return fmt.Errorf("fork migration repair: %s: %w", m.name, err)
+			}
+			present, err := m.applied(tx)
+			if err != nil {
+				return fmt.Errorf("fork migration repair: %s: %w", m.name, err)
+			}
+			if firstRecorded && present {
+				if _, err := tx.Exec(
+					`INSERT INTO goose_db_version (version_id, is_applied, tstamp)
+					 SELECT ?, 1, tstamp FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1`,
+					m.newVersion, m.firstVersion,
+				); err != nil {
+					return fmt.Errorf("fork migration repair: record %d: %w", m.newVersion, err)
+				}
+				newRecorded = true
+			}
+		}
+
+		// Already repaired. Checked FIRST, and this is what makes the repair
+		// idempotent: once 9000 is recorded, a later version 53 row is
+		// upstream's Muse migration and must be left alone even though the
+		// fork's fingerprint is still (correctly) present.
 		if newRecorded {
 			continue
 		}

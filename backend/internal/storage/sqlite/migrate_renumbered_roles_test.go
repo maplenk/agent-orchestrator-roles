@@ -23,13 +23,11 @@ import (
 //     four — divergence with no error at all; and
 //   - RE-RUN the roles migrations at their new numbers.
 //
-// The second one is the safety net: re-running `ALTER TABLE ... ADD COLUMN` on
-// a column that already exists fails loudly. This test pins that it DOES fail,
-// because it is the only thing standing between an old database and a daemon
-// that boots onto a schema nobody verified. If a future migration edit made the
-// roles set idempotent — an `IF NOT EXISTS` here, a guard there — the loud
-// failure would disappear and the silent skip would be all that was left.
-func TestOldRolesDatabaseCannotMigrateSilently(t *testing.T) {
+// repairForkMigrationVersions now resolves both halves before goose runs: it
+// records the physically present role migrations at 9000+, while retaining the
+// upstream-reclaimed 42-49 ledger identities. reconcileSchema independently
+// repairs any upstream physical effects skipped by the historical collision.
+func TestOldRolesDatabaseRepairsBothMigrationIdentities(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ao.db")
 	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
@@ -51,20 +49,33 @@ func TestOldRolesDatabaseCannotMigrateSilently(t *testing.T) {
 		}
 	}
 
-	// Now migrate as a daemon would on that machine.
-	err = migrate(db)
-	if err == nil {
-		t.Fatal("an old roles database migrated cleanly. That means the roles migrations became " +
-			"idempotent, so the loud failure is gone — and the SILENT half remains: goose still " +
-			"believes upstream's 0042/0043/0044/0047 are applied and will never run them, so the " +
-			"daemon boots onto a schema missing sessions.pinned and agent_model_catalog while the " +
-			"code expects both. If this behaviour is intentional it needs a real repair step " +
-			"(see UPSTREAM_SYNC_PLAN.md and upstream #3598), not silence.")
+	// Now migrate as a daemon would on that machine. It must repair rather than
+	// relying on a duplicate-column failure as a safety net.
+	if err := migrate(db); err != nil {
+		t.Fatalf("migrate original roles history: %v", err)
 	}
-	// The failure must be about the schema already being there, not some
-	// unrelated breakage that would mask a real regression later.
-	if !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		t.Fatalf("migrate failed, but not with the expected duplicate-column error: %v", err)
+
+	got := ledger(t, db)
+	for v := int64(42); v <= 49; v++ {
+		if !got[v] {
+			t.Errorf("upstream-reclaimed version %d was removed", v)
+		}
+	}
+	for v := int64(9000); v <= 9007; v++ {
+		if !got[v] {
+			t.Errorf("role migration %d was not repaired", v)
+		}
+	}
+
+	var pinnedColumns, catalogTables int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'is_pinned'`).Scan(&pinnedColumns); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'agent_model_catalog'`).Scan(&catalogTables); err != nil {
+		t.Fatal(err)
+	}
+	if pinnedColumns != 1 || catalogTables != 1 {
+		t.Fatalf("upstream schema after repair: sessions.is_pinned=%d agent_model_catalog=%d, want 1 each", pinnedColumns, catalogTables)
 	}
 }
 
