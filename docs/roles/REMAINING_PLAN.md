@@ -1,8 +1,9 @@
 # Multi-sub roles — status & remaining plan
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
-**Active integration:** final roles MVP @ `051db38b`; clean full gate and live
-acceptance pending before it moves to `roles/multi-sub-v1`
+**Active integration:** final roles MVP code @ `06aab758`, documentation
+close-out @ `4c5e284a`; clean full gate and live acceptance pending before it
+moves to `roles/multi-sub-v1`
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
 **Current gate:** final MVP integration and live acceptance on one exact SHA
@@ -29,7 +30,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Manual Continue implemented and reviewed; final 12-record rerun pending.** Automatic failover is post-MVP. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
-| CI | Focused integration gates passed through `051db38b`. The clean full backend/race/lint/frontend/API gate on that exact SHA remains an acceptance precondition. |
+| CI | Focused integration gates passed through code head `06aab758`. The clean full backend/race/lint/frontend/API gate on one immutable SHA at or after docs head `4c5e284a` remains an acceptance precondition. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
 > Claude Code because strictness enforces role/routing/delegation policy, not a
@@ -239,7 +240,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 | Task | Detail |
 |------|--------|
-| Clean full gate | **Pending** on exact integrated SHA `051db38b` |
+| Clean full gate | **Pending** on one exact integrated SHA at or after `4c5e284a` |
 | Worker dogfood | **Pending:** all 12 records from scratch |
 | Orchestrator dogfood | **Pending:** Codex→Claude, Claude→Codex, fencing and same-generation recovery |
 | Promotion | **None.** Limit detection and Claude read-only stay false |
@@ -351,8 +352,7 @@ Still open or partial:
 
 ## 7. Immediate next action
 
-1. Run the full final gate from a clean checkout of `051db38b` (or its
-   docs-only successor).
+1. Run the full final gate from a clean checkout at or after `4c5e284a`.
 2. Independently review that immutable result and resolve any real finding.
 3. Rerun all 12 worker Continue records plus strict Codex→Claude and
    Claude→Codex orchestrator records on that SHA. Claude read-only remains

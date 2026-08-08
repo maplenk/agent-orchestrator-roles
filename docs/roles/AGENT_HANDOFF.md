@@ -7,7 +7,7 @@
 > [`REMAINING_PLAN.md`](REMAINING_PLAN.md).
 
 > **Current close-out (2026-08-08):** implementation and review fixes are
-> integrated through `051db38b`. The next action is the clean full gate,
+> integrated through code head `06aab758` and docs head `4c5e284a`. The next action is the clean full gate,
 > independent immutable-SHA review, and final worker/orchestrator live records.
 > Do not restart an older phase from the historical priority lists below.
 
@@ -35,7 +35,7 @@
 | **Phase 2B** | **2B-0a / 0b / 1 / 2 landed; final-MVP 2B-3 implemented, live acceptance pending.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
 | **Critical path next** | Run the clean final gate and independent immutable-SHA review, then capture worker/orchestrator evidence on that SHA |
 | **Parallel optional** | Phase 1-F / Claude RO (1-B) for explicitly read-only Claude roles; 2B-3 no longer depends on it |
-| **Current clean gate** | Focused integration gates passed through `051db38b`; the full backend/race/lint/frontend/API gate must now run on the exact close-out SHA |
+| **Current clean gate** | Focused integration gates passed through code head `06aab758`; the full backend/race/lint/frontend/API gate must now run on one exact SHA at or after docs head `4c5e284a` |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -535,7 +535,7 @@ High-level protocol used successfully:
 ## 14. Immediate next action for the successor agent
 
 1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md`.
-2. Run the clean final gate on one immutable SHA at or after `051db38b`.
+2. Run the clean final gate on one immutable SHA at or after `4c5e284a`.
 3. Give that immutable result an independent review and resolve real findings.
 4. Capture all 12 worker records and both strict orchestrator switch directions
    on the same accepted SHA. Keep `limit_detection_supported=false` and Claude

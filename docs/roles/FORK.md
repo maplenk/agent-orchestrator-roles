@@ -10,7 +10,7 @@ Local working tree: `/Users/tagtaste/Documents/QBApps/agent-orchestrator-roles`
 | Remote name | `upstream` |
 | Pinned SHA | See `AO_BASELINE_SHA.txt` |
 | Roles trunk | `roles/multi-sub-v1` |
-| Active integration | Final roles MVP integrated at `051db38b`; clean gate and live acceptance pending |
+| Active integration | Final roles MVP code at `06aab758`, docs close-out at `4c5e284a`; clean gate and live acceptance pending |
 
 Pin before feature work. Own migration numbers on this fork (do not collide with upstream 0042 races from #3548 / #3386).
 

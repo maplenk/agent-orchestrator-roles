@@ -3,7 +3,9 @@
 **Status:** implementation and independent review complete; clean final gate and
 live acceptance remain.
 
-**Current integrated implementation SHA:** `051db38b`
+**Current integrated code SHA:** `06aab758`
+
+**Documentation close-out integrated as:** `4c5e284a`
 
 **Detailed worker-Continue contract:**
 [`PHASE3B_MVP_CONTRACT.md`](PHASE3B_MVP_CONTRACT.md)
@@ -347,7 +349,7 @@ Deferred beyond this MVP:
 - Pi/Muse orchestrator switching; and
 - automatic enforcement of model-quality/instruction-following behavior.
 
-## 10. Current status — `051db38b`
+## 10. Current status — code `06aab758`, docs `4c5e284a`
 
 Implementation and review close-out are integrated:
 
@@ -362,11 +364,13 @@ Implementation and review close-out are integrated:
   and
 - `051db38b` closes review gaps around paused switches, post-ack promotion,
   response hydration, exact target presentation, and provider-default
-  ambiguity.
+  ambiguity;
+- `06aab758` closes the final service/acceptance lint findings; and
+- `4c5e284a` integrates this canonical documentation close-out.
 
 Focused integrated tests and API/frontend checks passed during the waves. The
 acceptance claim is intentionally still open until the entire clean gate and
-all live records run on one immutable final SHA.
+all live records run on one immutable final SHA at or after `4c5e284a`.
 
 Nothing is promoted: `limit_detection_supported=false` for every harness and
 Claude Code remains `read_only_enforced=false`. Evidence captured before this

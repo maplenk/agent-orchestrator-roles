@@ -19,7 +19,8 @@ CI job is green, and the two live Step 5 dogfood records
 (orchestrator fresh conversation, and a genuine post-stop recovery on the
 original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Phase
 3B manual worker Continue and the final-MVP 2B-3 core, service/read model, API,
-CLI and desktop surface are integrated through `051db38b`. Probe-consumer and
+CLI and desktop surface plus final lint fixes are integrated through code head
+`06aab758`; the documentation close-out is `4c5e284a`. Probe-consumer and
 review gaps are closed. The clean final gate, independent immutable-SHA review,
 and live acceptance remain.
 The estimates below are original planning estimates, not a claim

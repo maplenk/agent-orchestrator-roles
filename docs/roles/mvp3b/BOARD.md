@@ -14,8 +14,8 @@ the durability review and green again.
 The original Phase 3B Wave 1/2 record below is retained. The final MVP added
 the probe close-out and the previously deferred in-place Codex↔Claude
 orchestrator switch. Production code and independent review fixes are
-integrated through `051db38b`; the clean full gate and final live acceptance
-are pending.
+integrated through code head `06aab758`; the documentation close-out is
+`4c5e284a`. The clean full gate and final live acceptance are pending.
 
 | Wave | Commit | Result |
 |---|---|---|
@@ -29,6 +29,8 @@ are pending.
 | Liveness contract | `85c5f1a6` | Adapter/port docs state authoritative absence versus uncertainty explicitly |
 | Permission presence | `b303bed9` | Both role permission booleans are required at domain, HTTP, and CLI JSON ingress |
 | Review close-out | `051db38b` | Paused-switch refusal, post-ack promotion typing, response hydration, exact target presentation, and model-wire ambiguity fixed |
+| Final lint close-out | `06aab758` | Service and acceptance harness satisfy the final lint gate without changing product scope |
+| Documentation close-out | `4c5e284a` | Canonical MVP spec and active status/board links integrated |
 
 ### Decisions pinned by review
 
