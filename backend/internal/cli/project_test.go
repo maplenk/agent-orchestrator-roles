@@ -139,12 +139,14 @@ func TestProjectSetConfig_RolePermissionBooleansMustBeExplicit(t *testing.T) {
 		name        string
 		harness     string
 		permissions string
+		extra       string
 		wantError   string
 	}{
 		{name: "missing workspaceWrites", harness: "claude-code", permissions: `{"canSpawn":true}`, wantError: "permissions.workspaceWrites: required boolean"},
 		{name: "null workspaceWrites", harness: "claude-code", permissions: `{"workspaceWrites":null,"canSpawn":true}`, wantError: "permissions.workspaceWrites: required boolean"},
 		{name: "missing canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true}`, wantError: "permissions.canSpawn: required boolean"},
 		{name: "null canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":null}`, wantError: "permissions.canSpawn: required boolean"},
+		{name: "unknown binding field", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`, extra: `,"surprise":true`, wantError: "unknown field"},
 		{name: "explicit true", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`},
 		{name: "explicit false", harness: "codex", permissions: `{"workspaceWrites":false,"canSpawn":true}`},
 	} {
@@ -152,7 +154,7 @@ func TestProjectSetConfig_RolePermissionBooleansMustBeExplicit(t *testing.T) {
 			cfg := setConfigEnv(t)
 			srv, capture := projectServer(t, http.StatusOK, `{"project":{"id":"demo","path":"/repo/demo"}}`)
 			writeRunFileFor(t, cfg, srv)
-			roleJSON := `{"roleMap":{"role_map_schema_version":1,"strictDelegation":true,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"` + tc.harness + `","permissions":` + tc.permissions + `}}}}`
+			roleJSON := `{"roleMap":{"role_map_schema_version":1,"strictDelegation":true,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"` + tc.harness + `","permissions":` + tc.permissions + tc.extra + `}}}}`
 
 			_, errOut, err := executeCLI(t, Deps{
 				ProcessAlive: func(int) bool { return true },

@@ -128,6 +128,7 @@ func (b *roleBinding) UnmarshalJSON(data []byte) error {
 
 	var wire bindingWire
 	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
 	if err := dec.Decode(&wire); err != nil {
 		return err
 	}

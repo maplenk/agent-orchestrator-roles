@@ -272,18 +272,63 @@ func marshalProjectConfig(cfg domain.ProjectConfig) (sql.NullString, error) {
 }
 
 // unmarshalProjectConfig decodes the nullable JSON column back into the typed
-// struct. SQL NULL (an unset config) decodes to a zero value. A damaged config
-// (invalid JSON from a direct DB edit or migration bug) also degrades to a zero
-// config rather than erroring — a corrupt config must never block access to the
-// project row, nor fail an entire ListProjects.
+// struct. SQL NULL (an unset config) decodes to a zero value. Invalid top-level
+// JSON still degrades to zero rather than blocking access to the project row.
+// A legacy or damaged nested role binding uses the persisted compatibility
+// decoder below so it cannot erase otherwise-valid project config.
 func unmarshalProjectConfig(s sql.NullString) domain.ProjectConfig {
 	if !s.Valid || s.String == "" {
 		return domain.ProjectConfig{}
 	}
 	var cfg domain.ProjectConfig
-	if err := json.Unmarshal([]byte(s.String), &cfg); err != nil {
+	data := []byte(s.String)
+	if err := json.Unmarshal(data, &cfg); err == nil {
+		return cfg
+	}
+	return unmarshalPersistedProjectConfig(data)
+}
+
+// unmarshalPersistedProjectConfig is the compatibility decoder for durable
+// rows written before RoleBinding required both permission booleans and
+// rejected unknown fields. Request ingress must remain strict, but making that
+// authoring rule retroactive at the storage boundary turns one old binding into
+// a zero ProjectConfig and lets an unrelated read-modify-write erase the whole
+// config. Decode only the persisted role map through method-free wire aliases;
+// all other ProjectConfig fields keep their ordinary typed decoding.
+func unmarshalPersistedProjectConfig(data []byte) domain.ProjectConfig {
+	type persistedProjectConfig domain.ProjectConfig
+
+	var cfg domain.ProjectConfig
+	wire := struct {
+		*persistedProjectConfig
+		RoleMap json.RawMessage `json:"roleMap,omitempty"`
+	}{persistedProjectConfig: (*persistedProjectConfig)(&cfg)}
+	if err := json.Unmarshal(data, &wire); err != nil {
 		return domain.ProjectConfig{}
 	}
+	if len(wire.RoleMap) == 0 || string(wire.RoleMap) == "null" {
+		return cfg
+	}
+
+	type persistedRoleBinding domain.RoleBinding
+	type persistedRoleMap domain.RoleMap
+
+	var roleMap domain.RoleMap
+	roleWire := struct {
+		*persistedRoleMap
+		Roles map[string]persistedRoleBinding `json:"roles,omitempty"`
+	}{persistedRoleMap: (*persistedRoleMap)(&roleMap)}
+	if err := json.Unmarshal(wire.RoleMap, &roleWire); err != nil {
+		// A damaged role map must not erase valid, unrelated project config.
+		return cfg
+	}
+	if roleWire.Roles != nil {
+		roleMap.Roles = make(map[string]domain.RoleBinding, len(roleWire.Roles))
+		for id, binding := range roleWire.Roles {
+			roleMap.Roles[id] = domain.RoleBinding(binding)
+		}
+	}
+	cfg.RoleMap = roleMap
 	return cfg
 }
 

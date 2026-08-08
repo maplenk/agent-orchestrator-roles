@@ -432,17 +432,19 @@ func TestProjectsAPI_RequiresExplicitRolePermissionBooleans(t *testing.T) {
 		name        string
 		harness     string
 		permissions string
+		extra       string
 		valid       bool
 	}{
 		{name: "missing workspaceWrites", harness: "claude-code", permissions: `{"canSpawn":true}`},
 		{name: "null workspaceWrites", harness: "claude-code", permissions: `{"workspaceWrites":null,"canSpawn":true}`},
 		{name: "missing canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true}`},
 		{name: "null canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":null}`},
+		{name: "unknown binding field", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`, extra: `,"surprise":true`},
 		{name: "explicit true", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`, valid: true},
 		{name: "explicit false", harness: "codex", permissions: `{"workspaceWrites":false,"canSpawn":true}`, valid: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			request := `{"config":{"roleMap":{"role_map_schema_version":1,"strictDelegation":true,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"` + tc.harness + `","permissions":` + tc.permissions + `}}}}}`
+			request := `{"config":{"roleMap":{"role_map_schema_version":1,"strictDelegation":true,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"` + tc.harness + `","permissions":` + tc.permissions + tc.extra + `}}}}}`
 			body, status, _ := doRequest(t, srv, "PUT", "/api/v1/projects/permission-presence/config", request)
 			if tc.valid {
 				if status != http.StatusOK {

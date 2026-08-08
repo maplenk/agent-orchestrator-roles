@@ -2,8 +2,10 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"path/filepath"
 	"reflect"
 	"sync"
 	"testing"
@@ -405,6 +407,92 @@ func TestProjectConfigRoundTrips(t *testing.T) {
 	}
 	if got, _, _ := s.GetProject(ctx, "cfg"); !got.Config.IsZero() {
 		t.Fatalf("cleared config = %#v, want zero", got.Config)
+	}
+}
+
+func TestProjectConfigMalformedPersistedRoleBindingPreservesUnrelatedConfig(t *testing.T) {
+	dataDir := t.TempDir()
+	s := sqlitetest.MustOpenAt(t, dataDir)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := s.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "legacy-role", Path: "/tmp/legacy-role", RegisteredAt: now,
+	}); err != nil {
+		t.Fatalf("seed project: %v", err)
+	}
+
+	// Simulate a durable row authored before role permissions became
+	// presence-aware. The binding is malformed for current ingress (missing
+	// workspaceWrites and carrying an unknown field), but the rest of the
+	// ProjectConfig is valid and must survive a read-modify-write.
+	rawConfig := `{
+		"defaultBranch":"develop",
+		"env":{"KEEP":"yes"},
+		"agentRules":"preserve me",
+		"roleMap":{
+			"role_map_schema_version":1,
+			"orchestratorRole":"orchestrator",
+			"roles":{"orchestrator":{
+				"template":"orchestrator",
+				"harness":"codex",
+				"permissions":{"canSpawn":true},
+				"legacyField":"persistence-only"
+			}}
+		}
+	}`
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Errorf("close raw database: %v", err)
+		}
+	})
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET config = ? WHERE id = ?`, rawConfig, "legacy-role"); err != nil {
+		t.Fatalf("seed malformed persisted config: %v", err)
+	}
+
+	got, ok, err := s.GetProject(ctx, "legacy-role")
+	if err != nil || !ok {
+		t.Fatalf("get project: ok=%v err=%v", ok, err)
+	}
+	if got.Config.IsZero() || got.Config.DefaultBranch != "develop" || got.Config.Env["KEEP"] != "yes" || got.Config.AgentRules != "preserve me" {
+		t.Fatalf("decoded config = %#v, want unrelated fields preserved", got.Config)
+	}
+	binding, ok := got.Config.RoleMap.Roles["orchestrator"]
+	if !ok || binding.Permissions.WorkspaceWrites || !binding.Permissions.CanSpawn {
+		t.Fatalf("decoded persisted binding = %#v", binding)
+	}
+
+	// Mirrors the SCM observer's origin-URL backfill: it changes an unrelated
+	// project field and writes the whole row back. That path must never persist
+	// SQL NULL / a zero config because one old role binding was strict-invalid.
+	got.RepoOriginURL = "https://example.com/acme/legacy-role.git"
+	if err := s.UpsertProject(ctx, got); err != nil {
+		t.Fatalf("persist unrelated row update: %v", err)
+	}
+	after, ok, err := s.GetProject(ctx, "legacy-role")
+	if err != nil || !ok {
+		t.Fatalf("get updated project: ok=%v err=%v", ok, err)
+	}
+	if after.Config.IsZero() || after.Config.DefaultBranch != "develop" || after.Config.Env["KEEP"] != "yes" || after.Config.AgentRules != "preserve me" {
+		t.Fatalf("updated config = %#v, want unrelated fields preserved", after.Config)
+	}
+
+	var persisted sql.NullString
+	if err := db.QueryRowContext(ctx, `SELECT config FROM projects WHERE id = ?`, "legacy-role").Scan(&persisted); err != nil {
+		t.Fatalf("read persisted config: %v", err)
+	}
+	if !persisted.Valid || persisted.String == "" {
+		t.Fatalf("persisted config = %#v, want non-zero JSON", persisted)
+	}
+	var persistedJSON map[string]any
+	if err := json.Unmarshal([]byte(persisted.String), &persistedJSON); err != nil {
+		t.Fatalf("decode persisted JSON: %v", err)
+	}
+	if persistedJSON["defaultBranch"] != "develop" || persistedJSON["agentRules"] != "preserve me" {
+		t.Fatalf("persisted JSON = %#v, want unrelated fields", persistedJSON)
 	}
 }
 
