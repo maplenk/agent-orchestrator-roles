@@ -231,16 +231,12 @@ func TestTick_SkipsSessionWithoutHandle(t *testing.T) {
 	}
 }
 
-// The tmux adapter now answers "dead" for an ABSENT namespaced server, because
-// panes cannot outlive their server. It still answers with an ERROR for a
-// server it merely could not reach. This test pins the half that must not move:
-// an inconclusive probe stays inconclusive here, and never becomes a death.
-//
-// Without it, narrowing the adapter's classification could be followed later by
-// a well-meaning simplification that collapses both cases, which is issue #3475
-// with extra steps.
-func TestTick_UnreachableRuntimeStaysInconclusiveNotDead(t *testing.T) {
+// Even typed server absence remains inconclusive in the steady-state board
+// reaper. Boot/restart/cleanup may opt into the fact, but this path must retain
+// issue #3475's shield against one server outage becoming N session deaths.
+func TestTick_RuntimeProbeErrorsStayInconclusiveNotDead(t *testing.T) {
 	for _, probeErr := range []error{
+		fmt.Errorf("tmux runtime: probe session mer-1: %w: no server running", ports.ErrRuntimeServerAbsent),
 		fmt.Errorf("tmux runtime: probe session mer-1: %w: error connecting", ports.ErrRuntimeUnavailable),
 		errors.New("tmux runtime: probe session mer-1: some unknown failure"),
 	} {
