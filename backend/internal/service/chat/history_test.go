@@ -115,6 +115,17 @@ func completeTurn(t *testing.T, h *harness, text, providerTurn string) string {
 			TurnState: domain.TurnStateCompleted,
 		},
 	)
+	h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool {
+		for _, candidate := range s.Turns {
+			if candidate.ID == turn.ID &&
+				candidate.ProviderTurnID == providerTurn &&
+				candidate.State == domain.TurnStateCompleted &&
+				candidate.CompletedAt != nil {
+				return true
+			}
+		}
+		return false
+	})
 	return turn.ID
 }
 
