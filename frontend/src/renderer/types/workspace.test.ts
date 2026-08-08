@@ -9,6 +9,7 @@ import {
 	sessionNeedsAttention,
 	toAgentProvider,
 	toSessionActivity,
+	toSessionSwitch,
 	toSessionStatus,
 	openPRs,
 	mergedPRCount,
@@ -91,6 +92,48 @@ describe("toSessionActivity", () => {
 	it("returns undefined for a missing activity", () => {
 		expect(toSessionActivity(undefined)).toBeUndefined();
 		expect(toSessionActivity(null)).toBeUndefined();
+	});
+});
+
+describe("toSessionSwitch", () => {
+	it("preserves exact authorized models, including provider default", () => {
+		expect(
+			toSessionSwitch({
+				available: true,
+				roleId: "lead",
+				current: { harness: "claude-code", model: "sonnet" },
+				targets: [
+					{ harness: "codex", model: "" },
+					{ harness: "codex", model: "o4-mini" },
+				],
+				pending: null,
+				reason: "",
+			}),
+		).toMatchObject({
+			available: true,
+			targets: [
+				{ harness: "codex", model: "" },
+				{ harness: "codex", model: "o4-mini" },
+			],
+		});
+	});
+
+	it("never carries targets when the preview is unavailable or malformed", () => {
+		expect(
+			toSessionSwitch({
+				available: true,
+				roleId: "lead",
+				current: { harness: "claude-code", model: "sonnet" },
+				targets: [{ harness: "codex", model: "o4-mini" }],
+				pending: null,
+				reason: "unavailable",
+			}),
+		).toMatchObject({ available: false, targets: [], reason: "unavailable" });
+		expect(toSessionSwitch({ available: true, reason: "future_reason", targets: [] })).toMatchObject({
+			available: false,
+			targets: [],
+			reason: "unavailable",
+		});
 	});
 });
 

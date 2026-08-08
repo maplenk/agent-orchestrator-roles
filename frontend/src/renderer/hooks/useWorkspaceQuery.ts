@@ -11,6 +11,7 @@ import {
 	toProjectKind,
 	toSessionActivity,
 	toSessionFailover,
+	toSessionSwitch,
 	toSessionStatus,
 	type WorkspaceSummary,
 } from "../types/workspace";
@@ -118,6 +119,8 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						// grows an eighth `reason` would otherwise reach the reason→copy
 						// map with a key it has no entry for.
 						failover: toSessionFailover(session.failover),
+						// Orchestrator-only host-authorized targets + durable switch fence.
+						switch: toSessionSwitch(session.switch),
 						pinnedAt: session.pinnedAt ?? undefined,
 						prs: (session.prs ?? []).map(toPullRequestFacts),
 					};

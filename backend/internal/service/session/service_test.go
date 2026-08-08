@@ -27,16 +27,18 @@ func (f *fakeTelemetrySink) Emit(_ context.Context, ev ports.TelemetryEvent) {
 func (f *fakeTelemetrySink) Close(context.Context) error { return nil }
 
 type fakeStore struct {
-	sessions  map[domain.SessionID]domain.SessionRecord
-	pr        map[domain.SessionID]domain.PRFacts
-	prs       map[domain.SessionID][]domain.PullRequest
-	projects  map[string]domain.ProjectRecord
-	worktrees map[domain.SessionID][]domain.SessionWorktreeRecord
-	checks    map[string][]domain.PullRequestCheck
-	reviews   map[string][]domain.PullRequestReview
-	threads   map[string][]domain.PullRequestReviewThread
-	comments  map[string][]domain.PullRequestComment
-	num       int
+	sessions        map[domain.SessionID]domain.SessionRecord
+	pr              map[domain.SessionID]domain.PRFacts
+	prs             map[domain.SessionID][]domain.PullRequest
+	projects        map[string]domain.ProjectRecord
+	worktrees       map[domain.SessionID][]domain.SessionWorktreeRecord
+	checks          map[string][]domain.PullRequestCheck
+	reviews         map[string][]domain.PullRequestReview
+	threads         map[string][]domain.PullRequestReviewThread
+	comments        map[string][]domain.PullRequestComment
+	num             int
+	getProjectCalls int
+	getProjectErr   error
 }
 
 func newFakeStore() *fakeStore {
@@ -229,6 +231,10 @@ func (f *fakeStore) ListPRComments(_ context.Context, prURL string) ([]domain.Pu
 }
 
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
+	f.getProjectCalls++
+	if f.getProjectErr != nil {
+		return domain.ProjectRecord{}, false, f.getProjectErr
+	}
 	p, ok := f.projects[id]
 	return p, ok, nil
 }
@@ -1075,35 +1081,36 @@ type fakeCommander struct {
 	// from several goroutines at once, so an unguarded counter is a real race
 	// that made `go test -race` unusable for this whole package — and a fake
 	// that races is a fake whose assertions cannot be trusted either.
-	mu                     sync.Mutex
-	killed                 []domain.SessionID
-	retired                []domain.SessionID
-	sent                   []domain.SessionID
-	sentMessages           []string
-	cleanupProjects        []domain.ProjectID
-	killErr                error
-	retireErr              error
-	sendErr                error
-	cleanupErr             error
-	spawnErr               error
-	spawnRecord            domain.SessionRecord
-	spawnFunc              func(ports.SpawnConfig) domain.SessionRecord
-	spawnCalls             int
-	spawned                bool
-	spawnedCfg             ports.SpawnConfig
-	killsAtSpawn           int
-	restoreErr             error
-	restoreResult          sessionmanager.RestoreResult
-	switchErr              error
-	switchRecord           domain.SessionRecord
-	switchCalls            int
-	freshCalls             int
-	orchestratorFreshCalls int
-	lastSwitch             sessionmanager.SwitchRequest
-	ensureCalls            int
-	ensureClean            bool
-	ensureCfg              ports.SpawnConfig
-	ensureReuse            domain.SessionRecord
+	mu                      sync.Mutex
+	killed                  []domain.SessionID
+	retired                 []domain.SessionID
+	sent                    []domain.SessionID
+	sentMessages            []string
+	cleanupProjects         []domain.ProjectID
+	killErr                 error
+	retireErr               error
+	sendErr                 error
+	cleanupErr              error
+	spawnErr                error
+	spawnRecord             domain.SessionRecord
+	spawnFunc               func(ports.SpawnConfig) domain.SessionRecord
+	spawnCalls              int
+	spawned                 bool
+	spawnedCfg              ports.SpawnConfig
+	killsAtSpawn            int
+	restoreErr              error
+	restoreResult           sessionmanager.RestoreResult
+	switchErr               error
+	switchRecord            domain.SessionRecord
+	switchCalls             int
+	orchestratorSwitchCalls int
+	freshCalls              int
+	orchestratorFreshCalls  int
+	lastSwitch              sessionmanager.SwitchRequest
+	ensureCalls             int
+	ensureClean             bool
+	ensureCfg               ports.SpawnConfig
+	ensureReuse             domain.SessionRecord
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -1220,6 +1227,28 @@ func (f *fakeCommander) SwitchWorker(_ context.Context, req sessionmanager.Switc
 			ID: req.SessionID, ProjectID: "mer", Kind: domain.KindWorker,
 			Harness:  req.TargetHarness,
 			Metadata: domain.SessionMetadata{RuntimeLaunchID: "gen-sw-1", Role: domain.SessionRoleBinding{RoleID: "implementor"}},
+		}
+	}
+	return sessionmanager.SwitchResult{
+		Session: rec, GenerationID: "gen-sw-1", Kind: domain.LifecycleKindSwitch,
+	}, nil
+}
+
+func (f *fakeCommander) SwitchOrchestrator(_ context.Context, req sessionmanager.SwitchRequest) (sessionmanager.SwitchResult, error) {
+	if f.switchErr != nil {
+		return sessionmanager.SwitchResult{}, f.switchErr
+	}
+	f.orchestratorSwitchCalls++
+	f.lastSwitch = req
+	rec := f.switchRecord
+	if rec.ID == "" {
+		rec = domain.SessionRecord{
+			ID: req.SessionID, ProjectID: "mer", Kind: domain.KindOrchestrator,
+			Harness: req.TargetHarness,
+			Metadata: domain.SessionMetadata{
+				RuntimeLaunchID: "gen-sw-1",
+				Role:            domain.SessionRoleBinding{RoleID: "orchestrator"},
+			},
 		}
 	}
 	return sessionmanager.SwitchResult{

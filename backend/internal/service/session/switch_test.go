@@ -244,7 +244,7 @@ func TestSwitchWorker_CrossHarnessStillRequiresRolePin(t *testing.T) {
 // TestSwitchWorker_OrchestratorCrossHarnessIsConflict: the request is
 // well-formed and the harness is real; what is unavailable is the state
 // transition. Clients distinguish that from malformed input.
-func TestSwitchWorker_OrchestratorCrossHarnessIsConflict(t *testing.T) {
+func TestSwitchWorker_OrchestratorCrossHarnessUsesGatedEntryPoint(t *testing.T) {
 	st := newFakeStore()
 	id := domain.SessionID("mer-1")
 	seedSwitchSession(st, id, domain.HarnessClaudeCode)
@@ -254,22 +254,18 @@ func TestSwitchWorker_OrchestratorCrossHarnessIsConflict(t *testing.T) {
 
 	cmd := &fakeCommander{}
 	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
-	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+	out, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
 		SessionID: id, TargetHarness: domain.HarnessCodex,
 	})
-
-	var apiErr *apierr.Error
-	if !errors.As(err, &apiErr) {
-		t.Fatalf("err = %v, want an apierr", err)
+	if err != nil {
+		t.Fatalf("orchestrator switch: %v", err)
 	}
-	if apiErr.Kind != apierr.KindConflict {
-		t.Fatalf("kind = %v, want Conflict: a refused state transition is not malformed input", apiErr.Kind)
+	if cmd.orchestratorSwitchCalls != 1 || cmd.switchCalls != 0 || cmd.orchestratorFreshCalls != 0 {
+		t.Fatalf("dispatch: orchestratorSwitch=%d workerSwitch=%d fresh=%d",
+			cmd.orchestratorSwitchCalls, cmd.switchCalls, cmd.orchestratorFreshCalls)
 	}
-	if apiErr.Code != "ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED" {
-		t.Errorf("code = %q", apiErr.Code)
-	}
-	if cmd.orchestratorFreshCalls != 0 || cmd.switchCalls != 0 {
-		t.Error("the manager was called despite the refusal")
+	if out.Kind != domain.LifecycleKindSwitch {
+		t.Fatalf("kind=%q want switch", out.Kind)
 	}
 }
 
@@ -320,5 +316,90 @@ func TestSwitchWorker_AmbiguousModelRequiresExplicit(t *testing.T) {
 	}
 	if out.GenerationID == "" {
 		t.Fatal("missing generation")
+	}
+}
+
+func TestSwitchPreview_WorkerDoesNotReadProject(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), st.sessions[id])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.getProjectCalls != 0 {
+		t.Fatalf("project reads=%d, want zero for ordinary worker", st.getProjectCalls)
+	}
+	if preview.Available || len(preview.Targets) != 0 {
+		t.Fatalf("worker preview=%+v", preview)
+	}
+}
+
+func TestSwitchPreview_ExactRoleMapModels(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.Role.ResolvedModel = "opus"
+	st.sessions[id] = rec
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Roles["implementor"] = []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: "o3"},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+		// Same-harness means Fresh Conversation, not a model switch.
+		{Harness: domain.HarnessClaudeCode, Model: "sonnet"},
+	}
+	st.projects["mer"] = project
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Available || preview.Reason != "" {
+		t.Fatalf("preview=%+v", preview)
+	}
+	if preview.Current.Harness != domain.HarnessClaudeCode || preview.Current.Model != "opus" {
+		t.Fatalf("current=%+v", preview.Current)
+	}
+	want := []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: "o3"},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+	}
+	if len(preview.Targets) != len(want) {
+		t.Fatalf("targets=%+v want %+v", preview.Targets, want)
+	}
+	for i := range want {
+		if preview.Targets[i] != want[i] {
+			t.Fatalf("targets[%d]=%+v want %+v", i, preview.Targets[i], want[i])
+		}
+	}
+}
+
+func TestSwitchPreview_PendingUsesDurableTargetWithoutProjectRead(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-pending", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		FromModel: "opus", ToModel: "o3", PayloadJSON: `{"secret":"not a read model"}`,
+	}
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonInProgress || preview.Pending == nil {
+		t.Fatalf("preview=%+v", preview)
+	}
+	if st.getProjectCalls != 0 {
+		t.Fatalf("project reads=%d, want zero for durable pending state", st.getProjectCalls)
 	}
 }

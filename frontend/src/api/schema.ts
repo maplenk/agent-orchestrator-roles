@@ -1588,6 +1588,7 @@ export interface components {
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
             /** @enum {string} */
             status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "exited" | "idle" | "terminated" | "no_signal";
+            switch: components["schemas"]["SessionSwitchView"];
             terminalHandleId?: string;
             terminateOnPrMerge: boolean;
             /** Format: date-time */
@@ -2397,6 +2398,26 @@ export interface components {
         SessionResponse: {
             session: components["schemas"]["ControllersSessionView"];
         };
+        SessionSwitchPendingView: {
+            from: components["schemas"]["SessionSwitchTarget"];
+            generationId: string;
+            /** @enum {string} */
+            kind: "switch" | "fresh_conversation" | "orchestrator_fresh_conversation";
+            to: components["schemas"]["SessionSwitchTarget"];
+        } | null;
+        SessionSwitchTarget: {
+            harness: string;
+            model: string;
+        };
+        SessionSwitchView: {
+            available: boolean;
+            current: components["schemas"]["SessionSwitchTarget"];
+            pending: components["schemas"]["SessionSwitchPendingView"];
+            /** @enum {string} */
+            reason: "" | "no_role_pin" | "no_role_map" | "role_not_in_map" | "no_target" | "in_progress" | "terminated" | "unavailable";
+            roleId: string;
+            targets: components["schemas"]["SessionSwitchTarget"][];
+        } | null;
         SessionUsageResponse: {
             harnesses: components["schemas"]["UsageHarnessResponse"][];
             incomplete: boolean;

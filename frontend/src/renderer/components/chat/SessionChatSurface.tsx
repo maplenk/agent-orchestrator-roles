@@ -29,6 +29,7 @@ export function SessionChatSurface({
 	shellError,
 	headerActions,
 	controllerTransitioning,
+	inputDisabled,
 }: {
 	session: WorkspaceSession;
 	onOpenShell?: () => void;
@@ -37,6 +38,8 @@ export function SessionChatSurface({
 	headerActions?: ReactNode;
 	/** The target controller is being installed by an interface handoff. */
 	controllerTransitioning?: boolean;
+	/** A lifecycle operation owns the session and agent writes are fenced. */
+	inputDisabled?: boolean;
 }) {
 	const {
 		snapshot,
@@ -109,6 +112,7 @@ export function SessionChatSurface({
 			sessionRole={session.kind}
 			headerActions={headerActions}
 			controllerTransitioning={controllerTransitioning}
+			inputDisabled={inputDisabled}
 			hasOlder={hasOlder}
 			loadingOlder={isLoadingOlder}
 			onLoadOlder={loadOlder}

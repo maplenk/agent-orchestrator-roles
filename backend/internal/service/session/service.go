@@ -842,6 +842,17 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchUncertain):
 		return apierr.Conflict("SWITCH_UNCERTAIN",
 			"Switch runtime state is uncertain; inspect session and recover carefully", nil)
+	case errors.Is(err, domain.ErrSwitchTargetModelRequired):
+		// The orchestrator manager re-resolves under the project gate. A map
+		// revision between the service precheck and that gated read can make a
+		// previously unique model ambiguous; preserve the same stable client code.
+		return apierr.Invalid("TARGET_MODEL_REQUIRED",
+			"Multiple models are now authorized for this harness; choose an exact target from the latest session read model", nil)
+	case errors.Is(err, domain.ErrSwitchTargetUnauthorized):
+		// Backend authorization remains the final word even though the desktop
+		// only submits targets it received from the read model.
+		return apierr.Forbidden("SWITCH_TARGET_UNAUTHORIZED",
+			"The harness/model target is no longer authorized by this session's role map")
 	// Phase 3B manual failover. These are host-resolution or recovery states,
 	// never permission for the caller to pick a different target.
 	case errors.Is(err, domain.ErrFailoverNoTarget):

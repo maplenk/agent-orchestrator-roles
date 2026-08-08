@@ -284,6 +284,9 @@ var schemaNames = map[string]string{
 	"ControllersSessionFailoverTarget":                    "SessionFailoverTarget",
 	"ControllersSessionFailoverPreviewTarget":             "SessionFailoverPreviewTarget",
 	"ControllersSessionFailoverView":                      "SessionFailoverView",
+	"ControllersSessionSwitchTarget":                      "SessionSwitchTarget",
+	"ControllersSessionSwitchPendingView":                 "SessionSwitchPendingView",
+	"ControllersSessionSwitchView":                        "SessionSwitchView",
 	// httpd/controllers — standalone shell terminal wire envelopes
 	"ControllersShellTerminalHandleIDParam": "ShellTerminalHandleIDParam",
 	"ControllersOpenShellTerminalRequest":   "OpenShellTerminalRequest",

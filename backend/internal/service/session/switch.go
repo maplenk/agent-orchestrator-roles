@@ -31,11 +31,37 @@ type SwitchWorkerOutcome struct {
 	Kind         domain.LifecycleLedgerKind `json:"kind"`
 }
 
+const (
+	SwitchPreviewReasonNoRolePin   = "no_role_pin"
+	SwitchPreviewReasonNoRoleMap   = "no_role_map"
+	SwitchPreviewReasonRoleAbsent  = "role_not_in_map"
+	SwitchPreviewReasonNoTarget    = "no_target"
+	SwitchPreviewReasonInProgress  = "in_progress"
+	SwitchPreviewReasonTerminated  = "terminated"
+	SwitchPreviewReasonUnavailable = "unavailable"
+)
+
+// SwitchPreview is the read-time answer to "where may this orchestrator
+// switch?". Targets are exact role-map harness/model pairs. They are advisory
+// to the desktop only: SwitchWorker re-authorizes every submitted pair, and
+// SwitchOrchestrator re-authorizes once more under the project ownership gate.
+type SwitchPreview struct {
+	Available bool
+	RoleID    string
+	Current   domain.FailoverTarget
+	Targets   []domain.FailoverTarget
+	Pending   *domain.SwitchPending
+	Reason    string
+}
+
 // switchCommander is the subset of the session manager used by switch/fresh.
 // Kept separate so commander stays focused for existing fakes; SwitchWorker
 // type-asserts when available.
 type switchCommander interface {
 	SwitchWorker(ctx context.Context, req sessionmanager.SwitchRequest) (sessionmanager.SwitchResult, error)
+	// SwitchOrchestrator takes the project ownership gate before the session
+	// switch fence and re-authorizes the exact target under that gate.
+	SwitchOrchestrator(ctx context.Context, req sessionmanager.SwitchRequest) (sessionmanager.SwitchResult, error)
 	FreshConversation(ctx context.Context, sessionID domain.SessionID, semantic domain.SemanticHandoffV1) (sessionmanager.SwitchResult, error)
 	// FreshOrchestratorConversation is the orchestrator entry point. It is
 	// separate because it must take the project ownership gate BEFORE the
@@ -71,22 +97,9 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 		return SwitchWorkerOutcome{}, apierr.NotFound("SESSION_NOT_FOUND", "Unknown session")
 	}
 	switch rec.Kind {
-	case domain.KindWorker:
-		// Full switch/fresh matrix.
-	case domain.KindOrchestrator:
-		// 2B-1: in-place FRESH conversation only. Cross-harness is 2B-3 and is
-		// blocked on Claude read-only enforcement — a strict orchestrator must
-		// be workspaceWrites:false and only Codex enforces that, so shipping it
-		// for non-strict projects alone would create a capability strict
-		// projects can never have.
-		if !req.Fresh && strings.TrimSpace(string(req.TargetHarness)) != "" &&
-			domain.AgentHarness(strings.TrimSpace(string(req.TargetHarness))) != rec.Harness {
-			// Conflict, not Invalid: the request is well-formed and the target
-			// harness is a real one. What is unavailable is the state
-			// transition, which clients distinguish from malformed input.
-			return SwitchWorkerOutcome{}, apierr.Conflict("ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED",
-				"Orchestrators support in-place fresh conversation only; cross-harness switch is not available yet", nil)
-		}
+	case domain.KindWorker, domain.KindOrchestrator:
+		// Both kinds use the shared role-map authorization below. Their manager
+		// entry points differ because orchestrators take the project gate first.
 	default:
 		// Workers and orchestrators both reach this saga; anything else does not.
 		return SwitchWorkerOutcome{}, apierr.Invalid("NOT_A_WORKER", "This session kind does not support switch or fresh conversation", nil)
@@ -179,16 +192,85 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 			fmt.Sprintf("Harness/model %s/%q is not an authorized switch target for role %q (roleMap binding + failover.roles)", to, requestedModel, roleID))
 	}
 
-	res, err := sc.SwitchWorker(ctx, sessionmanager.SwitchRequest{
+	managerReq := sessionmanager.SwitchRequest{
 		SessionID:     req.SessionID,
 		TargetHarness: to,
 		TargetModel:   model,
 		Semantic:      sem,
-	})
+	}
+	var res sessionmanager.SwitchResult
+	if rec.Kind == domain.KindOrchestrator {
+		res, err = sc.SwitchOrchestrator(ctx, managerReq)
+	} else {
+		res, err = sc.SwitchWorker(ctx, managerReq)
+	}
 	if err != nil {
 		return SwitchWorkerOutcome{}, toAPIError(err)
 	}
 	return s.switchOutcome(ctx, res)
+}
+
+// SwitchPreview resolves exact cross-harness targets for an orchestrator read
+// model. It deliberately does not support workers: their existing failover
+// preview owns that UI, and GET /sessions must not add a project read for every
+// ordinary worker.
+func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (SwitchPreview, error) {
+	current := domain.FailoverTarget{
+		Harness: rec.Harness,
+		Model:   strings.TrimSpace(rec.Metadata.Role.ResolvedModel),
+	}
+	preview := SwitchPreview{
+		RoleID:  strings.TrimSpace(rec.Metadata.Role.RoleID),
+		Current: current,
+		Pending: rec.Metadata.SwitchPending,
+	}
+	if rec.Kind != domain.KindOrchestrator {
+		return preview, nil
+	}
+	if rec.IsTerminated {
+		preview.Reason = SwitchPreviewReasonTerminated
+		return preview, nil
+	}
+	if preview.Pending != nil {
+		preview.Reason = SwitchPreviewReasonInProgress
+		return preview, nil
+	}
+	if preview.RoleID == "" {
+		preview.Reason = SwitchPreviewReasonNoRolePin
+		return preview, nil
+	}
+	project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
+	if err != nil {
+		return SwitchPreview{}, fmt.Errorf("switch preview %s: project: %w", rec.ID, err)
+	}
+	if !ok {
+		return SwitchPreview{}, fmt.Errorf("switch preview %s: project %s not found", rec.ID, rec.ProjectID)
+	}
+	roleMap := project.Config.RoleMap.WithDefaults()
+	if roleMap.IsZero() {
+		preview.Reason = SwitchPreviewReasonNoRoleMap
+		return preview, nil
+	}
+	if _, ok := roleMap.Roles[preview.RoleID]; !ok {
+		preview.Reason = SwitchPreviewReasonRoleAbsent
+		return preview, nil
+	}
+	for _, target := range domain.RoleAuthorizedSwitchTargets(roleMap, preview.RoleID) {
+		// The current harness is Fresh Conversation, not Switch. The service
+		// intentionally ignores a same-harness model override, so do not offer
+		// one here as if it were a supported model-switch operation.
+		if target.Harness == rec.Harness {
+			continue
+		}
+		target.Model = strings.TrimSpace(target.Model)
+		preview.Targets = append(preview.Targets, target)
+	}
+	if len(preview.Targets) == 0 {
+		preview.Reason = SwitchPreviewReasonNoTarget
+		return preview, nil
+	}
+	preview.Available = true
+	return preview, nil
 }
 
 // FreshConversation is same-harness context refresh (no free-form harness).

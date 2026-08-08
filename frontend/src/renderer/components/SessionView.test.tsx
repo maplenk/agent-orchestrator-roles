@@ -1,7 +1,9 @@
 import { StrictMode, type ReactNode, type Ref } from "react";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { SessionView } from "./SessionView";
+import { ApiActionError } from "../lib/api-client";
 import { useUiStore } from "../stores/ui-store";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 
@@ -18,6 +20,16 @@ const interfaceTransitionState = vi.hoisted(() => ({
 	status: undefined as
 		| { supported: boolean; targetMode?: "chat" | "tui"; reason?: string }
 		| undefined,
+}));
+const orchestratorSwitchMutation = vi.hoisted(() => ({
+	isPending: false,
+	variables: undefined as
+		| { kind: "switch"; target: { harness: string; model: string } }
+		| { kind: "fresh" }
+		| undefined,
+	error: null as Error | null,
+	mutate: vi.fn(),
+	reset: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
@@ -48,6 +60,9 @@ vi.mock("../hooks/useSessionInterfaceTransition", () => ({
 		cancelling: false,
 		cancelError: undefined,
 	}),
+}));
+vi.mock("../hooks/useOrchestratorSwitch", () => ({
+	useOrchestratorSwitch: () => orchestratorSwitchMutation,
 }));
 
 type FakePanelHandle = {
@@ -124,8 +139,16 @@ const { workspaces, workspaceQueryState, panels, shellTerminalsState } = vi.hois
 // platform hides the shell topbar, SessionView mounts it in-panel.)
 vi.mock("./ShellTopbar", () => ({ ShellTopbar: () => null }));
 vi.mock("./chat/SessionChatSurface", () => ({
-	SessionChatSurface: ({ onOpenShell, headerActions }: { onOpenShell?: () => void; headerActions?: ReactNode }) => (
-		<div data-testid="chat-surface">
+	SessionChatSurface: ({
+		onOpenShell,
+		headerActions,
+		inputDisabled,
+	}: {
+		onOpenShell?: () => void;
+		headerActions?: ReactNode;
+		inputDisabled?: boolean;
+	}) => (
+		<div data-input-disabled={inputDisabled ? "true" : "false"} data-testid="chat-surface">
 			chat surface
 			{headerActions}
 			<button type="button" onClick={onOpenShell}>
@@ -144,6 +167,7 @@ vi.mock("./CenterPane", () => ({
 		onSelectSessionTerminal,
 		onNewShellTerminal,
 		topbarActions,
+		agentInputDisabled,
 	}: {
 		terminalTarget?: { kind: string; handleId?: string };
 		session?: WorkspaceSession;
@@ -153,8 +177,9 @@ vi.mock("./CenterPane", () => ({
 		onSelectSessionTerminal?: () => void;
 		onNewShellTerminal?: () => void;
 		topbarActions?: ReactNode;
+		agentInputDisabled?: boolean;
 	}) => (
-		<div>
+		<div data-agent-input-disabled={agentInputDisabled ? "true" : "false"} data-testid="center-pane">
 			terminal center
 			{topbarActions}
 			<div data-testid="terminal-target">
@@ -393,6 +418,7 @@ describe("SessionView", () => {
 			delete session.isTerminated;
 			session.status = "working";
 			delete session.mode;
+			delete session.switch;
 		}
 		workspaceQueryState.data = workspaces;
 		workspaceQueryState.isLoading = false;
@@ -412,6 +438,145 @@ describe("SessionView", () => {
 		interfaceTransitionMock.resetStartError.mockReset();
 		interfaceTransitionMock.cancel.mockReset();
 		interfaceTransitionState.status = undefined;
+		orchestratorSwitchMutation.isPending = false;
+		orchestratorSwitchMutation.variables = undefined;
+		orchestratorSwitchMutation.error = null;
+		orchestratorSwitchMutation.mutate.mockReset();
+		orchestratorSwitchMutation.reset.mockReset();
+	});
+
+	it("offers only exact role-authorized orchestrator targets", async () => {
+		const user = userEvent.setup();
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.switch = {
+			available: true,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [{ harness: "codex", model: "" }],
+			pending: null,
+			reason: "",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+		await user.click(screen.getByRole("button", { name: "Switch" }));
+		await user.click(await screen.findByRole("menuitem", { name: "Codex · Provider default" }));
+
+		expect(orchestratorSwitchMutation.mutate).toHaveBeenCalledWith({
+			kind: "switch",
+			target: { harness: "codex", model: "" },
+		});
+		expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+	});
+
+	it("keeps Fresh Conversation distinct from cross-harness Switch", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.switch = {
+			available: true,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [{ harness: "codex", model: "o4-mini" }],
+			pending: null,
+			reason: "",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+		fireEvent.click(screen.getByRole("button", { name: "Fresh Conversation" }));
+
+		expect(orchestratorSwitchMutation.mutate).toHaveBeenCalledWith({ kind: "fresh" });
+	});
+
+	it("shows durable switch progress and fences orchestrator terminal input", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.switch = {
+			available: false,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [],
+			pending: {
+				generationId: "gen-7",
+				kind: "switch",
+				from: { harness: "claude-code", model: "sonnet" },
+				to: { harness: "codex", model: "o4-mini" },
+			},
+			reason: "in_progress",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+
+		expect(screen.getByRole("status")).toHaveTextContent("Switching to Codex…");
+		expect(screen.getByText(/Input remains fenced while AO recovers/)).toBeVisible();
+		expect(screen.getByTestId("center-pane")).toHaveAttribute("data-agent-input-disabled", "true");
+	});
+
+	it("fences orchestrator chat input for the same durable switch", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.mode = "chat";
+		orchestrator.switch = {
+			available: false,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [],
+			pending: {
+				generationId: "gen-chat",
+				kind: "switch",
+				from: { harness: "claude-code", model: "sonnet" },
+				to: { harness: "codex", model: "o4-mini" },
+			},
+			reason: "in_progress",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+
+		expect(screen.getByTestId("chat-surface")).toHaveAttribute("data-input-disabled", "true");
+	});
+
+	it("keeps post-stop errors visible beside the durable input fence", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.switch = {
+			available: false,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [],
+			pending: {
+				generationId: "gen-8",
+				kind: "switch",
+				from: { harness: "claude-code", model: "sonnet" },
+				to: { harness: "codex", model: "o4-mini" },
+			},
+			reason: "in_progress",
+		};
+		orchestratorSwitchMutation.error = new ApiActionError(
+			{ code: "SWITCH_POST_STOP", message: "replacement failed" },
+			"switch failed",
+		);
+
+		render(<SessionView sessionId="sess-orch" />);
+
+		expect(screen.getByRole("alert")).toHaveTextContent(
+			"The old agent stopped, but the replacement did not start",
+		);
+		expect(screen.getByRole("status")).toHaveTextContent("Switching to Codex…");
+	});
+
+	it("explains unavailable Switch while keeping Fresh Conversation available", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.switch = {
+			available: false,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [],
+			pending: null,
+			reason: "unavailable",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+
+		expect(screen.getByRole("button", { name: "Switch" })).toBeDisabled();
+		expect(screen.getByText("Switch targets are temporarily unavailable.")).toBeVisible();
+		const fresh = screen.getByRole("button", { name: "Fresh Conversation" });
+		expect(fresh).toBeEnabled();
+		fireEvent.click(fresh);
+		expect(orchestratorSwitchMutation.mutate).toHaveBeenCalledWith({ kind: "fresh" });
 	});
 
 	// Regression: shell terminals are an app-wide list, so without a per-session

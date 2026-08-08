@@ -112,6 +112,12 @@ type failoverSessionService interface {
 	) (sessionmanager.FailoverPreview, error)
 }
 
+// switchPreviewSessionService is optional on legacy controller test doubles
+// but implemented by the real service. It is called only for orchestrators.
+type switchPreviewSessionService interface {
+	SwitchPreview(ctx context.Context, rec domain.SessionRecord) (sessionsvc.SwitchPreview, error)
+}
+
 // ActivityRecorder applies an agent activity-state signal to a session. It is
 // satisfied directly by *lifecycle.Manager: an activity signal is a pure
 // lifecycle reduction (no runtime/workspace teardown), so it bypasses
@@ -1863,6 +1869,22 @@ func sessionView(s domain.Session, previews ...sessionmanager.FailoverPreview) S
 // still logged. What it must never do is degrade toward `available` -- an
 // unreadable store can never produce an offer to continue.
 func (c *SessionsController) sessionView(ctx context.Context, s domain.Session) SessionView {
+	if s.Kind == domain.KindOrchestrator {
+		view := sessionView(s)
+		ss, ok := c.Svc.(switchPreviewSessionService)
+		if !ok {
+			return view
+		}
+		preview, err := ss.SwitchPreview(ctx, s.SessionRecord)
+		if err != nil {
+			slog.Warn("switch preview unavailable for orchestrator read model",
+				"sessionID", string(s.ID), "error", err)
+			view.Switch = switchView(sessionsvc.SwitchPreview{Reason: sessionsvc.SwitchPreviewReasonUnavailable})
+			return view
+		}
+		view.Switch = switchView(preview)
+		return view
+	}
 	if s.Kind != domain.KindWorker {
 		return sessionView(s)
 	}
@@ -1884,6 +1906,35 @@ func (c *SessionsController) sessionView(ctx context.Context, s domain.Session) 
 		})
 	}
 	return sessionView(s, preview)
+}
+
+func switchView(preview sessionsvc.SwitchPreview) *SessionSwitchView {
+	targets := make([]SessionSwitchTarget, 0, len(preview.Targets))
+	for _, target := range preview.Targets {
+		targets = append(targets, SessionSwitchTarget{Harness: target.Harness, Model: target.Model})
+	}
+	view := &SessionSwitchView{
+		Available: preview.Available,
+		RoleID:    preview.RoleID,
+		Current:   SessionSwitchTarget{Harness: preview.Current.Harness, Model: preview.Current.Model},
+		Targets:   targets,
+		Reason:    preview.Reason,
+	}
+	if pending := preview.Pending; pending != nil {
+		view.Pending = &SessionSwitchPendingView{
+			GenerationID: pending.GenerationID,
+			Kind:         pending.Kind,
+			From:         SessionSwitchTarget{Harness: pending.FromHarness, Model: pending.FromModel},
+			To:           SessionSwitchTarget{Harness: pending.ToHarness, Model: pending.ToModel},
+		}
+	}
+	// A degraded preview must fail closed even if a future caller accidentally
+	// supplies stale targets alongside `unavailable`.
+	if preview.Reason == sessionsvc.SwitchPreviewReasonUnavailable {
+		view.Available = false
+		view.Targets = []SessionSwitchTarget{}
+	}
+	return view
 }
 
 // failoverView maps the manager's preview to the wire block, or to null.
