@@ -52,16 +52,26 @@ Minimum acceptance criteria:
 4. The implementor commits only the contracted product files and leaves a clean tree.
 5. The read-only verifier reruns the tests and checks the live behavior independently.
 
-## Isolation
+## Data and app mode
 
-Use a fresh `AO_DATA_DIR`, run file, daemon port, Electron profile, project id, and tmux
-namespace. Do not open an existing AO data directory. Record all exact paths and PIDs in
-the evidence log so cleanup can be scoped.
+Use a fresh `AO_DATA_DIR`, run file, daemon port, Electron profile, project id,
+and tmux namespace for diagnosis and destructive fault injection. Do not open an
+existing AO data directory in that stage. Record all exact paths and PIDs so
+cleanup can be scoped.
+
+The final checked-release run should use the actual packaged app the user will
+run. With explicit user authorization, preserve the prior installed bundle,
+replace `/Applications/Agent Orchestrator.app` with the gated package, and run
+against the default `~/.ao/data`/port `3001` path. Back up or start with a clean
+database before the test, and clean only the projects, sessions, runtimes,
+fixture, trust entries, and database created for the test. Never treat an
+unpackaged Electron window or browser-only renderer as release evidence.
 
 ## Procedure
 
 1. Record the AO branch and commit used to launch the daemon.
-2. Start the real Electron desktop app against the isolated data directory.
+2. Start the real Electron desktop app in the selected diagnostic or final
+   installed-app mode and record which mode is active.
 3. Register the fixture and role map.
 4. Spawn the role-pinned orchestrator and confirm Claude reports Opus 5.
 5. Send only the one-sentence human brief above.
@@ -82,8 +92,10 @@ the evidence log so cleanup can be scoped.
     workaround.
 11. Confirm the verifier is read-only, runs in its own session, tests the implementor's
     worktree, does not edit it, and reports an evidence-backed verdict.
-12. Confirm the orchestrator reads the verifier result and gives a final user-facing
-    outcome without relying only on worker self-report.
+12. Confirm the orchestrator retains ownership of a terminal-only verifier:
+    it checks durable state at bounded intervals, retrieves the report when the
+    verifier becomes idle or exits, and gives a final user-facing outcome
+    without a host message or manual wake-up.
 
 ## Evidence to record
 
@@ -97,8 +109,9 @@ the evidence log so cleanup can be scoped.
   whether a partial session was created, and the recovery used.
 - Whether the orchestrator expanded the one-sentence brief without human-authored task
   decomposition.
-- Cleanup result proving the isolated daemon, Electron process, tmux server, data
-  directory and fixture were removed while the normal AO instance was untouched.
+- Cleanup result proving the test daemon/app, tmux runtime, project/session data,
+  fixture, provider trust/session residue, and active test database were removed.
+  For an installed-app run, record any recoverable bundle/database backup paths.
 
 ## Pass criteria
 
@@ -109,3 +122,5 @@ The run passes only when the normal role-pinned path completes:
 Workarounds may let diagnostic work continue, but they do not convert the affected gate
 to PASS. Any generic 500, lost prompt, prompt delivered into a trust/permission screen,
 untracked partial session, verifier edit, or automatic harness substitution is a failure.
+Any host nudge needed to make the orchestrator notice a completed terminal-only
+verifier is also a failure.

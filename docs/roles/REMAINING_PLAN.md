@@ -4,6 +4,7 @@
 **Accepted implementation/runner:** `166e9e63`  
 **Promoted live evidence:** `322f9c18`  
 **Post-evidence review integration:** `72f274a7`
+**Installed-app role-pipeline close-out:** `f4b28012`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
@@ -37,6 +38,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
+| Installed strict role pipeline | **Accepted.** The replaced real app completed Claude orchestrator → Grok implementor → read-only Codex verifier, native Browser play, and final orchestration. `f4b28012` then proved terminal-only verifier retrieval with no host nudge. See `ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md`. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
 | CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. The ordinary full backend run fails only the known untouched fake/kilocode/opencode wall-clock trio; all other packages, including the MVP packages, pass. The full repository gate is therefore **not fully green**. |
 
@@ -45,12 +47,12 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 > filesystem sandbox. Claude-only installs still cannot configure an explicit
 > `workspaceWrites:false` role; Claude remains `read_only_enforced=false`.
 
-**Next engineering actions, in order:** record the verified MVP/static/API and
-full frontend gate plus the targeted default-data-dir runtime replay as
-complete; do not rewrite or rerun the accepted matrix merely to make the
-separate gate look green. Keep the full repository gate explicitly non-green
-while the three pre-existing wall-clock tests fail. Claude read-only remains
-post-MVP work for roles that genuinely require technical write denial.
+**Next engineering actions:** none gate the MVP. Keep the full repository gate
+explicitly non-green while the three pre-existing wall-clock tests fail; do not
+rewrite or rerun the accepted matrices merely to make that separate gate look
+green. Post-MVP candidates are per-project containment for unreadable stored
+config, technical Claude read-only for roles that truly require it, and the
+deferred detector/automation work.
 
 ---
 
@@ -277,7 +279,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 | ~~Phase 2B-0a/0b/1/2~~ | **Done** | 2A patterns; ≈6–11 d actual, not the 3–5 first estimated |
 | ~~Phase 2B-3 (cross-harness orch)~~ | **Implemented and live-accepted** | Final MVP strict-policy amendment |
 | ~~Phase 3B manual Continue~~ | **Implemented and live-accepted** | Final probe review |
-| Final repository gate | active | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; full backend retains three pre-existing wall-clock failures |
+| Final repository gate | classified; non-blocking for MVP | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; full backend retains three pre-existing wall-clock failures |
 
 ### Sequencing sketch
 
@@ -371,8 +373,8 @@ Still open or partial:
 
 ## 7. Immediate next action
 
-1. Keep the targeted `3c3aef51` default-data-dir result distinct from the dated
-   `166e9e63` / `322f9c18` promoted matrix; neither needs to be rerun.
-2. Keep the full repository gate non-green while the known untouched
-   fake/kilocode/opencode wall-clock trio fails. Claude read-only remains
-   parallel post-MVP work and does not gate 2B-3. Promote no capability.
+The MVP has no remaining implementation or live-acceptance action. Preserve
+the distinct evidence sets (`166e9e63`/`322f9c18`, `3c3aef51`, and installed
+role-pipeline `f4b28012`) and promote no capability. Any next slice is
+post-MVP: address the three known wall-clock tests, contain unreadable project
+config per row, or pursue a deliberately scoped deferred capability.

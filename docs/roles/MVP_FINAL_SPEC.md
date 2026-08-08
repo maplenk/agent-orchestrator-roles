@@ -1,11 +1,13 @@
 # Final roles MVP specification
 
-**Status:** implementation, independent review, promoted live acceptance, and
-the post-review default-data-dir runtime replay are complete on the exact SHAs
-below. The post-acceptance Grok fixes are integrated at `72f274a7`; the runtime
-replay passed on `3c3aef51`. The repository-wide final gate is not fully green:
-the ordinary full backend run retains only three known untouched wall-clock
-failures. The verified MVP/static/API/frontend gates are complete.
+**Status:** MVP implementation, independent review, promoted live acceptance,
+post-review default-data-dir replay, and the final installed-app role pipeline
+are complete. The post-acceptance Grok fixes are integrated at `72f274a7`; the
+runtime replay passed on `3c3aef51`; and the installed Claude→Grok→Codex
+pipeline plus no-nudge verifier return passed on `f4b28012`. The
+repository-wide final gate is not fully green: the ordinary full backend run
+retains only three known untouched wall-clock failures. The verified
+MVP/static/API/frontend and installed-app gates are complete.
 
 **Accepted implementation and runner SHA:** `166e9e63`
 
@@ -19,6 +21,12 @@ P1/P2.
 **Default-data-dir runtime replay:** `3c3aef51` — exact runtime code shared by
 the later integration; the subsequent commits are storage/service-only. This
 targeted replay supplements rather than rewrites the promoted matrix.
+
+**Installed-app role-pipeline close-out:** `f4b28012` — the normal strict
+Claude orchestrator → Grok implementor → read-only Codex verifier path passed
+in the replaced `/Applications` app, and a fresh follow-up proved the
+orchestrator retrieved a terminal-only verifier report without a manual wake.
+See [`ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md`](ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md).
 
 **Detailed worker-Continue contract:**
 [`PHASE3B_MVP_CONTRACT.md`](PHASE3B_MVP_CONTRACT.md)
@@ -46,8 +54,9 @@ AO ships:
 5. Manual operator pause as the failover trigger. No vendor limit detector is
    required for this MVP.
 
-The remaining critical path is repository gate completion, not feature
-implementation or live acceptance. The full worker/orchestrator matrix passed
+No MVP feature or live-acceptance work remains. Separate repository test
+hygiene remains because three untouched aggregate-load wall-clock tests still
+fail in the ordinary full backend run. The full worker/orchestrator matrix passed
 on immutable code `166e9e63` and is recorded by evidence commit `322f9c18`;
 that dated result is not rewritten as evidence for `72f274a7`. The Chat rollback
 failure was classified as a test-only projector race and fixed by waiting for

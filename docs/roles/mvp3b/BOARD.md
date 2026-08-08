@@ -4,7 +4,7 @@
 **Final cross-phase MVP:** [`../MVP_FINAL_SPEC.md`](../MVP_FINAL_SPEC.md) —
 current boundary and acceptance authority.
 **Evidence integration branch:** `codex/mvp-integration`
-**Target roles trunk:** `roles/multi-sub-v1` (merge not claimed here)
+**Target roles trunk:** `roles/multi-sub-v1` (MVP integrated)
 **Accepted implementation/runner:** `166e9e63`
 **Promoted evidence commit:** `322f9c18`
 **Post-evidence review integration:** `72f274a7`
@@ -51,6 +51,9 @@ on the exact immutable runner SHA; see
 | Persisted-role read safety | `663f9339` | Malformed durable bindings fail the project read and retain their original bytes, preventing unrelated RMW/import paths from sanitizing or erasing config; valid bytes/semantics/SHA remain stable and HTTP/CLI authoring remains strict |
 | Chat mutation preflight | `72f274a7` | Service rejects Chat switch/fresh after terminated/paused precedence and before same-harness dispatch, role-map authorization, or manager entry |
 | Combined review | `72f274a7` | Independent review approved the integrated runtime, storage, preview, and mutation close-out with no remaining P1/P2 |
+| Installed role pipeline | `2a88007d` | Replaced real app completed strict Claude→Grok→Codex, native Browser play, and host-readable terminal verification; it exposed one final ownership gap |
+| Verifier-return ownership | `f4b28012` | Hardened the shipped orchestrator contract; replacement-app smoke retrieved an idle verifier report and produced the final verdict with no host nudge |
+| Final installed evidence | docs close-out | [`../ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md`](../ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md) records the real app, role/model pins, UI interactions, issue classification, and cleanup |
 
 ### Decisions pinned by review
 
