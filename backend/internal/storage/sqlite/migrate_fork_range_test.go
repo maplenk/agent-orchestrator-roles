@@ -181,6 +181,49 @@ func TestForkRepairOriginal42HistoryPreservesUpstreamNumbers(t *testing.T) {
 	}
 }
 
+// Some users ran both abandoned fork ranges before reaching the 9000-series.
+// The first-range rows must remain available to upstream, while the second
+// range must still be freed even though this pass records 9000 from 42 first.
+func TestForkRepairMixedOriginalAndRenumberedHistory(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db,
+		42, 43, 44, 45, 46, 47, 48, 49,
+		52, 53, 54, 55, 56, 57, 58, 59, 60,
+	)
+	seedForkSchema(t, db, 8)
+
+	if err := repairForkMigrationVersions(db); err != nil {
+		t.Fatalf("repair: %v", err)
+	}
+
+	got := ledger(t, db)
+	for v := int64(42); v <= 49; v++ {
+		if !got[v] {
+			t.Errorf("upstream-reclaimed version %d was removed", v)
+		}
+	}
+	for v := int64(53); v <= 60; v++ {
+		if got[v] {
+			t.Errorf("stale fork version %d still recorded; upstream's migration stays skipped", v)
+		}
+	}
+	for v := int64(9000); v <= 9007; v++ {
+		if !got[v] {
+			t.Errorf("version %d not recorded", v)
+		}
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM goose_db_version WHERE version_id = ? AND is_applied = 1`,
+			v,
+		).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Errorf("version %d recorded %d times, want exactly once", v, count)
+		}
+	}
+}
+
 // A database that only ever ran upstream. Version 53 here is the MUSE
 // migration, and the fork's fingerprints are absent. Touching it would delete a
 // legitimate entry and re-run Muse against an already-widened CHECK.

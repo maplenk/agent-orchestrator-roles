@@ -94,6 +94,7 @@ func repairForkMigrationVersions(db *sql.DB) error {
 		if err != nil {
 			return fmt.Errorf("fork migration repair: %s: %w", m.name, err)
 		}
+		newRecordedOnEntry := newRecorded
 		if !newRecorded {
 			firstRecorded, err := versionRecorded(tx, m.firstVersion)
 			if err != nil {
@@ -115,11 +116,13 @@ func repairForkMigrationVersions(db *sql.DB) error {
 			}
 		}
 
-		// Already repaired. Checked FIRST, and this is what makes the repair
+		// Already repaired on entry. This is what makes repeat passes
 		// idempotent: once 9000 is recorded, a later version 53 row is
 		// upstream's Muse migration and must be left alone even though the
-		// fork's fingerprint is still (correctly) present.
-		if newRecorded {
+		// fork's fingerprint is still (correctly) present. When this pass just
+		// recorded 9000 from the first 42-49 range, keep going: the same database
+		// may still carry stale 53-60 fork rows that must be freed.
+		if newRecordedOnEntry {
 			continue
 		}
 		oldRecorded, err := versionRecorded(tx, m.oldVersion)
@@ -139,12 +142,14 @@ func repairForkMigrationVersions(db *sql.DB) error {
 			// it: goose will apply the 9000-series file normally.
 			continue
 		}
-		if _, err := tx.Exec(
-			`INSERT INTO goose_db_version (version_id, is_applied, tstamp)
-			 SELECT ?, 1, tstamp FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1`,
-			m.newVersion, m.oldVersion,
-		); err != nil {
-			return fmt.Errorf("fork migration repair: record %d: %w", m.newVersion, err)
+		if !newRecorded {
+			if _, err := tx.Exec(
+				`INSERT INTO goose_db_version (version_id, is_applied, tstamp)
+				 SELECT ?, 1, tstamp FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1`,
+				m.newVersion, m.oldVersion,
+			); err != nil {
+				return fmt.Errorf("fork migration repair: record %d: %w", m.newVersion, err)
+			}
 		}
 		if _, err := tx.Exec(`DELETE FROM goose_db_version WHERE version_id = ?`, m.oldVersion); err != nil {
 			return fmt.Errorf("fork migration repair: clear %d: %w", m.oldVersion, err)
