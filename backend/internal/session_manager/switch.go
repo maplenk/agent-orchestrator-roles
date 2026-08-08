@@ -39,6 +39,12 @@ type SwitchRequest struct {
 	// which runtime belongs to which attempt, and a wrong guess there is a
 	// second runtime.
 	ForceGenerationID string
+	// PauseIncidentID is set only by the operator-authorized manual Continue
+	// saga. It permits that exact incident to drive its existing switch path
+	// while every ordinary switch/fresh request remains forbidden under a pause.
+	// The value is compared with the durable pin inside beginSwitch; it is never
+	// exposed as a free-form switch API field.
+	PauseIncidentID string
 }
 
 // SwitchResult is the outcome of a completed switch/fresh saga (target ack).
@@ -134,6 +140,9 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	}
 	if rec.IsTerminated {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrTerminated)
+	}
+	if rec.Metadata.Pause != nil && strings.TrimSpace(req.PauseIncidentID) != rec.Metadata.Pause.IncidentID {
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchPaused)
 	}
 	if rec.Metadata.SwitchPending != nil {
 		// In-flight saga: only recovery may continue (do not start a nested switch).
@@ -722,7 +731,10 @@ func (m *Manager) finishSwitchTarget(
 	live.Metadata.SwitchPending = nil
 	live.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, live); err != nil {
-		return SwitchResult{}, fmt.Errorf("switch %s: promote after ack: %w", rec.ID, err)
+		// target_ack is already durable and the target runtime is live. Preserve
+		// the typed post-stop recovery contract so callers do not report an opaque
+		// 500 for a state the next explicit recovery can finish safely.
+		return SwitchResult{}, fmt.Errorf("switch %s: %w: promote after ack: %w", rec.ID, ErrSwitchPostStop, err)
 	}
 
 	return SwitchResult{
@@ -762,7 +774,7 @@ func (m *Manager) ackLiveTarget(
 	rec.Metadata.SwitchPending = nil
 	rec.UpdatedAt = m.clock()
 	if err := m.store.UpdateSession(ctx, rec); err != nil {
-		return SwitchResult{}, fmt.Errorf("recover switch %s: promote: %w", rec.ID, err)
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: promote after ack: %w", rec.ID, ErrSwitchPostStop, err)
 	}
 	return SwitchResult{
 		Session: rec,

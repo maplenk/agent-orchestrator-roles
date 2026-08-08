@@ -1065,6 +1065,7 @@
 	"orchestrator.switch.roleMissing": "The pinned role is not in this project's role map.",
 	"orchestrator.switch.noTarget": "The role allows no other harness.",
 	"orchestrator.switch.inProgress": "A lifecycle operation is already in progress.",
+	"orchestrator.switch.paused": "Resume this orchestrator before switching or starting a fresh conversation.",
 	"orchestrator.switch.terminated": "Terminated orchestrators cannot switch.",
 	"orchestrator.switch.unavailable": "Switch targets are temporarily unavailable.",
 	"orchestrator.switch.errorInProgress": "Another lifecycle operation is already in progress.",

@@ -1099,6 +1099,7 @@
 	"orchestrator.switch.roleMissing": "Le rôle épinglé ne figure pas dans la carte de rôles du projet.",
 	"orchestrator.switch.noTarget": "Le rôle n’autorise aucun autre harnais.",
 	"orchestrator.switch.inProgress": "Une opération de cycle de vie est déjà en cours.",
+	"orchestrator.switch.paused": "Reprenez cet orchestrateur avant de changer ou de démarrer une nouvelle conversation.",
 	"orchestrator.switch.terminated": "Un orchestrateur terminé ne peut pas changer.",
 	"orchestrator.switch.unavailable": "Les cibles de changement sont temporairement indisponibles.",
 	"orchestrator.switch.errorInProgress": "Une autre opération de cycle de vie est déjà en cours.",

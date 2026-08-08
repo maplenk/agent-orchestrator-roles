@@ -305,6 +305,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 					disabled={
 						!session ||
 						!sessionIsActive(session) ||
+						Boolean(session.pause) ||
 						interfaceSwitch.starting ||
 						activeInterfaceTransition
 					}

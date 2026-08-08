@@ -1083,6 +1083,7 @@
 	"orchestrator.switch.roleMissing": "Die feste Rolle fehlt in der Rollenzuordnung dieses Projekts.",
 	"orchestrator.switch.noTarget": "Die Rolle erlaubt keinen anderen Harness.",
 	"orchestrator.switch.inProgress": "Ein Lebenszyklusvorgang läuft bereits.",
+	"orchestrator.switch.paused": "Setzen Sie diesen Orchestrator fort, bevor Sie wechseln oder eine neue Unterhaltung starten.",
 	"orchestrator.switch.terminated": "Beendete Orchestratoren können nicht wechseln.",
 	"orchestrator.switch.unavailable": "Wechselziele sind vorübergehend nicht verfügbar.",
 	"orchestrator.switch.errorInProgress": "Ein anderer Lebenszyklusvorgang läuft bereits.",

@@ -1099,6 +1099,7 @@
 	"orchestrator.switch.roleMissing": "El rol fijado no está en el mapa de roles del proyecto.",
 	"orchestrator.switch.noTarget": "El rol no permite otro entorno.",
 	"orchestrator.switch.inProgress": "Ya hay una operación de ciclo de vida en curso.",
+	"orchestrator.switch.paused": "Reanuda este orquestador antes de cambiar o iniciar una conversación nueva.",
 	"orchestrator.switch.terminated": "Los orquestadores terminados no pueden cambiar.",
 	"orchestrator.switch.unavailable": "Los destinos de cambio no están disponibles temporalmente.",
 	"orchestrator.switch.errorInProgress": "Ya hay otra operación de ciclo de vida en curso.",

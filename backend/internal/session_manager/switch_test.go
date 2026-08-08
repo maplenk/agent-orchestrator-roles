@@ -108,6 +108,87 @@ func TestSwitchWorker_GenerationMatchesRuntime(t *testing.T) {
 	}
 }
 
+func TestSwitchWorker_PausedSessionRefusesBeforeEffects(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	rec := st.sessions[id]
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: "limit-1"}
+	st.sessions[id] = rec
+	runtime := &fakeRuntime{}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	if !errors.Is(err, ErrSwitchPaused) {
+		t.Fatalf("err = %v, want ErrSwitchPaused", err)
+	}
+	if runtime.created != 0 || runtime.destroyed != 0 || len(st.ledger) != 0 || st.updateCount != 0 {
+		t.Fatalf("paused refusal had effects: created=%d destroyed=%d ledger=%d updates=%d",
+			runtime.created, runtime.destroyed, len(st.ledger), st.updateCount)
+	}
+}
+
+func TestSwitchWorker_PromotionFailureAfterAckIsRecoverable(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	// pending, clear source, credential rotation, re-pin target, promote.
+	st.updateFailAfter = 5
+	st.updateErr = errors.New("promotion write failed")
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
+	if !errors.Is(err, ErrSwitchPostStop) || !errors.Is(err, st.updateErr) {
+		t.Fatalf("err = %v, want ErrSwitchPostStop and promotion cause", err)
+	}
+	var acked bool
+	for _, event := range st.ledger {
+		acked = acked || event.Phase == domain.LifecyclePhaseTargetAck
+	}
+	if !acked || st.sessions[id].Metadata.SwitchPending == nil {
+		t.Fatalf("recovery facts lost: acked=%v pending=%+v", acked, st.sessions[id].Metadata.SwitchPending)
+	}
+}
+
+func TestAckLiveTarget_PromotionFailureKeepsTypedRecovery(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: "mer", Kind: domain.KindWorker, Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{
+			RuntimeHandleID: "target", RuntimeLaunchID: "gen-1",
+			SwitchPending: &domain.SwitchPending{GenerationID: "gen-1", Kind: domain.LifecycleKindSwitch},
+		},
+	}
+	st.sessions[id] = rec
+	st.updateFailAfter = 1
+	st.updateErr = errors.New("recovery promotion failed")
+	m := New(Deps{Store: st, Clock: time.Now})
+
+	_, err := m.ackLiveTarget(ctx, rec, domain.LifecycleKindSwitch, "gen-1",
+		domain.HarnessClaudeCode, domain.HarnessCodex, "opus", "", "implementor", "{}", "", domain.SemanticHandoffV1{}, domain.ObservedWorkspaceV1{})
+	if !errors.Is(err, ErrSwitchPostStop) || !errors.Is(err, st.updateErr) {
+		t.Fatalf("err = %v, want ErrSwitchPostStop and recovery promotion cause", err)
+	}
+	if len(st.ledger) != 1 || st.ledger[0].Phase != domain.LifecyclePhaseTargetAck {
+		t.Fatalf("target_ack not durable before promotion failure: %+v", st.ledger)
+	}
+}
+
 func TestSwitchWorker_CrossHarnessClearsModel(t *testing.T) {
 	st := newFakeStore()
 	ws := t.TempDir()

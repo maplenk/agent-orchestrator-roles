@@ -3,12 +3,19 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
 )
+
+type switchPRFailureStore struct{ *fakeStore }
+
+func (s *switchPRFailureStore) ListPRFactsForSession(context.Context, domain.SessionID) ([]domain.PRFacts, error) {
+	return nil, fmt.Errorf("injected PR facts failure")
+}
 
 func seedSwitchSession(st *fakeStore, id domain.SessionID, harness domain.AgentHarness) {
 	st.projects["mer"] = domain.ProjectRecord{
@@ -61,6 +68,53 @@ func TestSwitchWorker_AuthorizesFailoverTarget(t *testing.T) {
 	}
 	if out.GenerationID != "gen-sw-1" || out.Kind != domain.LifecycleKindSwitch {
 		t.Fatalf("out=%+v", out)
+	}
+}
+
+func TestSwitchOutcome_HydrationFailureCannotReverseCommittedSuccess(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		run   func(*Service, domain.SessionID) (SwitchWorkerOutcome, error)
+		calls func(*fakeCommander) int
+	}{
+		{
+			name: "switch",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+					SessionID: id, TargetHarness: domain.HarnessCodex,
+				})
+			},
+			calls: func(cmd *fakeCommander) int { return cmd.switchCalls },
+		},
+		{
+			name: "fresh",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.FreshConversation(context.Background(), id, "refresh")
+			},
+			calls: func(cmd *fakeCommander) int { return cmd.freshCalls },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := newFakeStore()
+			id := domain.SessionID("mer-1")
+			seedSwitchSession(base, id, domain.HarnessClaudeCode)
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: &switchPRFailureStore{fakeStore: base}})
+
+			out, err := tc.run(svc, id)
+			if err != nil {
+				t.Fatalf("committed mutation reported failure: %v", err)
+			}
+			if tc.calls(cmd) != 1 {
+				t.Fatalf("manager calls = %d, want exactly one", tc.calls(cmd))
+			}
+			if out.Session.ID != id || out.GenerationID == "" || out.Kind == "" {
+				t.Fatalf("committed identity lost from fallback response: %+v", out)
+			}
+			if len(out.Session.PRs) != 0 {
+				t.Fatalf("fallback response invented PR facts: %+v", out.Session.PRs)
+			}
+		})
 	}
 }
 
@@ -376,6 +430,56 @@ func TestSwitchPreview_ExactRoleMapModels(t *testing.T) {
 		if preview.Targets[i] != want[i] {
 			t.Fatalf("targets[%d]=%+v want %+v", i, preview.Targets[i], want[i])
 		}
+	}
+}
+
+func TestSwitchPreview_DoesNotAdvertiseAmbiguousProviderDefault(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	st.sessions[id] = rec
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Roles["implementor"] = []domain.FailoverTarget{
+		{Harness: domain.HarnessCodex, Model: ""},
+		{Harness: domain.HarnessCodex, Model: "o4"},
+	}
+	st.projects["mer"] = project
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []domain.FailoverTarget{{Harness: domain.HarnessCodex, Model: "o4"}}
+	if len(preview.Targets) != 1 || preview.Targets[0] != want[0] {
+		t.Fatalf("preview advertised an API-unrepresentable default target: %+v", preview.Targets)
+	}
+	if !preview.Available {
+		t.Fatalf("fixed exact target should remain available: %+v", preview)
+	}
+}
+
+func TestSwitchPreview_PausedOrchestratorRefusesAllLifecycleActions(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: "limit-1"}
+	st.sessions[id] = rec
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonPaused || len(preview.Targets) != 0 {
+		t.Fatalf("paused preview = %+v", preview)
+	}
+	if st.getProjectCalls != 0 {
+		t.Fatalf("paused preview read project %d time(s), want zero", st.getProjectCalls)
 	}
 }
 

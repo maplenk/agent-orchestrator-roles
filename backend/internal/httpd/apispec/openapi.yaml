@@ -6956,6 +6956,7 @@ components:
           - role_not_in_map
           - no_target
           - in_progress
+          - paused
           - terminated
           - unavailable
           type: string

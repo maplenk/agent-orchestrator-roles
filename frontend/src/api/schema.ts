@@ -2414,7 +2414,7 @@ export interface components {
             current: components["schemas"]["SessionSwitchTarget"];
             pending: components["schemas"]["SessionSwitchPendingView"];
             /** @enum {string} */
-            reason: "" | "no_role_pin" | "no_role_map" | "role_not_in_map" | "no_target" | "in_progress" | "terminated" | "unavailable";
+            reason: "" | "no_role_pin" | "no_role_map" | "role_not_in_map" | "no_target" | "in_progress" | "paused" | "terminated" | "unavailable";
             roleId: string;
             targets: components["schemas"]["SessionSwitchTarget"][];
         } | null;

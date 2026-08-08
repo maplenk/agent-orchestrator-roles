@@ -79,6 +79,11 @@ var (
 	// controller. Lifting this needs stop and recovery for that controller, not
 	// a relaxed precondition.
 	ErrSwitchChatUnsupported = errors.New("session: switch is not supported for chat sessions yet")
+	// ErrSwitchPaused means an ordinary switch/fresh request tried to relaunch a
+	// session while its durable pause pin was held. Pause forbids AO-initiated
+	// restart; worker Continue is the explicit operator-owned failover remedy,
+	// while an orchestrator must first be resumed deliberately.
+	ErrSwitchPaused = errors.New("session: switch is not allowed while paused")
 	// ErrSwitchNotSupported means source/target harness lacks switch_supported.
 	ErrSwitchNotSupported = errors.New("session: harness does not support switch")
 	// ErrSwitchPostStop means the source runtime was already stopped; the

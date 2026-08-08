@@ -227,6 +227,7 @@ const sessionSwitchReasons: Record<SessionSwitchReason, true> = {
 	role_not_in_map: true,
 	no_target: true,
 	in_progress: true,
+	paused: true,
 	terminated: true,
 	unavailable: true,
 };

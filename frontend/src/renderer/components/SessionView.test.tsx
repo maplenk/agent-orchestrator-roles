@@ -419,6 +419,7 @@ describe("SessionView", () => {
 			session.status = "working";
 			delete session.mode;
 			delete session.switch;
+			delete session.pause;
 		}
 		workspaceQueryState.data = workspaces;
 		workspaceQueryState.isLoading = false;
@@ -577,6 +578,31 @@ describe("SessionView", () => {
 		expect(fresh).toBeEnabled();
 		fireEvent.click(fresh);
 		expect(orchestratorSwitchMutation.mutate).toHaveBeenCalledWith({ kind: "fresh" });
+	});
+
+	it("refuses Switch and Fresh Conversation while the orchestrator is paused", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.pause = {
+			incidentId: "limit-1",
+			reason: "operator",
+			detectedBy: "operator",
+			pausedAt: "2026-08-08T00:00:00Z",
+		};
+		orchestrator.switch = {
+			available: false,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [],
+			pending: null,
+			reason: "paused",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+
+		expect(screen.getByRole("button", { name: "Switch" })).toBeDisabled();
+		expect(screen.getByRole("button", { name: "Fresh Conversation" })).toBeDisabled();
+		expect(screen.getByText(/Resume this orchestrator before switching/)).toBeVisible();
+		expect(orchestratorSwitchMutation.mutate).not.toHaveBeenCalled();
 	});
 
 	// Regression: shell terminals are an app-wide list, so without a per-session

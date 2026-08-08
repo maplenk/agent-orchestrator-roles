@@ -1083,6 +1083,7 @@
 	"orchestrator.switch.roleMissing": "固定されたロールがプロジェクトのロールマップにありません。",
 	"orchestrator.switch.noTarget": "このロールでは別のハーネスを使用できません。",
 	"orchestrator.switch.inProgress": "ライフサイクル操作がすでに進行中です。",
+	"orchestrator.switch.paused": "切り替えまたは新しい会話を開始する前に、このオーケストレーターを再開してください。",
 	"orchestrator.switch.terminated": "終了したオーケストレーターは切り替えできません。",
 	"orchestrator.switch.unavailable": "切り替え先を一時的に取得できません。",
 	"orchestrator.switch.errorInProgress": "別のライフサイクル操作がすでに進行中です。",

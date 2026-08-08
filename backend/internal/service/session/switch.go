@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -37,6 +38,7 @@ const (
 	SwitchPreviewReasonRoleAbsent  = "role_not_in_map"
 	SwitchPreviewReasonNoTarget    = "no_target"
 	SwitchPreviewReasonInProgress  = "in_progress"
+	SwitchPreviewReasonPaused      = "paused"
 	SwitchPreviewReasonTerminated  = "terminated"
 	SwitchPreviewReasonUnavailable = "unavailable"
 )
@@ -235,6 +237,10 @@ func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (
 		preview.Reason = SwitchPreviewReasonInProgress
 		return preview, nil
 	}
+	if rec.Metadata.Pause != nil {
+		preview.Reason = SwitchPreviewReasonPaused
+		return preview, nil
+	}
 	if preview.RoleID == "" {
 		preview.Reason = SwitchPreviewReasonNoRolePin
 		return preview, nil
@@ -255,7 +261,14 @@ func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (
 		preview.Reason = SwitchPreviewReasonRoleAbsent
 		return preview, nil
 	}
-	for _, target := range domain.RoleAuthorizedSwitchTargets(roleMap, preview.RoleID) {
+	authorized := domain.RoleAuthorizedSwitchTargets(roleMap, preview.RoleID)
+	perHarness := make(map[domain.AgentHarness]int, len(authorized))
+	for _, target := range authorized {
+		if target.Harness != rec.Harness {
+			perHarness[target.Harness]++
+		}
+	}
+	for _, target := range authorized {
 		// The current harness is Fresh Conversation, not Switch. The service
 		// intentionally ignores a same-harness model override, so do not offer
 		// one here as if it were a supported model-switch operation.
@@ -263,6 +276,15 @@ func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (
 			continue
 		}
 		target.Model = strings.TrimSpace(target.Model)
+		// An empty targetModel on the current wire means "model omitted". When a
+		// harness has multiple authorized models, the resolver must answer
+		// TARGET_MODEL_REQUIRED and therefore cannot distinguish an explicitly
+		// selected provider-default entry. Do not advertise that unusable choice;
+		// fixed-model entries remain exact and selectable. A unique default stays
+		// available. A future pointer/explicit-default wire can lift this filter.
+		if target.Model == "" && perHarness[target.Harness] > 1 {
+			continue
+		}
 		preview.Targets = append(preview.Targets, target)
 	}
 	if len(preview.Targets) == 0 {
@@ -285,7 +307,15 @@ func (s *Service) FreshConversation(ctx context.Context, sessionID domain.Sessio
 func (s *Service) switchOutcome(ctx context.Context, res sessionmanager.SwitchResult) (SwitchWorkerOutcome, error) {
 	sess, err := s.toSession(ctx, res.Session)
 	if err != nil {
-		return SwitchWorkerOutcome{}, err
+		// The saga has already committed target_ack, promoted the target and
+		// cleared its pending fence. Optional PR facts cannot be allowed to turn
+		// that durable success into a 500: retrying a cross-harness request after
+		// promotion is interpreted as same-harness Fresh and would launch another
+		// generation. Return the authoritative session record with an empty PR
+		// projection and let the next ordinary read hydrate it.
+		slog.Warn("switch response PR facts unavailable; returning committed session without PR facts",
+			"sessionID", res.Session.ID, "generationID", res.GenerationID, "error", err)
+		sess = s.sessionFromRecord(res.Session, nil)
 	}
 	return SwitchWorkerOutcome{
 		Session:      sess,

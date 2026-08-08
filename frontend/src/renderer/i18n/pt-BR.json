@@ -1099,6 +1099,7 @@
 	"orchestrator.switch.roleMissing": "A função fixada não está no mapa de funções do projeto.",
 	"orchestrator.switch.noTarget": "A função não permite outro ambiente.",
 	"orchestrator.switch.inProgress": "Já existe uma operação de ciclo de vida em andamento.",
+	"orchestrator.switch.paused": "Retome este orquestrador antes de trocar ou iniciar uma nova conversa.",
 	"orchestrator.switch.terminated": "Orquestradores encerrados não podem trocar.",
 	"orchestrator.switch.unavailable": "Os destinos de troca estão temporariamente indisponíveis.",
 	"orchestrator.switch.errorInProgress": "Outra operação de ciclo de vida já está em andamento.",

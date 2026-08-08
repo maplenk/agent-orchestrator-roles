@@ -833,6 +833,9 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchChatUnsupported):
 		return apierr.Conflict("SWITCH_CHAT_UNSUPPORTED",
 			"Switching harness is not supported for chat sessions yet; move the session to terminal mode first", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchPaused):
+		return apierr.Conflict("SWITCH_PAUSED",
+			"This session is paused. Resume it before switching harness or starting a fresh conversation", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)
@@ -994,14 +997,21 @@ func (s *Service) toSession(ctx context.Context, rec domain.SessionRecord) (doma
 	if err != nil {
 		return domain.Session{}, fmt.Errorf("pr facts %s: %w", rec.ID, err)
 	}
-	prs = deduplicatePRFacts(prs)
+	return s.sessionFromRecord(rec, deduplicatePRFacts(prs)), nil
+}
+
+// sessionFromRecord assembles the infallible portion of the session read
+// model. Mutation responses use it after their durable point of no return when
+// optional PR-fact hydration fails: reporting a committed switch as a 500 can
+// make a retry launch another generation over the target that already acked.
+func (s *Service) sessionFromRecord(rec domain.SessionRecord, prs []domain.PRFacts) domain.Session {
 	return domain.Session{
 		SessionRecord:    rec,
 		Status:           deriveStatus(rec, prs, s.now(), s.harnessSignals(rec.Harness)),
 		SCMStatus:        deriveSCMStatus(prs),
 		TerminalHandleID: rec.Metadata.RuntimeHandleID,
 		PRs:              prs,
-	}, nil
+	}
 }
 
 // now tolerates a zero-value Service (tests construct the struct literally

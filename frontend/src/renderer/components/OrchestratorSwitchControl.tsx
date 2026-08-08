@@ -39,6 +39,8 @@ function errorMessage(error: Error, t: TFunction): string {
 		case "SWITCH_CHAT_UNSUPPORTED":
 		case "ORCHESTRATOR_CROSS_HARNESS_UNSUPPORTED":
 			return t("orchestrator.switch.errorUnsupported");
+		case "SWITCH_PAUSED":
+			return t("orchestrator.switch.paused");
 		case "SWITCH_TARGET_UNAUTHORIZED":
 		case "TARGET_MODEL_REQUIRED":
 			return t("orchestrator.switch.errorUnauthorized");
@@ -59,6 +61,8 @@ function reasonMessage(reason: SessionSwitchView["reason"] | undefined, t: TFunc
 			return t("orchestrator.switch.noTarget");
 		case "in_progress":
 			return t("orchestrator.switch.inProgress");
+		case "paused":
+			return t("orchestrator.switch.paused");
 		case "terminated":
 			return t("orchestrator.switch.terminated");
 		case "unavailable":

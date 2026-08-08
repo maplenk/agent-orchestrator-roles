@@ -213,6 +213,7 @@ func (m *Manager) ContinueFailover(
 		TargetHarness:     target.Harness,
 		TargetModel:       target.Model,
 		ForceGenerationID: generation,
+		PauseIncidentID:   incident,
 		Semantic: domain.SemanticHandoffV1{
 			SchemaVersion:    domain.SemanticHandoffSchemaVersion,
 			SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
@@ -288,6 +289,7 @@ func (m *Manager) adoptFailoverAttempt(
 			TargetHarness:     attempt.ToHarness,
 			TargetModel:       attempt.ToModel,
 			ForceGenerationID: attempt.GenerationID,
+			PauseIncidentID:   attempt.IncidentID,
 			Semantic: domain.SemanticHandoffV1{
 				SchemaVersion:    domain.SemanticHandoffSchemaVersion,
 				SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),

@@ -145,13 +145,15 @@ func TestToAPIError_ChatModeRoleForbidden(t *testing.T) {
 	}
 }
 
-// Two fences, two codes. They were one code for a while: upstream's merged
+// Distinct lifecycle fences keep distinct codes. The switch and interface
+// fences were one code for a while: upstream's merged
 // INTERFACE_TRANSITION_IN_PROGRESS case matched ErrSwitchInProgress and sat
 // ABOVE the fork's SWITCH_IN_PROGRESS case, so the first branch answered for
 // both and every ordinary switch, fresh-conversation and input-fence conflict
 // told the client it was "already switching interfaces". SWITCH_IN_PROGRESS was
-// unreachable — a code with no input is indistinguishable from a code that
-// works, which is why this pins both directions.
+// unreachable. Pause has a different remedy again: explicitly resume rather
+// than waiting for either saga. A code with no input is indistinguishable from
+// a code that works, which is why this pins every direction.
 func TestToAPIError_SwitchAndInterfaceFencesKeepSeparateCodes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -159,6 +161,7 @@ func TestToAPIError_SwitchAndInterfaceFencesKeepSeparateCodes(t *testing.T) {
 		code string
 	}{
 		{"switch saga fence", sessionmanager.ErrSwitchInProgress, "SWITCH_IN_PROGRESS"},
+		{"durable pause fence", sessionmanager.ErrSwitchPaused, "SWITCH_PAUSED"},
 		{"interface transition fence", sessionmanager.ErrInterfaceTransitionInProgress, "INTERFACE_TRANSITION_IN_PROGRESS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

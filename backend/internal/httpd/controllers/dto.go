@@ -186,7 +186,7 @@ type SessionSwitchView struct {
 	Current   SessionSwitchTarget       `json:"current"`
 	Targets   []SessionSwitchTarget     `json:"targets"`
 	Pending   *SessionSwitchPendingView `json:"pending" nullable:"true"`
-	Reason    string                    `json:"reason" enum:",no_role_pin,no_role_map,role_not_in_map,no_target,in_progress,terminated,unavailable"`
+	Reason    string                    `json:"reason" enum:",no_role_pin,no_role_map,role_not_in_map,no_target,in_progress,paused,terminated,unavailable"`
 }
 
 // SessionFailoverTarget is a host-authorized failover destination.
