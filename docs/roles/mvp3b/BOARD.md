@@ -3,8 +3,10 @@
 **Contract:** [`../PHASE3B_MVP_CONTRACT.md`](../PHASE3B_MVP_CONTRACT.md) — frozen, nobody edits.
 **Final cross-phase MVP:** [`../MVP_FINAL_SPEC.md`](../MVP_FINAL_SPEC.md) —
 current boundary and acceptance authority.
-**Implementation branch:** `roles/multi-sub-v1`
-**Promoted evidence branch:** `codex/mvp-promoted-evidence`
+**Evidence integration branch:** `codex/mvp-integration`
+**Target roles trunk:** `roles/multi-sub-v1` (merge not claimed here)
+**Accepted implementation/runner:** `166e9e63`
+**Promoted evidence commit:** `322f9c18`
 **Frozen code:** `backend/internal/domain/failover_contract.go`,
 `backend/internal/session_manager/failover_contract.go` — frozen at `daee190a`
 on `roles/multi-sub-v1` (`go build ./...` green there), amended in place after
@@ -37,6 +39,7 @@ see [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
 | Duplicate Continue close-out | `b23e4970`, `ff5c3b1c` | A duplicate caller preserves the in-flight attempt and receives a conflict instead of stranding or replaying it |
 | Codex launch close-out | `f0585f70`, `a4215229` | Switch prompts are file-backed rather than tmux arguments; post-stop launch-size failure is a durable conflict |
 | Final acceptance invariants | `166e9e63` | Correct failed-rung exhaustion, sanitized worker-address proof, and exact injected-failure recovery phases |
+| Promoted live evidence | `322f9c18` | Records the complete immutable-SHA live matrix; does not claim the separate repository gate is green |
 
 ### Decisions pinned by review
 
@@ -67,6 +70,19 @@ capability matrix passed as a separate Go probe.
 The promoted evidence is recorded in
 [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md). Earlier exploratory
 records remain historical and are not represented as combined-SHA evidence.
+
+### Repository-wide final gate
+
+**Open.** The exact race run found **zero data races**, but that narrower result
+does not close the full gate. Two diagnostics remain before it can be called
+green:
+
+1. reproduce and diagnose the Chat rollback result; and
+2. classify the SQLite failure.
+
+Do not downgrade either item to a flake, infer gate success from the promoted
+live matrix, or rerun the live matrix merely because the repository gate is
+still open.
 
 ## Why every agent keeps a todo file
 
@@ -363,13 +379,13 @@ conclusion that they were load artefacts rather than defects.
 > the local shell wrapper; its two underlying commands (`go test ./...` and
 > `golangci-lint run`) were run directly and both pass. Not a code failure.
 
-## Wave 3 — live dogfood
+## Wave 3 — promoted live dogfood complete
 
-An exploratory run captured five of twelve records before the probe and final
-orchestrator integration changed the code underneath them. They remain useful
-diagnostic evidence in `LIVE_DOGFOOD.md`, but **zero** count as final combined-
-SHA acceptance. All twelve need to be rerun from scratch on the immutable final
-SHA with a real paused role-pinned worker. The orchestrator Codex→Claude and
-Claude→Codex records are additional final-MVP acceptance gates.
+The exploratory records in `LIVE_DOGFOOD.md` remain historical. The complete
+worker 1–12 and orchestrator matrix was rerun from scratch on immutable SHA
+`166e9e63` and promoted by evidence commit `322f9c18`; see
+`FINAL_LIVE_ACCEPTANCE.md`. This closes live acceptance, not the separate
+repository-wide final gate.
 
-`limit_detection_supported` stays `false`; nothing is promoted by this MVP.
+`limit_detection_supported` stays `false`; no capability is promoted by this
+MVP.

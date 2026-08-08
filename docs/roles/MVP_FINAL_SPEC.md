@@ -1,11 +1,12 @@
 # Final roles MVP specification
 
-**Status:** implementation and independent review complete; clean final gate and
-live acceptance remain.
+**Status:** implementation, independent review, and promoted live acceptance
+complete. The repository-wide final gate is not yet green: reproducible
+diagnosis of the Chat rollback result and SQLite failure classification remain.
 
-**Current integrated code SHA:** `06aab758`
+**Accepted implementation and runner SHA:** `166e9e63`
 
-**Documentation close-out integrated as:** `4c5e284a`
+**Promoted live-evidence commit:** `322f9c18`
 
 **Detailed worker-Continue contract:**
 [`PHASE3B_MVP_CONTRACT.md`](PHASE3B_MVP_CONTRACT.md)
@@ -33,9 +34,12 @@ AO ships:
 5. Manual operator pause as the failover trigger. No vendor limit detector is
    required for this MVP.
 
-The remaining critical path is validation, not feature implementation: run the
-clean full gate, then capture the worker and orchestrator live records on that
-same immutable SHA. Nothing is promoted by those records.
+The remaining critical path is gate diagnosis, not feature implementation or
+live acceptance. The full worker/orchestrator matrix passed on immutable code
+`166e9e63` and is recorded by evidence commit `322f9c18`. The exact race run
+reported zero data races, but the repository-wide gate remains open until the
+Chat rollback result is reproduced and diagnosed and the SQLite failure is
+classified. No capability is promoted by this close-out.
 
 ## 2. Strict-mode policy for this MVP
 
@@ -76,8 +80,8 @@ capability and does not weaken an explicitly read-only role.
 
 ## 3. Deliverable A — manual worker Continue
 
-The product surface, durable saga, and reviewed runtime-probe correction are
-implemented. Final live acceptance remains.
+The product surface, durable saga, reviewed runtime-probe correction, and final
+live acceptance are complete.
 
 Required behavior:
 
@@ -273,15 +277,18 @@ The reviewer attacks:
 
 Expected duration: **0.5 day**.
 
-### Wave 3 — clean gate and live acceptance on one exact SHA — pending
+### Wave 3 — live acceptance complete; repository gate diagnosis pending
 
-Every final record must name the exact code SHA, daemon/data directory, project,
-session, generation, and relevant ledger rows. Exploratory evidence captured on
-an earlier SHA is not final acceptance evidence.
+Every final record names the exact code SHA, isolated daemon/data directory,
+project, session, generation, and relevant ledger rows. The promoted matrix ran
+on `166e9e63`; evidence is recorded in
+[`mvp3b/FINAL_LIVE_ACCEPTANCE.md`](mvp3b/FINAL_LIVE_ACCEPTANCE.md) at
+`322f9c18`. Exploratory evidence captured on earlier SHAs remains historical.
 
 #### Worker Continue records
 
-Run all twelve records from `PHASE3B_MVP_CONTRACT.md` from scratch, including:
+All twelve records from `PHASE3B_MVP_CONTRACT.md` passed from scratch,
+including:
 
 - paused-live and explicitly paused runtime-dead Continue, including literal
   `no server running` on an isolated AO namespace;
@@ -309,9 +316,16 @@ Run all twelve records from `PHASE3B_MVP_CONTRACT.md` from scratch, including:
 - unauthorized targets refused; and
 - same-harness fresh conversation still green with no prompt stacking.
 
-Expected duration: **0.5–1 day**.
+The complete worker and orchestrator result is promoted live-acceptance
+evidence. It does not imply that the separate repository-wide gate is green.
 
 ## 8. Final gate
+
+**Current result:** open. The exact race run found **zero data races**. That is
+not a blanket pass: the Chat rollback result still needs a reproducible
+diagnosis, and the SQLite failure still needs classification before the final
+gate may be called green. Do not rerun or rewrite the accepted live matrix to
+paper over either diagnostic item.
 
 Run from a clean checkout of the acceptance SHA:
 
@@ -350,7 +364,7 @@ Deferred beyond this MVP:
 - Pi/Muse orchestrator switching; and
 - automatic enforcement of model-quality/instruction-following behavior.
 
-## 10. Current status — code `06aab758`, docs `4c5e284a`
+## 10. Current status — code `166e9e63`, evidence `322f9c18`
 
 Implementation and review close-out are integrated:
 
@@ -366,13 +380,16 @@ Implementation and review close-out are integrated:
 - `051db38b` closes review gaps around paused switches, post-ack promotion,
   response hydration, exact target presentation, and provider-default
   ambiguity;
-- `06aab758` closes the final service/acceptance lint findings; and
-- `4c5e284a` integrates this canonical documentation close-out.
+- `06aab758` closes the service/acceptance lint findings;
+- `166e9e63` is the immutable implementation and acceptance-runner SHA; and
+- `322f9c18` records the promoted live matrix without claiming the separate
+  repository gate is green.
 
-Focused integrated tests and API/frontend checks passed during the waves. The
-acceptance claim is intentionally still open until the entire clean gate and
-all live records run on one immutable final SHA at or after `4c5e284a`.
+The final live-acceptance claim is closed on `166e9e63`. The repository-wide
+gate is intentionally still open pending reproducible Chat rollback diagnosis
+and SQLite failure classification. Its exact race run found zero data races;
+that narrower result must not be restated as a fully green gate.
 
 Nothing is promoted: `limit_detection_supported=false` for every harness and
-Claude Code remains `read_only_enforced=false`. Evidence captured before this
-integrated SHA remains exploratory rather than final acceptance evidence.
+Claude Code remains `read_only_enforced=false`. Here, “promoted live evidence”
+means the accepted evidence set, not a capability-registry promotion.

@@ -6,10 +6,12 @@
 > [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md) and
 > [`REMAINING_PLAN.md`](REMAINING_PLAN.md).
 
-> **Current close-out (2026-08-08):** implementation and review fixes are
-> integrated through code head `06aab758` and docs head `4c5e284a`. The next action is the clean full gate,
-> independent immutable-SHA review, and final worker/orchestrator live records.
-> Do not restart an older phase from the historical priority lists below.
+> **Current close-out (2026-08-08):** implementation and runner are accepted at
+> `166e9e63`; promoted live evidence is `322f9c18`. The exact race run found
+> zero data races, but the repository-wide gate remains open pending
+> reproducible Chat rollback diagnosis and SQLite failure classification. Do
+> not restart an older phase or rerun accepted live evidence from the
+> historical priority lists below.
 
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
 **Written:** 2026-08-04 (after Phase 2A close-out accept + `SwitchSupported` promotion).  
@@ -32,10 +34,10 @@
 | **`switch_supported`** | **true** for `claude-code` and `codex` only |
 | **`limit_detection_supported`** | **false** everywhere production — do not flip |
 | **`read_only_enforced`** | **true only for Codex**; Claude/Pi false by design for now |
-| **Phase 2B** | **2B-0a / 0b / 1 / 2 landed; final-MVP 2B-3 implemented, live acceptance pending.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
-| **Critical path next** | Run the clean final gate and independent immutable-SHA review, then capture worker/orchestrator evidence on that SHA |
+| **Phase 2B** | **2B-0a / 0b / 1 / 2 / final-MVP 2B-3 implemented and live-accepted.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
+| **Critical path next** | Diagnose the reproducible Chat rollback result and classify the SQLite failure, then close the affected repository gate commands |
 | **Parallel optional** | Phase 1-F / Claude RO (1-B) for explicitly read-only Claude roles; 2B-3 no longer depends on it |
-| **Current clean gate** | Focused integration gates passed through code head `06aab758`; the full backend/race/lint/frontend/API gate must now run on one exact SHA at or after docs head `4c5e284a` |
+| **Current clean gate** | **Not green.** Exact race found zero data races; Chat rollback and SQLite diagnostics remain. Live acceptance already passed on `166e9e63` and is recorded at `322f9c18` |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -535,10 +537,10 @@ High-level protocol used successfully:
 ## 14. Immediate next action for the successor agent
 
 1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md`.
-2. Run the clean final gate on one immutable SHA at or after `4c5e284a`.
-3. Give that immutable result an independent review and resolve real findings.
-4. Capture all 12 worker records and both strict orchestrator switch directions
-   on the same accepted SHA. Keep `limit_detection_supported=false` and Claude
+2. Reproduce and diagnose the Chat rollback result from the repository gate.
+3. Classify the SQLite failure, then rerun the affected gate commands.
+4. Do not rerun the accepted worker/orchestrator matrix merely because the
+   separate gate is open. Keep `limit_detection_supported=false` and Claude
    `read_only_enforced=false`; neither is promoted by this MVP.
 
 ---
@@ -546,9 +548,10 @@ High-level protocol used successfully:
 ## 15. Priority is already decided
 
 Do not ask the human to choose among Phase 2B, Claude RO, or Phase 1-F. The
-current priority is the final MVP close-out in `MVP_FINAL_SPEC.md`: gate,
-independent review, then live acceptance. Claude RO is optional post-MVP work
-for explicit read-only roles and no longer gates writable strict switching.
+current priority is the final MVP repository-gate diagnosis in
+`MVP_FINAL_SPEC.md`. Implementation, independent review, and promoted live
+acceptance are already complete. Claude RO is optional post-MVP work for
+explicit read-only roles and no longer gates writable strict switching.
 
 ---
 

@@ -1,12 +1,14 @@
 # Multi-sub roles — status & remaining plan
 
 **Repo:** https://github.com/maplenk/agent-orchestrator-roles  
-**Active integration:** final roles MVP code @ `06aab758`, documentation
-close-out @ `4c5e284a`; clean full gate and live acceptance pending before it
-moves to `roles/multi-sub-v1`
+**Accepted implementation/runner:** `166e9e63`  
+**Promoted live evidence:** `322f9c18`  
+**Evidence integration branch:** `codex/mvp-integration`  
+**Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
-**Current gate:** final MVP integration and live acceptance on one exact SHA
+**Current gate:** repository-wide close-out; live acceptance is complete, while
+Chat rollback diagnosis and SQLite failure classification remain
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -24,24 +26,24 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 1-B / strict exit | **Open for explicitly read-only Claude roles.** Claude remains `read_only_enforced=false`; writable strict orchestration no longer depends on that capability. |
 | Phase 2A | **Accepted and promoted.** Worker switch/fresh/recovery, ledger, input fences, API/CLI/auth and live dogfood are complete; Claude/Codex `switch_supported=true`. |
 | Phase 2B-0/1/2 | **Landed and dogfooded.** Coordinator uniqueness, fail-closed boot, in-place orchestrator fresh conversation and replacement recoverability are present. |
-| Phase 2B-3 | **Core and product surface implemented; live acceptance pending.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets, same-generation recovery, and a curated desktop/API read model. |
+| Phase 2B-3 | **Implemented and live-accepted.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets, same-generation recovery, and a curated desktop/API read model. |
 | Phase 3A pause core and operator surface | **Landed and accepted.** Durable pause, ledger-before-pin, zero automatic restart/send, pause/resume API+CLI, ownership CAS and pause-aware lifecycle are present. |
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
-| Phase 3B | **Manual Continue implemented and reviewed; final 12-record rerun pending.** Automatic failover is post-MVP. |
+| Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
-| CI | Focused integration gates passed through code head `06aab758`. The clean full backend/race/lint/frontend/API gate on one immutable SHA at or after docs head `4c5e284a` remains an acceptance precondition. |
+| CI | The exact race run found zero data races. The repository-wide gate is **not green** pending reproducible Chat rollback diagnosis and SQLite failure classification. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
 > Claude Code because strictness enforces role/routing/delegation policy, not a
 > filesystem sandbox. Claude-only installs still cannot configure an explicit
 > `workspaceWrites:false` role; Claude remains `read_only_enforced=false`.
 
-**Next engineering actions, in order:** run the clean full gate, independently
-review the exact integrated SHA, then capture all 12 worker Continue records
-and the Codex→Claude / Claude→Codex orchestrator records from scratch on that
-same immutable SHA. Claude read-only remains post-MVP work for roles that
-genuinely require technical write denial.
+**Next engineering actions, in order:** reproduce and diagnose the Chat
+rollback result, classify the SQLite failure, then rerun only the affected gate
+commands and close the repository-wide gate. Do not rerun the accepted live
+matrix merely to make the separate gate look green. Claude read-only remains
+post-MVP work for roles that genuinely require technical write denial.
 
 ---
 
@@ -168,7 +170,7 @@ orchestrator coordination twice — `0025`→`0037`, `0038`→`0039`).
 | 2B-0b Coordinator uniqueness | **Landed.** Migration 9004 partial unique index + reconciliation, capturing each loser's execution identity into `orchestrator_reap_queue` before clearing it; fail-closed boot reaper draining that queue ahead of every surface; unique-constraint errors mapped to `ErrActiveOrchestratorExists` (409) instead of an opaque 500; `MarkSpawned` launch-cleanup window hardened so a failed launch leaves neither an untracked runtime nor a phantom-live row, with `ErrLaunchCleanupUnresolved` propagated through restore *and* post_stop recovery to a fatal boot gate. **Boot restore closed the last ungated path:** `RestoreAll` now restores at most one orchestrator per project under that project's gate, held across *both* the survivor decision and the restore, because `workspace.Restore` adopts the shared canonical worktree before any row flips — so the index alone never sees the damage. Losing candidates and candidates displaced by an already-live owner have their markers neutralized (rows only; the preserved ref survives), mirroring 9004 — and neutralization is a **durable precondition** of restoring the winner, not best-effort: a surviving loser marker does not stay a loser, so once the winner is killed that stale row becomes the only restorable orchestrator and a later boot resurrects the session this election superseded. A marker **read** failure is likewise not an absence: it abandons the whole project's election rather than letting an older candidate be promoted on incomplete evidence into the shared canonical worktree. All three failures — undeletable loser marker, unreadable marker, unreadable project session list — are boot-fatal via `ErrBootUnsafe`, the shared marker the daemon gate keys on, so a new fail-closed condition becomes fatal by wrapping it rather than by editing `daemon.go`. Not having *looked* leaves the identical durable hazard as having failed to *delete*: an unexamined marker is still eligible, so killing the current owner would let a predecessor return on a later boot. Each leaf's membership is pinned by a table test, since the gate keys only on the parent and an unwrapped leaf would silently stop being fatal. `activeOrchestratorSessionID` now applies `newestOrchestratorRecord` too: first-match-in-list-order returned the *oldest* active orchestrator, so workers spawned while two were briefly active were told to report to the one being superseded |
 | 2B-1 In-place orchestrator fresh conversation | **Landed.** `KindWorker` guards parameterized across manager saga, recovery and service; `SwitchWorker` stays worker-only as an entry point while `FreshOrchestratorConversation` takes the **project gate before `beginSwitch`** (lock order `projectOwnership -> beginSwitch`, never inverted — otherwise `EnsureOrchestrator` could retire the session mid-saga). New ledger kind `orchestrator_fresh_conversation` so recovery and audit can tell the sagas apart. `Reconcile` post_stop recovery now includes orchestrators, which previously left a crashed mid-switch project with no coordinator. `ObservedOrchestratorV1` compiles the project's fleet — live **and** terminated workers, read from the session table rather than the outgoing agent's recollection — into the handoff; an unreadable fleet degrades rather than aborts, since it is context and the switch is remedying context loss. In-place keeps the session id, so live workers (whose prompts embed it at spawn/restore only) never need rebinding |
 | 2B-2 Replacement durable recoverability | **Landed.** Migration 9005 `orchestrator_replacement_intent`, one row per project, written **before** the first destructive step — a failure to record it aborts before anything is destroyed, since retiring without it is the one ordering that strands a project silently. Retained when spawn fails (that IS the state recovery exists for), discharged only once a successor is live. Boot recovery re-drives stranded projects under the project gate, after `Reconcile` so an adopted crash-survivor counts as the owner rather than being spawned over; it is logged rather than boot-fatal because a project without a coordinator is inert and stopping an otherwise-healthy daemon is the worse outcome. `finalizeRetirement` now terminates **before** releasing the claim: the two writes cannot be one, so the ordering picks the residue, and a terminated row with a stale path is guarded and repairable while an ACTIVE row owning no workspace occupies the project's only slot and is handed out by `EnsureOrchestrator`'s idempotent path. `reconcileOrchestratorRetirement` repairs both residues at boot |
-| 2B-3 Cross-harness orchestrator switch | **Implemented; live acceptance pending.** `SwitchOrchestrator` holds project ownership before the switch fence, reloads session/project under the gate, resolves the exact primary+ladder target through the shared domain resolver, preserves durable identity/permissions, rotates the credential, and recovers the same generation. Cross-harness uses the existing `switch` ledger kind; same-harness fresh keeps `orchestrator_fresh_conversation` |
+| 2B-3 Cross-harness orchestrator switch | **Implemented and live-accepted.** `SwitchOrchestrator` holds project ownership before the switch fence, reloads session/project under the gate, resolves the exact primary+ladder target through the shared domain resolver, preserves durable identity/permissions, rotates the credential, and recovers the same generation. Cross-harness uses the existing `switch` ledger kind; same-harness fresh keeps `orchestrator_fresh_conversation` |
 | Deferred | Successor-session handoff (needs live-worker rebind + worktree release sequencing) |
 
 **Estimate correction:** MASTER_PLAN §8's 3–5 d did not account for coordinator
@@ -229,7 +231,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 | Task | Detail |
 |------|--------|
-| Manual continue on next ladder rung | **Implemented and reviewed.** Default mode is manual; final 12-record rerun pending |
+| Manual continue on next ladder rung | **Implemented, reviewed, and live-accepted.** Default mode is manual; all 12 final records passed on `166e9e63` |
 | Failover preserves `role_id` | **Implemented.** Only harness/model/generation and rotated credential change |
 | `maxFailoversPerIncident` | **Implemented** as the frozen host bound; exhaustion stays paused |
 | `failover.mode=automatic` | **Deferred post-MVP.** No scheduler, retry loop, timer, or automatic trigger ships |
@@ -240,9 +242,9 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 | Task | Detail |
 |------|--------|
-| Clean full gate | **Pending** on one exact integrated SHA at or after `4c5e284a` |
-| Worker dogfood | **Pending:** all 12 records from scratch |
-| Orchestrator dogfood | **Pending:** Codex→Claude, Claude→Codex, fencing and same-generation recovery |
+| Clean full gate | **Open:** exact race found zero data races; Chat rollback diagnosis and SQLite failure classification remain |
+| Worker dogfood | **Complete:** all 12 records passed on `166e9e63`; evidence `322f9c18` |
+| Orchestrator dogfood | **Complete:** Codex→Claude→Codex, fencing, unauthorized refusal, Fresh and same-generation recovery passed |
 | Promotion | **None.** Limit detection and Claude read-only stay false |
 
 ---
@@ -262,9 +264,9 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 | 1-B Claude RO (optional parallel) | 3–5 | 1-A |
 | 1-F Phase 1 strict exit | 2–3 | 1-B if Claude RO required for strict maps |
 | ~~Phase 2B-0a/0b/1/2~~ | **Done** | 2A patterns; ≈6–11 d actual, not the 3–5 first estimated |
-| Phase 2B-3 (cross-harness orch) | **Implemented; live acceptance pending** | Final MVP strict-policy amendment |
-| ~~Phase 3B manual Continue~~ | **Done; live acceptance pending** | Final probe review |
-| Final integration/acceptance | active | Probe + core + surface on one SHA |
+| ~~Phase 2B-3 (cross-harness orch)~~ | **Implemented and live-accepted** | Final MVP strict-policy amendment |
+| ~~Phase 3B manual Continue~~ | **Implemented and live-accepted** | Final probe review |
+| Final repository gate | active | Chat rollback diagnosis + SQLite classification |
 
 ### Sequencing sketch
 
@@ -273,10 +275,11 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 2B-1 orch in-place fresh      ──► LANDED (first user-facing 2B behaviour)
 2B-2 replacement recoverability ──► LANDED (intent + crash-consistent retirement)
 Sync 2 acceptance ──► DONE (2026-08-07)
-3B manual Continue ──► IMPLEMENTED
+3B manual Continue ──► IMPLEMENTED + LIVE-ACCEPTED
 Final MVP core + surface ──► IMPLEMENTED / REVIEW FIXES INTEGRATED
-Now ──► clean full gate on one immutable SHA
-     ──► 12 worker records + both orchestrator directions
+Live matrix @ 166e9e63 ──► ACCEPTED (evidence 322f9c18)
+Now ──► diagnose Chat rollback + classify SQLite failure
+     ──► rerun affected repository gate commands only
      ║
      ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
 ```
@@ -306,8 +309,8 @@ Already satisfied (re-verify on regressions):
 Still open or partial:
 
 7. **Partial:** durable pause and zero automatic send/restart are enforced; no harness yet produces a promoted structured limit event
-8. **Implemented; live acceptance pending:** failover preserves `role_id` and
-   respects the incident bound
+8. **Satisfied for the final MVP:** failover preserves `role_id`, respects the
+   incident bound, and passed the promoted live matrix
 
 ---
 
@@ -328,13 +331,13 @@ Still open or partial:
 13. [x] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
 14. [x] Worker switch saga + fresh-conversation (manager + service/API/CLI)
 15. [x] Lifecycle ledger (switch/fresh)
-16. [~] Orchestrator in-place switch protocol — fresh conversation,
+16. [x] Orchestrator in-place switch protocol — fresh conversation,
     Codex↔Claude switch, gated same-generation recovery, and durable replacement
-    recovery are implemented; final-MVP live acceptance is pending.
+    recovery are implemented and live-accepted.
     Successor-session handoff and live-worker rebind remain deferred
 17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Still missing: a harness detector (needs captured vendor fixtures) and any **desktop role-map editor** — the composer *consumes* a role map, but adding or editing roles remains API/CLI-only
-18. [~] Manual Continue implemented; final live acceptance pending. Opt-in
-    auto-failover is post-MVP
+18. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
+    post-MVP
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
 
 ---
@@ -352,8 +355,9 @@ Still open or partial:
 
 ## 7. Immediate next action
 
-1. Run the full final gate from a clean checkout at or after `4c5e284a`.
-2. Independently review that immutable result and resolve any real finding.
-3. Rerun all 12 worker Continue records plus strict Codex→Claude and
-   Claude→Codex orchestrator records on that SHA. Claude read-only remains
-   parallel post-MVP work and does not gate 2B-3.
+1. Reproduce and diagnose the Chat rollback result from the final gate.
+2. Classify the SQLite failure without assuming it is a flake.
+3. Rerun the affected repository gate commands and close the gate only when
+   both results are explained. The accepted live matrix at `166e9e63` does not
+   need to be repeated. Claude read-only remains parallel post-MVP work and does
+   not gate 2B-3.

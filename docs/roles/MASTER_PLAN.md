@@ -19,10 +19,11 @@ CI job is green, and the two live Step 5 dogfood records
 (orchestrator fresh conversation, and a genuine post-stop recovery on the
 original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Phase
 3B manual worker Continue and the final-MVP 2B-3 core, service/read model, API,
-CLI and desktop surface plus final lint fixes are integrated through code head
-`06aab758`; the documentation close-out is `4c5e284a`. Probe-consumer and
-review gaps are closed. The clean final gate, independent immutable-SHA review,
-and live acceptance remain.
+CLI and desktop surface are complete at immutable code/runner SHA `166e9e63`.
+Independent review is closed and the complete worker/orchestrator live matrix
+is promoted by evidence commit `322f9c18`. The exact race run found zero data
+races, but the repository-wide final gate remains open pending reproducible
+Chat rollback diagnosis and SQLite failure classification.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -367,13 +368,16 @@ Zai and Kimi validated **separately** on Pi.
 10. [x] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
 11. [x] Worker switch saga + fresh-conversation
 12. [x] Lifecycle ledger
-13. [~] Orchestrator switch protocol — in-place fresh, Codex↔Claude switch,
-    gated same-generation recovery, and replacement recovery are implemented;
-    final-MVP live acceptance is pending
+13. [x] Orchestrator switch protocol — in-place fresh, Codex↔Claude switch,
+    gated same-generation recovery, replacement recovery, and final live
+    acceptance are complete
 14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
-15. [~] Manual Continue implemented; final live acceptance pending. Opt-in
-    auto-failover is post-MVP
-16. [~] Dogfood against all DoD invariants — Phase 2A/2B/3A evidence exists; Sync 2 is accepted with its required CI green and both live Step 5 records captured. Still partial because invariants 7 and 8 (promoted limit detection, failover runtime) have no dogfood evidence yet
+15. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
+    post-MVP
+16. [~] Dogfood against all DoD invariants — the final MVP worker/orchestrator
+    matrix is promoted at `322f9c18`; vendor limit detection remains outside
+    this MVP and unpromoted. The repository-wide gate is still open on the two
+    diagnostics named above
 
 ---
 
