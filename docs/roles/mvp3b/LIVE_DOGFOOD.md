@@ -89,14 +89,21 @@ in isolation it is the correct refusal.
 
 ### The live finding worth escalating
 
-`destroyRuntimeProbed` does not distinguish **"the probe failed"** from **"the
-server that would host this pane does not exist"**. For a per-session tmux
-socket those are different facts: a transient probe error is genuinely unknown,
-but `no server running on <this session's own socket>` means no pane can be
-alive on it. Treating the second as unknown makes a session whose agent exited
-**permanently un-switchable** — every Continue and every recovery returns
+The probe path does not distinguish **"the probe failed"** from **"the server
+that would host this pane does not exist"**. Those are different facts: a
+transient probe error is genuinely unknown, but `no server running` means no
+pane can be alive on that socket at all, because tmux panes live inside the
+server process. Treating the second as unknown makes a session whose agent
+exited **permanently un-switchable** — every Continue and every recovery returns
 `SWITCH_UNCERTAIN` forever, with the pause correctly retained and no way
 forward except Resume.
+
+> **Correction (2026-08-08).** An earlier revision of this file said AO uses a
+> *per-session* tmux socket. That is wrong. `SocketForDataDir` hashes the DATA
+> DIRECTORY, so one namespaced server is shared by every session of a daemon,
+> and the default data dir deliberately uses the default server. That changes
+> the blast radius of any fix here and is why the fix was scoped to namespaced
+> sockets only — see `PROBE_CLASSIFICATION.md`.
 
 That matters for 3B specifically because **paused-dead is a first-class MVP
 state** (record 2) and this is the ordinary way a session becomes paused-dead.

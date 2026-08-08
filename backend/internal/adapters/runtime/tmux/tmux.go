@@ -552,6 +552,27 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 			if sessionMissingOutput(string(out)) {
 				return false, nil
 			}
+			// An AO-OWNED server that does not exist is authoritative absence,
+			// not an unreachable server. tmux panes live inside the server
+			// process, so if that process is gone every pane it hosted is gone
+			// with it -- there is no state in which the server is absent and a
+			// session of ours survives.
+			//
+			// Scoped to a namespaced socket on purpose. The default server is
+			// shared with whatever tmux the human runs (SocketForDataDir returns
+			// "" for the default data dir, deliberately, for continuity), so its
+			// absence is not a fact about AO's sessions and stays inconclusive.
+			//
+			// Narrower than "unreachable" on purpose too: only the literal
+			// absence message counts. "error connecting" can mean a permission
+			// failure or a stale socket path, which are reachability problems
+			// rather than proof of anything, so they keep returning
+			// ErrRuntimeUnavailable. Issue #3475 is the reason for that care --
+			// reading a server-level outage as N session deaths archived every
+			// session on the board.
+			if r.socket != "" && serverAbsentOutput(string(out)) {
+				return false, nil
+			}
 			if serverUnreachableOutput(string(out)) {
 				return false, fmt.Errorf("tmux runtime: probe session %s: %w: %s",
 					id, ports.ErrRuntimeUnavailable, strings.TrimSpace(string(out)))
@@ -986,8 +1007,19 @@ func sessionMissingOutput(out string) bool {
 // session's liveness.
 func serverUnreachableOutput(out string) bool {
 	s := strings.ToLower(out)
-	return strings.Contains(s, "no server running") ||
+	return serverAbsentOutput(out) ||
 		strings.Contains(s, "error connecting")
+}
+
+// serverAbsentOutput reports the one tmux stderr that proves the server does
+// not EXIST, as opposed to merely being unreachable.
+//
+// The distinction is the whole point: "no server running" is an answer, while
+// "error connecting" (permission denied, stale socket) is a failure to get one.
+// Only the former can be read as liveness, and only for a socket AO owns --
+// see the call site in IsAlive.
+func serverAbsentOutput(out string) bool {
+	return strings.Contains(strings.ToLower(out), "no server running")
 }
 
 // killSessionMissingOutput reports whether a non-zero `tmux kill-session`

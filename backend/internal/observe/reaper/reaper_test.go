@@ -3,6 +3,7 @@ package reaper
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -227,5 +228,33 @@ func TestTick_SkipsSessionWithoutHandle(t *testing.T) {
 	}
 	if _, probed := lcm.observed["mer-1"]; probed {
 		t.Fatal("a session without a runtime handle must be skipped")
+	}
+}
+
+// The tmux adapter now answers "dead" for an ABSENT namespaced server, because
+// panes cannot outlive their server. It still answers with an ERROR for a
+// server it merely could not reach. This test pins the half that must not move:
+// an inconclusive probe stays inconclusive here, and never becomes a death.
+//
+// Without it, narrowing the adapter's classification could be followed later by
+// a well-meaning simplification that collapses both cases, which is issue #3475
+// with extra steps.
+func TestTick_UnreachableRuntimeStaysInconclusiveNotDead(t *testing.T) {
+	for _, probeErr := range []error{
+		fmt.Errorf("tmux runtime: probe session mer-1: %w: error connecting", ports.ErrRuntimeUnavailable),
+		errors.New("tmux runtime: probe session mer-1: some unknown failure"),
+	} {
+		lcm := &fakeLCM{}
+		rows := []domain.SessionRecord{handledSession("mer-1")}
+		r := New(lcm, fakeSessions{rows: rows}, fakeRuntime{alive: false, err: probeErr},
+			Config{Logger: quietLogger()})
+		if err := r.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+		got := lcm.observed["mer-1"]
+		if got.Runtime != ports.ProbeFailed {
+			t.Fatalf("probeErr %v: runtime = %q, want %q; an unreachable runtime is not a dead one",
+				probeErr, got.Runtime, ports.ProbeFailed)
+		}
 	}
 }
