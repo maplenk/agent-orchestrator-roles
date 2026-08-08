@@ -37,6 +37,22 @@ timers, or automatic retries.
 Continue is the only one of the three that changes harness/model. It never
 changes `role_id`.
 
+**Distinct does not mean always rendered.** The requirement is that the three
+operations never blur into one another — not that all three appear in every
+state. The control set is state-appropriate:
+
+| Cell | Controls |
+|---|---|
+| **paused-live** (agent running) | Resume + Continue |
+| **paused-dead** (agent gone) | Resume + Restart agent + Continue |
+
+**Restart must remain absent while the process is alive.** 3A already landed and
+asserted this — `SessionInspector.test.tsx`'s paused-live case requires Restart
+to be *absent*, "not merely worded differently" — and offering to restart a
+process that is running is an invitation to a second runtime, which is the
+failure this whole phase is organised against. Continue is offered in **both**
+cells, because a live-but-limited agent is exactly the case failover exists for.
+
 ---
 
 ## 3. Endpoint
@@ -107,6 +123,13 @@ New, introduced by this MVP:
 
 `FAILOVER_NO_TARGET` and `FAILOVER_LIMIT_REACHED` are **not** failures of the
 pause: the pin survives untouched, which is the whole point of the cap.
+
+**`ErrFailoverNotWired` deliberately has no public code.** It means the daemon
+was assembled without the failover surface — a wiring bug, not a condition any
+caller can act on — so it surfaces as a 500 like every other internal fault.
+This is the existing precedent, not a new one: `ErrSwitchNotWired` is returned
+raw by both `switch.go` and `pause.go` for exactly the same reason. Inventing a
+fifth public code here would tell an operator to react to a build defect.
 
 ---
 
