@@ -522,7 +522,14 @@ func TestContinueFailover_AdoptsPostStopWithoutSpendingASecondRung(t *testing.T)
 
 // A duplicate Continue while the attempt is still `requested` and nothing has
 // been stopped: return the attempt on record, unchanged.
-func TestContinueFailover_DuplicateReturnsTheSameAttempt(t *testing.T) {
+// A CONCURRENT duplicate: the saga is genuinely running, so beginSwitch is
+// held. Only this case may report reuse without launching.
+//
+// The fence is taken directly rather than simulated, because the fence IS the
+// discriminator: nothing durable distinguishes "a saga is running right now"
+// from "a saga died before it started", and an earlier version of this test
+// injected the second state while asserting the first one's behaviour.
+func TestContinueFailover_ConcurrentDuplicateReusesWithoutLaunching(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	st.attempts = append(st.attempts, domain.FailoverAttempt{
 		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
@@ -530,25 +537,141 @@ func TestContinueFailover_DuplicateReturnsTheSameAttempt(t *testing.T) {
 		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
 		RungIndex: 0, State: domain.FailoverAttemptRequested,
 	})
+	if !m.beginSwitch(id) {
+		t.Fatal("could not take the switch fence")
+	}
+	defer m.endSwitch(id)
 
 	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
 	if err != nil {
-		t.Fatalf("duplicate continue: %v", err)
+		t.Fatalf("concurrent duplicate continue: %v", err)
 	}
 	if !res.Reused {
-		t.Fatal("duplicate Continue reported Reused=false")
+		t.Fatal("concurrent duplicate reported Reused=false")
 	}
 	if res.GenerationID != "gen-inflight" || res.AttemptSeq != 1 || res.RungIndex != 0 {
-		t.Fatalf("duplicate returned a different attempt: %+v", res)
+		t.Fatalf("concurrent duplicate returned a different attempt: %+v", res)
 	}
 	if len(st.attempts) != 1 {
-		t.Fatalf("duplicate wrote a second attempt row: %d", len(st.attempts))
+		t.Fatalf("concurrent duplicate wrote a second attempt row: %d", len(st.attempts))
 	}
 	if rt.created != 0 {
-		t.Fatal("duplicate Continue launched a second runtime")
+		t.Fatal("concurrent duplicate launched a second runtime")
 	}
 	if st.sessions[id].Metadata.Pause == nil {
-		t.Fatal("duplicate Continue lifted the pause before any ack")
+		t.Fatal("concurrent duplicate lifted the pause before any ack")
+	}
+}
+
+// The crash this design previously answered with a lie: the daemon died between
+// the attempt's durable write and SwitchWorker establishing ANY pending state.
+//
+// Reporting reuse here spends the rung, tells the operator the move happened,
+// and parks the session paused forever with no runtime — boot is deliberately
+// passive, so nothing else would ever drive it. The next Continue must re-drive
+// the SAME generation and target, and must not mint a second attempt.
+func TestContinueFailover_RequestedCrashRedrivesSameGeneration(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor", GenerationID: "gen-crashed",
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		RungIndex: 0, State: domain.FailoverAttemptRequested,
+	})
+
+	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("re-drive after a requested-phase crash: %v", err)
+	}
+	if rt.created != 1 {
+		t.Fatalf("re-drive launched %d runtimes, want exactly 1", rt.created)
+	}
+	if res.GenerationID != "gen-crashed" {
+		t.Fatalf("re-drive minted a new generation %q, want gen-crashed", res.GenerationID)
+	}
+	if len(st.attempts) != 1 {
+		t.Fatalf("re-drive wrote a second attempt row: %d", len(st.attempts))
+	}
+	if st.attempts[0].State != domain.FailoverAttemptAcked {
+		t.Fatalf("attempt state = %q, want acked after a successful re-drive", st.attempts[0].State)
+	}
+	if !res.Reused {
+		t.Fatal("a re-drive adopted an existing attempt; Reused must stay true")
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("pause survived a completed re-drive")
+	}
+}
+
+// A durable target_ack is written BEFORE the session is promoted, so an attempt
+// can read `acked` while SwitchPending still holds and the row still names the
+// source harness. Clearing the pin on that evidence lifts a human's pause on a
+// move that has not landed.
+//
+// With no incomplete switch to finish, the only honest answer is that a human
+// must resolve it — and critically, NOT to fall through and spend a new rung.
+func TestContinueFailover_AckedButUnpromotedNeverClearsPauseOrSpendsARung(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor", GenerationID: "gen-acked",
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		RungIndex: 0, State: domain.FailoverAttemptAcked,
+	})
+	// Promotion never happened: the row still names the source harness, and the
+	// runtime generation is still the source's.
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessClaudeCode
+	rec.Metadata.RuntimeLaunchID = "gen-source"
+	st.sessions[id] = rec
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("err = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("an unpromoted ack cleared the pause")
+	}
+	if len(st.attempts) != 1 {
+		t.Fatalf("an unpromoted ack spent a second rung: %d attempts", len(st.attempts))
+	}
+	if rt.created != 0 {
+		t.Fatalf("an unpromoted ack launched %d runtimes", rt.created)
+	}
+}
+
+// The settled counterpart: promotion is proven on every axis, so the only thing
+// left undone is the pin clear, and a retry does exactly that and no more.
+func TestContinueFailover_AckedAndPromotedFinishesOnlyThePinClear(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor", GenerationID: "gen-done",
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		RungIndex: 0, State: domain.FailoverAttemptAcked,
+	})
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedModel = ""
+	rec.Metadata.RuntimeLaunchID = "gen-done"
+	rec.Metadata.SwitchPending = nil
+	st.sessions[id] = rec
+
+	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("converge after a crash between ack and pin clear: %v", err)
+	}
+	if !res.Reused {
+		t.Fatal("convergence reported Reused=false")
+	}
+	if rt.created != 0 {
+		t.Fatalf("convergence launched %d runtimes; the move had already happened", rt.created)
+	}
+	if len(st.attempts) != 1 {
+		t.Fatalf("convergence spent a second rung: %d attempts", len(st.attempts))
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("convergence did not clear the pause it exists to clear")
 	}
 }
 

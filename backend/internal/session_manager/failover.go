@@ -127,11 +127,24 @@ func (m *Manager) ContinueFailover(
 	// catch it, but a crash between the ack and the pin clear leaves exactly
 	// this: a still-paused session whose move already happened. Without it the
 	// retry would spend a SECOND rung to redo a completed continuation.
+	//
+	// `acked` is NOT sufficient to clear the pin, and that distinction is the
+	// whole of this branch. The switch saga makes its target_ack ledger row
+	// durable BEFORE it promotes the session, and ReconcileFailoverAttempts
+	// marks the attempt from that ledger row -- so an attempt can read `acked`
+	// while SwitchPending is still set and the session still names the SOURCE
+	// harness. Clearing the pin there would lift a human's pause on a move that
+	// has not landed; falling through instead (which is what happened when the
+	// only guard was the runtime generation) would mint a NEW rung and run a
+	// second switch over an unpromoted one. Promotion has to be proven, not
+	// inferred from the ack.
 	if latest, ok := domain.LatestFailoverAttempt(attempts); ok &&
 		latest.State == domain.FailoverAttemptAcked &&
-		latest.GenerationID != "" &&
-		latest.GenerationID == strings.TrimSpace(rec.Metadata.RuntimeLaunchID) {
-		return m.finishFailoverPinClear(ctx, rec, latest)
+		latest.GenerationID != "" {
+		if failoverPromotionSettled(rec, latest) {
+			return m.finishFailoverPinClear(ctx, rec, latest)
+		}
+		return m.convergeUnpromotedAck(ctx, store, rec, latest)
 	}
 
 	if domain.CountFailoverAttempts(attempts) >= domain.MaxFailoversPerIncident {
@@ -249,10 +262,45 @@ func (m *Manager) adoptFailoverAttempt(
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read recovery state: %w", rec.ID, err)
 	}
 	if !hasIncomplete {
-		// A genuine duplicate: the saga is either running under beginSwitch
-		// right now or died before the point of no return. Nothing was
-		// destroyed, so the honest answer is the attempt already on record.
-		return failoverResult(rec, attempt, true), nil
+		// Two very different worlds reach here, and answering them the same way
+		// is a silent failure.
+		//
+		// Either the saga is running RIGHT NOW under beginSwitch -- a genuine
+		// duplicate Continue -- or the daemon died between the attempt's durable
+		// write and SwitchWorker establishing any pending state at all, leaving a
+		// `requested` attempt that never launched anything. Reporting reuse for
+		// the second case tells the operator the move happened, spends the rung,
+		// and parks the session paused forever with no runtime and nothing left
+		// that would ever drive it: boot is deliberately passive here.
+		//
+		// beginSwitch is the discriminator, and it is exactly the right one
+		// because it is in-memory: a live saga holds it and refuses with
+		// ErrSwitchInProgress, while after a crash it is free and the re-drive
+		// proceeds. Nothing durable can tell these apart, which is why the old
+		// code could not.
+		//
+		// The re-drive is not a retry: it uses the attempt's OWN stored target
+		// and generation, so it is the same rung on the same identity, and no
+		// second attempt row is ever minted.
+		res, switchErr := m.SwitchWorker(ctx, SwitchRequest{
+			SessionID:         rec.ID,
+			TargetHarness:     attempt.ToHarness,
+			TargetModel:       attempt.ToModel,
+			ForceGenerationID: attempt.GenerationID,
+			Semantic: domain.SemanticHandoffV1{
+				SchemaVersion:    domain.SemanticHandoffSchemaVersion,
+				SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
+				NativeSessionID:  rec.Metadata.AgentSessionID,
+			},
+		})
+		if errors.Is(switchErr, ErrSwitchInProgress) {
+			// The duplicate case, now positively identified rather than assumed.
+			return failoverResult(rec, attempt, true), nil
+		}
+		if switchErr != nil {
+			return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
+		}
+		return m.completeFailoverAttempt(ctx, store, rec, attempt, res, true)
 	}
 	if incompleteGen != attempt.GenerationID {
 		// Section 6b removed the guess that used to live here. The generation
@@ -335,6 +383,62 @@ func (m *Manager) completeFailoverAttempt(
 		"sessionID", rec.ID, "incident", acked.IncidentID, "seq", acked.Seq,
 		"generation", acked.GenerationID, "to", string(acked.ToHarness), "reused", reused)
 	return out, nil
+}
+
+// failoverPromotionSettled reports whether the session has actually BEEN moved
+// to the attempt's target, as opposed to merely having a durable target_ack.
+//
+// All four conditions are load-bearing, because the ack alone proves none of
+// them: the saga writes target_ack before it promotes the session fields, so
+// between those two writes the row still carries the source harness, the source
+// model and a live SwitchPending pin. Clearing a human's pause on that evidence
+// would be "pause cleared before ack" wearing the ack's clothes.
+func failoverPromotionSettled(rec domain.SessionRecord, attempt domain.FailoverAttempt) bool {
+	if rec.Metadata.SwitchPending != nil {
+		return false
+	}
+	if rec.Harness != attempt.ToHarness {
+		return false
+	}
+	if strings.TrimSpace(rec.Metadata.Role.ResolvedModel) != strings.TrimSpace(attempt.ToModel) {
+		return false
+	}
+	return strings.TrimSpace(rec.Metadata.RuntimeLaunchID) == strings.TrimSpace(attempt.GenerationID)
+}
+
+// convergeUnpromotedAck handles an attempt that reads `acked` while the session
+// has not been promoted to its target.
+//
+// It deliberately never re-drives SwitchWorker the way the `requested` adoption
+// path does. A durable target_ack means a target runtime may already exist, so
+// re-launching is how this session ends up with two; the only safe completions
+// are finishing the SAME generation through the existing recovery path, or
+// handing the ambiguity to a human. It also never mints a new rung, and never
+// clears the pin before promotion is proven.
+func (m *Manager) convergeUnpromotedAck(
+	ctx context.Context,
+	store failoverAttemptStore,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+) (ContinueFailoverResult, error) {
+	incompleteGen, hasIncomplete, err := m.incompleteSwitchGeneration(ctx, rec)
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read recovery state: %w", rec.ID, err)
+	}
+	if !hasIncomplete || incompleteGen != attempt.GenerationID {
+		return ContinueFailoverResult{}, fmt.Errorf(
+			"continue %s: %w: attempt %s is acked on generation %s but the session is not promoted to %s/%q",
+			rec.ID, ErrFailoverRecoveryRequired, attempt.ID, attempt.GenerationID,
+			attempt.ToHarness, attempt.ToModel)
+	}
+	res, recErr := m.RecoverSwitchFromPostStop(ctx, rec.ID)
+	if recErr != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: recovering generation %s: %w",
+			rec.ID, ErrFailoverRecoveryRequired, attempt.GenerationID, recErr)
+	}
+	// Already `acked`; completeFailoverAttempt's CAS is a no-op transition it
+	// tolerates, and the pin clear it performs is the step that was missing.
+	return m.completeFailoverAttempt(ctx, store, rec, attempt, res, true)
 }
 
 // finishFailoverPinClear lifts the pause for this incident and returns the

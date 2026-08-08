@@ -188,10 +188,26 @@ above are the contract; adding a column is allowed, removing one is not.
    incident whose latest attempt is `requested` **or** `post_stop` returns that
    attempt (`reused: true`) — same `generationId`, same `attemptSeq`, no second
    attempt row, no second runtime, no second rung spent.
-6. **Crash recovery completes the same incident.** An incomplete `post_stop`
-   whose generation matches the incident's latest non-terminal attempt is
-   finished through `RecoverSwitchFromPostStop` — one runtime, one `target_ack`.
-   An incomplete `post_stop` matching nothing is `FAILOVER_RECOVERY_REQUIRED`.
+6. **Crash recovery completes the same incident, and only an explicit Continue
+   drives it.** An incomplete `post_stop` whose generation matches the
+   incident's latest non-terminal attempt is finished through
+   `RecoverSwitchFromPostStop` — one runtime, one `target_ack`. An incomplete
+   `post_stop` matching nothing is `FAILOVER_RECOVERY_REQUIRED`.
+
+   **Boot is passive for paused failovers.** Boot's `pausedSkip` already
+   excludes paused sessions from automatic post_stop recovery and this MVP does
+   not change that, so a restart alone never reaches `target_ack` — it leaves
+   the session paused, pending, with no duplicate runtime, waiting for a human.
+   That is the smallest coherent design: the ladder is only ever advanced by a
+   person, and so is the completion of a rung.
+
+   The consequence is load-bearing rather than incidental, because it means a
+   `requested` attempt whose saga never started has **nothing** that would ever
+   drive it. `ContinueFailover` therefore re-drives such an attempt on its own
+   stored target and generation rather than reporting it as an in-flight
+   duplicate. The discriminator is the in-memory `beginSwitch` fence: a live
+   saga holds it and answers `ErrSwitchInProgress`, which is the only true
+   duplicate; after a crash it is free. No durable fact distinguishes the two.
 7. **Role identity is invariant.** `role_id`, `template_artifact_id`,
    `template_sha256` and `resolved_permissions` are byte-identical before and
    after. Only `resolved_harness` / `resolved_model` move.
@@ -222,10 +238,23 @@ Load-bearing consequences:
 
 - A post-stop failure **never** writes `failed`. It writes `post_stop` and stops.
   `failed` is reachable only when the source survived.
-- `post_stop → acked` is performed by whichever of the two completes it: an
-  operator Continue that adopts it, or boot `Reconcile`'s existing post_stop
-  recovery. Both match on `generation_id`, both clear the pin under the incident
-  CAS, and both are idempotent — so a race between them ends in one ack.
+- `post_stop → acked` is performed **only by an explicit operator Continue** that
+  adopts the attempt and recovers its generation. Boot does not do it: this MVP
+  keeps boot passive for paused sessions (rule 6), so a restart leaves the
+  session paused and pending rather than completing anything. An earlier draft
+  of this section named boot `Reconcile` as a second completer, which
+  contradicted that decision and would have made acceptance #5 pass without a
+  human in the loop.
+- **`acked` does not by itself license clearing the pin.** The switch saga makes
+  its `target_ack` ledger row durable *before* it promotes the session, so an
+  attempt can read `acked` while `SwitchPending` is still set and the row still
+  names the source harness. Promotion must be proven on every axis — no pending
+  pin, session harness and model equal to the attempt's target, runtime
+  generation equal to the attempt's — before the pause is lifted. An `acked`
+  attempt that is not promoted is finished on the *same* generation through the
+  existing recovery path, or handed to a human as
+  `FAILOVER_RECOVERY_REQUIRED`; it is never re-launched (a durable ack means a
+  target runtime may already exist), and it never falls through to a new rung.
 - **Neither is an automatic retry.** Both complete the *same rung* on the *same
   generation*; neither selects a new rung, and only a human's Continue ever
   advances the ladder. Automatic failover would be choosing a new rung with no
@@ -360,9 +389,25 @@ orchestrator resolves the seam during integration.
 1. Manual pause → Continue → next authorized rung, on a **paused-live** source.
 2. Same on a **paused-dead** source.
 3. `role_id` and template artifact byte-identical after the move.
-4. Target launch failure → pause retained, attempt `failed`, no retry.
-5. Post-stop crash → restart → original generation, exactly one runtime, one `target_ack`.
-6. Duplicate Continue → no second attempt row, no second runtime.
-7. Ladder exhausted → `FAILOVER_NO_TARGET`, still paused.
-8. No automatic failover occurs anywhere; default mode stays `manual`.
-9. `limit_detection_supported` remains `false` for every harness.
+4. **Pre-stop** target failure (source confirmed alive) → attempt `failed`, pause
+   retained, no retry.
+5. **Post-stop** target failure → attempt `post_stop` and **not** `failed`, pause
+   retained. The rung is not re-offered and no new rung is spent.
+6. Post-stop crash → **restart leaves the session paused and pending with no
+   duplicate runtime**, and reaches no `target_ack` on its own — boot is
+   passive (§6 rule 6).
+7. The next **explicit** Continue after that restart recovers the **same
+   generation** and produces exactly one runtime and one `target_ack`.
+8. A `requested` attempt whose saga never started is re-driven by the next
+   Continue on its own stored target and generation — one runtime, no second
+   attempt row.
+9. Duplicate Continue **while a saga is live** → no second attempt row, no second
+   runtime.
+10. Ladder exhausted → `FAILOVER_NO_TARGET`, still paused.
+11. No automatic failover occurs anywhere; default mode stays `manual`.
+12. `limit_detection_supported` remains `false` for every harness.
+
+Items 4–8 replace a single earlier line that said "target launch failure →
+attempt `failed`" and a line claiming a restart alone reaches `target_ack`. Both
+were written before §6a split terminal from recoverable and before boot was
+settled as passive, and each contradicted one of those decisions.

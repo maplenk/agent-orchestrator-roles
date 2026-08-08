@@ -209,11 +209,47 @@ never ours".
 - One unreproduced frontend flake (2027/1 in a single full-suite run under heavy
   concurrent load; the same code then passed 3× full and 5× on the file).
 
+## Post-integration review round (2026-08-08)
+
+Two P1 adoption/convergence defects and four contract contradictions, all found
+by review *after* the gate was green — which is the argument for the review wave
+existing at all, since every one of them passed 4577 tests.
+
+1. **A `requested` crash returned success having launched nothing.** If the
+   daemon died between the atomic attempt write and `SwitchWorker` establishing
+   any pending state, the next Continue took the adoption branch, found no
+   incomplete switch, and reported `reused: true`. The rung was spent, the
+   operator was told the move happened, and the session was parked paused with
+   no runtime — permanently, because boot is passive. Fixed by re-driving the
+   saga on the attempt's own stored target and generation, with the in-memory
+   `beginSwitch` fence as the discriminator: a live saga answers
+   `ErrSwitchInProgress` (the only true duplicate), a crashed one leaves it free.
+2. **`acked` did not prove promotion.** The saga writes `target_ack` before it
+   promotes the session, so an attempt could read `acked` while `SwitchPending`
+   still held and the row still named the source harness. The old guard checked
+   only the runtime generation, so it either cleared a human's pause on a move
+   that had not landed, or — when the generation did not match — fell through
+   and **minted a new rung**, running a second switch over an unpromoted one.
+   Fixed with `failoverPromotionSettled` (no pending, target harness, target
+   model, target generation) and `convergeUnpromotedAck`, which finishes the
+   same generation or refuses to a human and never re-launches.
+3. **Boot passivity was stated in three places and contradicted in two.** §6a
+   named boot `Reconcile` as a second completer, §12 claimed a restart alone
+   reached `target_ack`, and this board said boot was deliberately passive. Boot
+   is passive; §6 rule 6, §6a and §12 now all say so.
+4. **Acceptance conflated pre-stop and post-stop failure**, asserting every
+   target launch failure becomes `failed` — which §6a had already made wrong.
+
+The rewritten duplicate test is worth noting: it previously injected the
+*crash* state while asserting the *duplicate* behaviour, so it actively
+protected defect 1. It is now two tests, and the concurrent case takes the real
+fence rather than simulating it.
+
 ## Wave 3 — live dogfood
 
-The nine acceptance records in contract §12, none of which are done yet. They
-need a running daemon and a real paused role-pinned worker; contract §12 items
-1–2 are also the first time the desktop Continue control renders against a real
-`failover` block rather than a shaped read model.
+The twelve acceptance records in contract §12, none of which are done yet. They
+need a running daemon and a real paused role-pinned worker; items 1–2 are also
+the first time the desktop Continue control renders against a real `failover`
+block rather than a shaped read model.
 
 `limit_detection_supported` stays `false`; nothing is promoted by this MVP.
