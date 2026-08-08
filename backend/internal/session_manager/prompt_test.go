@@ -90,7 +90,10 @@ func TestBuildSystemPrompt_OrchestratorRequiresConfirmationAndNativeSubagents(t 
 		"Spawn prompts are limited to 4096 bytes",
 		"Never ask a reviewer or verifier to commit a report",
 		"ao session output <worker-session-id>",
-		"becomes idle or exits without an AO completion message",
+		"may not emit an AO completion message",
+		"do not yield and assume AO will wake you",
+		"bounded intervals of no more than 60 seconds",
+		"instead of yielding and assuming an automatic wake-up",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("orchestrator prompt missing %q:\n%s", want, got)
@@ -103,6 +106,32 @@ func TestBuildSystemPrompt_OrchestratorRequiresConfirmationAndNativeSubagents(t 
 	} {
 		if strings.Contains(got, banned) {
 			t.Fatalf("orchestrator prompt must not allow confirm-and-edit: found %q", banned)
+		}
+	}
+}
+
+func TestOrchestratorProfileKeepsTerminalOnlyVerificationOwned(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "profiles", "orchestrator.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(raw)
+	for _, want := range []string{
+		"After spawning a reviewer or verifier",
+		"do not assume AO will wake you",
+		"bounded intervals of no more than 60 seconds",
+		"ao session output <session-id>",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("orchestrator profile missing %q:\n%s", want, got)
+		}
+	}
+	for _, banned := range []string{
+		"After spawning, report the session id and\n  yield",
+		"yield** — do not sit and poll",
+	} {
+		if strings.Contains(got, banned) {
+			t.Fatalf("orchestrator profile retains contradictory terminal-report rule %q", banned)
 		}
 	}
 }

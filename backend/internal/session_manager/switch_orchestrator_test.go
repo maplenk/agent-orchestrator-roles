@@ -365,7 +365,8 @@ func TestSwitchOrchestrator_CodexClaudeInPlacePreservesIdentityAndRotatesCredent
 }
 
 // This is the live strict-role specimen: the repository's full orchestrator
-// template, one worker in the observed roster, and an immediate
+// template (kept at least as large as the original 3,885-byte specimen), one
+// worker in the observed roster, and an immediate
 // Codex -> Claude -> Codex roundtrip. The second handoff is large enough that
 // inlining Codex developer_instructions crosses tmux's real 15,360-byte
 // preflight. Codex already supports model_instructions_file, so the target must
@@ -373,8 +374,8 @@ func TestSwitchOrchestrator_CodexClaudeInPlacePreservesIdentityAndRotatesCredent
 func TestSwitchOrchestrator_CodexClaudeCodexRoundTripFitsTmuxCommandBudget(t *testing.T) {
 	m, st, id := orchestratorSwitchHarness(t)
 	artifactID, templateSHA, templateRaw := pinAcceptanceOrchestratorTemplate(t, st)
-	if len(templateRaw) != 3885 {
-		t.Fatalf("acceptance orchestrator template size = %d, want frozen 3885-byte specimen", len(templateRaw))
+	if len(templateRaw) < 3885 {
+		t.Fatalf("acceptance orchestrator template size = %d, want at least the original 3885-byte pressure", len(templateRaw))
 	}
 	rec := st.sessions[id]
 	rec.Metadata.Prompt = "Hold for deterministic MVP acceptance."
