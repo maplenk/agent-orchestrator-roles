@@ -46,7 +46,7 @@ func (f *failoverFakeStore) AppendSessionFailoverAttemptWithLedger(
 		}
 	}
 	// Ledger first, and a failure here writes no attempt: one transaction.
-	if err := f.fakeStore.AppendLifecycleLedger(ctx, l); err != nil {
+	if err := f.AppendLifecycleLedger(ctx, l); err != nil {
 		return err
 	}
 	f.attempts = append(f.attempts, a)

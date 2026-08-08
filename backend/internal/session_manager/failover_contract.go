@@ -50,6 +50,11 @@ type ContinueFailoverResult struct {
 // prose or re-deriving the ladder in React.
 type FailoverPreviewReason string
 
+// The closed set of preview verdicts. FailoverReasonNone accompanies an
+// available preview; every other value explains an unavailable one, and the
+// desktop renders a localized string per value rather than inventing prose.
+// no_ladder deliberately outranks not_paused in the manager's precedence: the
+// service derives contract section 9's null block from that exact pair.
 const (
 	FailoverReasonNone              FailoverPreviewReason = ""
 	FailoverReasonNoRolePin         FailoverPreviewReason = "no_role_pin"

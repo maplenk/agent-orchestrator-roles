@@ -576,9 +576,16 @@ func (m *Manager) FailoverPreview(ctx context.Context, id domain.SessionID) (Fai
 	// has no ladder", and the service derives that from
 	// (Pause == nil && Reason == no_ladder). That only works if no_ladder
 	// outranks not_paused, so this order is part of the wire contract.
+	// The three suppressed sites below deliberately turn an error into a Reason
+	// rather than propagating it, and that IS the preview's job: "Continue is
+	// unavailable, and here is the machine-readable why".
+	// The distinction that matters is kept strictly: every INFRASTRUCTURE
+	// failure in this function (GetSession, loadProject, failoverStore,
+	// ListSessionFailoverAttemptsByIncident) still returns an error, so a store
+	// that cannot be read never renders as an available or explained preview.
 	if err := failoverEligible(rec); err != nil {
 		out.Reason = FailoverReasonSwitchUnsupported
-		return out, nil
+		return out, nil //nolint:nilerr // classification, not failure — see above
 	}
 	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
 	out.RoleID = roleID
@@ -625,8 +632,10 @@ func (m *Manager) FailoverPreview(ctx context.Context, id domain.SessionID) (Fai
 	target, rungIndex, err := domain.NextFailoverRung(
 		roleMap, roleID, current, domain.UsedFailoverTargets(attempts))
 	if err != nil {
+		// ErrFailoverNoTarget is an expected verdict about the ladder, not a
+		// fault: every rung is spent or equals the current target.
 		out.Reason = FailoverReasonLadderExhausted
-		return out, nil
+		return out, nil //nolint:nilerr // classification, not failure
 	}
 	// Capability is checked LAST, on the rung actually selected. A rung whose
 	// harness cannot switch is not skipped over in favour of the next one: the
@@ -634,7 +643,7 @@ func (m *Manager) FailoverPreview(ctx context.Context, id domain.SessionID) (Fai
 	// authorized rung would be a silent degrade.
 	if err := m.requireSwitchCaps(rec.Harness, target.Harness, rec.Harness == target.Harness); err != nil {
 		out.Reason = FailoverReasonSwitchUnsupported
-		return out, nil
+		return out, nil //nolint:nilerr // classification, not failure
 	}
 
 	out.Available = true

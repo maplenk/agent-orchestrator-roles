@@ -47,9 +47,9 @@ func (r *restartWorkloadRuntime) IsSupervisedProcessAlive(_ context.Context, _ p
 }
 
 func (r *restartWorkloadRuntime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error {
-	err := r.fakeRestartRuntime.fakeRuntime.Destroy(ctx, handle)
+	err := r.fakeRuntime.Destroy(ctx, handle)
 	if err == nil {
-		r.fakeRestartRuntime.fakeRuntime.aliveByHandle[handle.ID] = false
+		r.aliveByHandle[handle.ID] = false
 	}
 	return err
 }
