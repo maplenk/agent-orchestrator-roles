@@ -438,6 +438,22 @@ func TestSwitchWorker_DestroyErrorButDeadProceedsToPostStop(t *testing.T) {
 	}
 }
 
+func TestDestroyRuntimeProbed_NamespacedServerAbsentConfirmsDeath(t *testing.T) {
+	rt := &fakeRuntime{aliveErr: namespacedSocketServerAbsent(t)}
+	m := New(Deps{Runtime: rt})
+
+	dead, err := m.destroyRuntimeProbed(t.Context(), "tmux-mer-1")
+	if err != nil {
+		t.Fatalf("destroyRuntimeProbed: %v", err)
+	}
+	if !dead {
+		t.Fatal("namespaced server absence must confirm the destroyed handle is dead")
+	}
+	if rt.destroyed != 1 {
+		t.Fatalf("Destroy calls = %d, want 1", rt.destroyed)
+	}
+}
+
 func TestRecover_RefusesDoubleLaunchWhenStaleAlive(t *testing.T) {
 	st := newFakeStore()
 	ws := t.TempDir()

@@ -2360,11 +2360,14 @@ func (m *Manager) parkFailedRelaunch(ctx context.Context, operation string, id d
 func (m *Manager) restartRuntime(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
-		// ErrRuntimeUnavailable is deliberately broader than authoritative
-		// absence: the tmux adapter also uses it for permission failures and
-		// stale/unreachable sockets. Only (false, nil) proves the old runtime is
-		// gone and permits a replacement launch.
-		return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
+		if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
+			// Permission failures, stale sockets, and every unclassified probe
+			// error remain inconclusive: never launch beside a possibly-live agent.
+			return ports.RuntimeHandle{}, fmt.Errorf("probe existing runtime: %w", err)
+		}
+		// A pane cannot survive an absent tmux server. Restart Agent may create a
+		// replacement without first destroying a runtime that no longer exists.
+		alive = false
 	}
 	if alive {
 		if restarter, ok := m.runtime.(ports.RuntimeRestarter); ok {
@@ -2530,10 +2533,14 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 		if handle.ID != "" {
 			alive, err := m.runtime.IsAlive(ctx, handle)
 			if err != nil {
-				// A failed probe is not proof of death. The runtime adapter returns
-				// (false, nil) for authoritative absence; every error, including
-				// ErrRuntimeUnavailable, leaves the session untouched.
-				return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
+				if !errors.Is(err, ports.ErrRuntimeServerAbsent) {
+					// A failed probe is not proof of death. Permission failures,
+					// stale sockets, and every other error leave the session untouched.
+					return fmt.Errorf("reconcile %s: probe: %w", rec.ID, err)
+				}
+				// Normal after reboot: the tmux server is authoritatively absent.
+				// Reuse the established save/teardown/restore path below.
+				alive = false
 			}
 			if alive {
 				return nil // adopt: the session survived the crash.
@@ -2577,9 +2584,9 @@ func (m *Manager) reconcileLive(ctx context.Context, rec domain.SessionRecord) e
 // Destroy is idempotent, so an already-gone session is a no-op. Probe failures
 // are boot-unsafe rather than ordinary per-row failures: this pass exists to
 // establish that RestoreAll cannot launch beside an old runtime, and an error
-// establishes nothing. ErrRuntimeUnavailable is intentionally included because
-// it covers both absence-like and reachability failures; authoritative adapter
-// absence is expressed only as (false, nil).
+// establishes nothing. Typed server absence is the one error that proves there
+// is no leaked runtime to collide with restore; every other error remains
+// boot-unsafe.
 func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) error {
 	handle := runtimeHandle(rec.Metadata)
 	if handle.ID == "" {
@@ -2587,6 +2594,9 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 	}
 	alive, err := m.runtime.IsAlive(ctx, handle)
 	if err != nil {
+		if errors.Is(err, ports.ErrRuntimeServerAbsent) {
+			return nil
+		}
 		return fmt.Errorf("%w: session %s probe: %w", ErrRuntimeReapUnresolved, rec.ID, err)
 	}
 	if !alive {

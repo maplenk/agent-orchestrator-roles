@@ -801,6 +801,12 @@ func (m *Manager) destroyRuntimeProbed(ctx context.Context, handleID string) (de
 	_ = m.runtime.Destroy(ctx, handle) // best-effort; probe is authoritative
 	alive, probeErr := m.runtime.IsAlive(ctx, handle)
 	if probeErr != nil {
+		// The adapter keeps server absence as an error so board probes remain
+		// inconclusive. Here the source teardown already targeted this handle,
+		// and an absent server proves its pane cannot have survived.
+		if errors.Is(probeErr, ports.ErrRuntimeServerAbsent) {
+			return true, nil
+		}
 		return false, fmt.Errorf("%w: probe after destroy: %w", ErrSwitchUncertain, probeErr)
 	}
 	if alive {

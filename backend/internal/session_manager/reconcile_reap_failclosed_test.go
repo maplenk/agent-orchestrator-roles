@@ -117,6 +117,26 @@ func TestReconcile_AuthoritativeDeadRuntimePermitsRestore(t *testing.T) {
 	}
 }
 
+func TestReconcile_DefaultSocketServerAbsentMeansNoLeakAndPermitsRestore(t *testing.T) {
+	m, st, rt, ws := newLifecycleManager()
+	addSavedTerminatedWorker(st, "mer-1", "tmux-default-absent")
+	rt.aliveErr = defaultSocketServerAbsent(t)
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rt.destroyed != 0 {
+		t.Fatalf("Destroy calls = %d, want 0 when the server is absent", rt.destroyed)
+	}
+	if rt.created != 1 || ws.lastCfg.SessionID != "mer-1" {
+		t.Fatalf("restore create/session = %d/%q, want 1/mer-1", rt.created, ws.lastCfg.SessionID)
+	}
+	if st.sessions["mer-1"].IsTerminated || len(st.worktrees["mer-1"]) != 0 {
+		t.Fatalf("saved row was not restored: session=%+v markers=%+v",
+			st.sessions["mer-1"], st.worktrees["mer-1"])
+	}
+}
+
 func TestReconcileReap_AllUnresolvedRuntimeFailuresAreBootUnsafe(t *testing.T) {
 	probeUnavailable := fmt.Errorf("stale socket: %w", ports.ErrRuntimeUnavailable)
 	probeOther := errors.New("tmux returned malformed status")
