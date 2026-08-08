@@ -545,16 +545,12 @@ func TestContinueFailover_AdoptsPostStopWithoutSpendingASecondRung(t *testing.T)
 	}
 }
 
-// A duplicate Continue while the attempt is still `requested` and nothing has
-// been stopped: return the attempt on record, unchanged.
-// A CONCURRENT duplicate: the saga is genuinely running, so beginSwitch is
-// held. Only this case may report reuse without launching.
-//
-// The fence is taken directly rather than simulated, because the fence IS the
-// discriminator: nothing durable distinguishes "a saga is running right now"
-// from "a saga died before it started", and an earlier version of this test
-// injected the second state while asserting the first one's behaviour.
-func TestContinueFailover_ConcurrentDuplicateReusesWithoutLaunching(t *testing.T) {
+// A switch fence with no matching durable pending state proves only that some
+// transition owns the session right now. It does not prove this failover
+// attempt completed, or even that the owner is this attempt. Continue must
+// preserve the requested row and surface the conflict rather than turn fence
+// occupancy into a false successful result.
+func TestContinueFailover_UnrelatedSwitchFenceReturnsConflictWithoutMutation(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	st.attempts = append(st.attempts, domain.FailoverAttempt{
 		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
@@ -568,32 +564,34 @@ func TestContinueFailover_ConcurrentDuplicateReusesWithoutLaunching(t *testing.T
 	defer m.endSwitch(id)
 
 	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
-	if err != nil {
-		t.Fatalf("concurrent duplicate continue: %v", err)
+	if !errors.Is(err, ErrSwitchInProgress) {
+		t.Fatalf("continue with unrelated switch fence error = %v, want ErrSwitchInProgress", err)
 	}
-	if !res.Reused {
-		t.Fatal("concurrent duplicate reported Reused=false")
-	}
-	if res.GenerationID != "gen-inflight" || res.AttemptSeq != 1 || res.RungIndex != 0 {
-		t.Fatalf("concurrent duplicate returned a different attempt: %+v", res)
+	if res != (ContinueFailoverResult{}) {
+		t.Fatalf("conflicted Continue returned false success: %+v", res)
 	}
 	if len(st.attempts) != 1 {
-		t.Fatalf("concurrent duplicate wrote a second attempt row: %d", len(st.attempts))
+		t.Fatalf("conflicted Continue wrote a second attempt row: %d", len(st.attempts))
+	}
+	if st.attempts[0].State != domain.FailoverAttemptRequested {
+		t.Fatalf("conflicted Continue changed attempt state to %q, want requested", st.attempts[0].State)
 	}
 	if rt.created != 0 {
-		t.Fatal("concurrent duplicate launched a second runtime")
+		t.Fatal("conflicted Continue launched a runtime")
 	}
 	if st.sessions[id].Metadata.Pause == nil {
-		t.Fatal("concurrent duplicate lifted the pause before any ack")
+		t.Fatal("conflicted Continue lifted the pause before any ack")
 	}
 }
 
 // A product-real duplicate: the first Continue has persisted switch_pending
 // and pre_stop, holds beginSwitch, and is blocked destroying the source. The
-// duplicate must report reuse without promoting the OUTER failover attempt to
-// post_stop. That phase belongs to the switch ledger; moving the attempt while
-// the first saga still owns it makes the first requested->acked CAS lose after
-// a completely successful target_ack.
+// duplicate must report ErrSwitchInProgress without promoting the OUTER
+// failover attempt to post_stop. That phase belongs to the switch ledger;
+// moving the attempt while the first saga still owns it makes the first
+// requested->acked CAS lose after a completely successful target_ack. Returning
+// success is also wrong: at this point the first saga has not acknowledged the
+// target or cleared the pause.
 func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	blocking := &blockingDestroyRuntime{
@@ -643,11 +641,11 @@ func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *
 		t.Fatal("first Continue did not finish after Destroy was released")
 	}
 
-	if duplicateErr != nil {
-		t.Fatalf("duplicate Continue while Destroy was blocked: %v", duplicateErr)
+	if !errors.Is(duplicateErr, ErrSwitchInProgress) {
+		t.Fatalf("duplicate Continue error = %v, want ErrSwitchInProgress", duplicateErr)
 	}
-	if !duplicate.Reused || duplicate.GenerationID != beforeDuplicate.GenerationID || duplicate.AttemptSeq != 1 {
-		t.Fatalf("duplicate did not reuse the one durable attempt: %+v", duplicate)
+	if duplicate != (ContinueFailoverResult{}) {
+		t.Fatalf("duplicate returned false success while first saga was pre-ack: %+v", duplicate)
 	}
 	if duringDestroy.State != domain.FailoverAttemptRequested {
 		t.Fatalf("duplicate stole attempt promotion during pre_stop: state=%q, want requested", duringDestroy.State)
@@ -655,8 +653,9 @@ func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *
 	if first.err != nil {
 		t.Fatalf("first Continue returned an error after target acknowledgement: %v", first.err)
 	}
-	if first.result.Reused || first.result.GenerationID != duplicate.GenerationID {
-		t.Fatalf("first result = %+v, duplicate = %+v", first.result, duplicate)
+	if first.result.Reused || first.result.GenerationID != beforeDuplicate.GenerationID {
+		t.Fatalf("first result = %+v, want generation %q and Reused=false",
+			first.result, beforeDuplicate.GenerationID)
 	}
 
 	attempt := st.only(t)
@@ -694,6 +693,121 @@ func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *
 	wantSwitch := []domain.LifecycleLedgerPhase{
 		domain.LifecyclePhaseRequested, domain.LifecyclePhasePreStop,
 		domain.LifecyclePhasePostStop, domain.LifecyclePhaseTargetAck,
+	}
+	if !reflect.DeepEqual(failoverPhases, wantFailover) || !reflect.DeepEqual(switchPhases, wantSwitch) {
+		t.Fatalf("ledger phases failover=%v switch=%v, want %v / %v",
+			failoverPhases, switchPhases, wantFailover, wantSwitch)
+	}
+}
+
+// The same duplicate conflict remains truthful when the first saga later
+// fails. In particular, the duplicate may not return success merely because a
+// matching pending generation and a live fence existed at observation time.
+// Here the source survives Destroy, so the first owner rolls back the pending
+// switch and records the one failover attempt as terminally failed.
+func TestContinueFailover_DuplicateDuringDestroyFirstLaterFailsTruthfully(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	blocking := &blockingDestroyRuntime{
+		fakeRuntime: rt,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	m.runtime = blocking
+
+	type outcome struct {
+		result ContinueFailoverResult
+		err    error
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstDone := make(chan outcome, 1)
+	go func() {
+		res, err := m.ContinueFailover(firstCtx, id, ContinueFailoverRequest{IncidentID: "inc-1"})
+		firstDone <- outcome{result: res, err: err}
+	}()
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Continue never reached source Destroy")
+	}
+	beforeDuplicate := st.only(t)
+	if beforeDuplicate.State != domain.FailoverAttemptRequested {
+		close(blocking.release)
+		t.Fatalf("attempt state before duplicate = %q, want requested", beforeDuplicate.State)
+	}
+
+	duplicate, duplicateErr := m.ContinueFailover(
+		context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"},
+	)
+	duringDestroy := st.only(t)
+	if !errors.Is(duplicateErr, ErrSwitchInProgress) {
+		close(blocking.release)
+		t.Fatalf("duplicate Continue error = %v, want ErrSwitchInProgress", duplicateErr)
+	}
+	if duplicate != (ContinueFailoverResult{}) {
+		close(blocking.release)
+		t.Fatalf("duplicate returned false success before the owner's failure: %+v", duplicate)
+	}
+	if duringDestroy.State != domain.FailoverAttemptRequested {
+		close(blocking.release)
+		t.Fatalf("duplicate changed attempt state to %q, want requested", duringDestroy.State)
+	}
+
+	// Make the source definitively survive the first owner's Destroy. This is a
+	// pre-stop failure: SwitchWorker rolls back pending and never launches a
+	// target, then Continue records the single attempt as failed.
+	rt.destroyErr = errors.New("source destroy failed")
+	rt.aliveByHandle["rt-1"] = true
+	close(blocking.release)
+	var first outcome
+	select {
+	case first = <-firstDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Continue did not finish after Destroy was released")
+	}
+	if first.err == nil {
+		t.Fatalf("first Continue unexpectedly succeeded: %+v", first.result)
+	}
+
+	attempt := st.only(t)
+	if attempt.ID != beforeDuplicate.ID || attempt.GenerationID != beforeDuplicate.GenerationID {
+		t.Fatalf("failure changed attempt identity: before=%+v after=%+v", beforeDuplicate, attempt)
+	}
+	if attempt.State != domain.FailoverAttemptFailed {
+		t.Fatalf("final attempt state = %q, want failed", attempt.State)
+	}
+	rec := st.sessions[id]
+	if rec.Metadata.Pause == nil || rec.Metadata.SwitchPending != nil {
+		t.Fatalf("failed first Continue left untruthful pins: pause=%+v pending=%+v",
+			rec.Metadata.Pause, rec.Metadata.SwitchPending)
+	}
+	if rec.Harness != domain.HarnessClaudeCode || rec.Metadata.RuntimeHandleID != "rt-1" ||
+		rec.Metadata.RuntimeLaunchID != "src-gen" {
+		t.Fatalf("source identity after rollback = harness %q handle %q generation %q",
+			rec.Harness, rec.Metadata.RuntimeHandleID, rec.Metadata.RuntimeLaunchID)
+	}
+	if rt.destroyed != 1 || rt.created != 0 {
+		t.Fatalf("runtime destroy/create = %d/%d, want 1/0", rt.destroyed, rt.created)
+	}
+
+	var failoverPhases, switchPhases []domain.LifecycleLedgerPhase
+	for _, event := range st.ledger {
+		if event.GenerationID != attempt.GenerationID {
+			continue
+		}
+		switch event.Kind {
+		case domain.LifecycleKindFailover:
+			failoverPhases = append(failoverPhases, event.Phase)
+		case domain.LifecycleKindSwitch:
+			switchPhases = append(switchPhases, event.Phase)
+		}
+	}
+	wantFailover := []domain.LifecycleLedgerPhase{
+		domain.LifecyclePhaseRequested, domain.LifecyclePhaseFailed,
+	}
+	wantSwitch := []domain.LifecycleLedgerPhase{
+		domain.LifecyclePhaseRequested, domain.LifecyclePhasePreStop, domain.LifecyclePhaseFailed,
 	}
 	if !reflect.DeepEqual(failoverPhases, wantFailover) || !reflect.DeepEqual(switchPhases, wantSwitch) {
 		t.Fatalf("ledger phases failover=%v switch=%v, want %v / %v",
