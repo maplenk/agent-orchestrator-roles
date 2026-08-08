@@ -198,18 +198,24 @@ export function applyOperatorSpawnHeaders(
 	token: string | undefined = daemonStatus.operatorSpawnToken,
 ): Headers {
 	const m = method.toUpperCase();
-	// Privileged desktop mutations: spawn, worker switch/fresh, and pause/resume
-	// (operator only; never override agent session capability headers).
+	// Privileged desktop mutations: spawn, worker switch/fresh, and
+	// pause/resume/continue (operator only; never override agent session
+	// capability headers).
 	//
 	// pause/resume are operator-owned in a stronger sense than the others: the
 	// daemon refuses them outright for a caller presenting session capability
 	// headers, because a worker that could lift its own pause would not be
 	// paused. The desktop is an operator, so it must send the token here or
 	// every pause action 403s.
+	//
+	// continue is on the same footing by construction: it reuses
+	// authorizeOperatorPause verbatim (PHASE3B_MVP_CONTRACT §3) because it
+	// ANSWERS a human's pause, so it inherits the human's authority rather than
+	// the agent's spawn capability. Omitting it here would 403 every Continue.
 	const privileged =
 		pathname === "/api/v1/sessions" ||
 		pathname === "/api/v1/orchestrators" ||
-		/^\/api\/v1\/sessions\/[^/]+\/(switch|fresh-conversation|pause|resume)$/.test(pathname);
+		/^\/api\/v1\/sessions\/[^/]+\/(switch|fresh-conversation|pause|resume|continue)$/.test(pathname);
 	if (
 		m === "POST" &&
 		privileged &&
@@ -319,6 +325,25 @@ export function apiErrorRequestId(error: unknown): string | undefined {
 		if (typeof body.requestId === "string" && body.requestId !== "") return body.requestId;
 	}
 	return undefined;
+}
+
+/**
+ * An Error that keeps the daemon's error CODE beside its rendered message.
+ *
+ * Surfaces that must react to a specific code — "the world moved, re-read" for
+ * PAUSE_INCIDENT_MISMATCH versus "this is terminal, the session is still
+ * paused" for FAILOVER_LIMIT_REACHED — cannot recover it from a plain Error
+ * once the body has been flattened to a string, and matching on message text
+ * would be a translation-sensitive guess.
+ */
+export class ApiActionError extends Error {
+	readonly code: string | undefined;
+
+	constructor(error: unknown, fallback: string) {
+		super(apiErrorMessage(error, fallback));
+		this.name = "ApiActionError";
+		this.code = apiErrorCode(error);
+	}
 }
 
 export function apiErrorMessage(error: unknown, fallback = "Request failed"): string {

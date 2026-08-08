@@ -29,24 +29,47 @@ vi.mock("../lib/preview-mode", () => ({
 	usesPreviewWorkspaceData: false,
 }));
 
-vi.mock("../lib/api-client", () => ({
-	apiClient: {
-		GET: getMock,
-		PATCH: patchMock,
-		POST: postMock,
-		PUT: putMock,
-	},
-	getApiBaseUrl: () => "http://127.0.0.1:3001",
-	hasTrustedApiBaseUrl: () => false,
-	subscribeApiBaseUrl: () => () => {},
-	apiErrorMessage: (error: unknown, fallback = "Request failed") => {
+vi.mock("../lib/api-client", () => {
+	const apiErrorMessage = (error: unknown, fallback = "Request failed") => {
 		if (error instanceof Error) return error.message;
 		if (typeof error === "object" && error !== null && "message" in error) {
 			return String((error as { message: unknown }).message);
 		}
 		return fallback;
-	},
-}));
+	};
+	const apiErrorCode = (error: unknown) => {
+		if (typeof error === "object" && error !== null) {
+			const code = (error as { code?: unknown }).code;
+			if (typeof code === "string" && code !== "") return code;
+		}
+		return undefined;
+	};
+	// The pause surface keys its copy off the daemon's CODE, so the double has to
+	// carry one too — a plain Error would silently drop every code-specific
+	// explanation and the tests would pass on a panel that never showed one.
+	class ApiActionError extends Error {
+		readonly code: string | undefined;
+		constructor(error: unknown, fallback: string) {
+			super(apiErrorMessage(error, fallback));
+			this.name = "ApiActionError";
+			this.code = apiErrorCode(error);
+		}
+	}
+	return {
+		apiClient: {
+			GET: getMock,
+			PATCH: patchMock,
+			POST: postMock,
+			PUT: putMock,
+		},
+		getApiBaseUrl: () => "http://127.0.0.1:3001",
+		hasTrustedApiBaseUrl: () => false,
+		subscribeApiBaseUrl: () => () => {},
+		apiErrorMessage,
+		apiErrorCode,
+		ApiActionError,
+	};
+});
 
 const pr = (n: number, state: PRState, overrides: Partial<PullRequestFacts> = {}): PullRequestFacts => ({
 	url: `https://example.com/pr/${n}`,
@@ -1847,5 +1870,103 @@ describe("SessionInspector paused-live cell", () => {
 		// And the hint stays on the pause axis: no talk of a separate restart step.
 		expect(screen.getByText("Lifts the pause so AO may act on this session again.")).toBeInTheDocument();
 		expect(screen.queryByText(/restarting it is a separate step/)).not.toBeInTheDocument();
+	});
+});
+
+// 3B adds a third operation on the same pin. Like the two before it, the defect
+// worth guarding is not in any one component: it is that Resume, Restart and
+// Continue can end up reading as variants of one action, or that one of them
+// appears twice in different places on the same screen. Only the assembled
+// inspector can show that.
+describe("SessionInspector Continue control", () => {
+	const withFailover = (overrides: Partial<WorkspaceSession> = {}) =>
+		session([], {
+			pause: {
+				incidentId: "limit-abc123",
+				reason: "usage_limit",
+				detectedBy: "structured_envelope",
+				harness: "codex",
+				pausedAt: "2026-06-15T09:00:00Z",
+			},
+			failover: {
+				available: true,
+				roleId: "backend",
+				nextTarget: { harness: "kimi", model: "kimi-k2" },
+				nextRungIndex: 0,
+				attemptsUsed: 0,
+				maxAttempts: 8,
+				incidentId: "limit-abc123",
+				reason: "",
+			},
+			...overrides,
+		});
+
+	const pausedDead = () =>
+		withFailover({ status: "exited", activity: { state: "exited", lastActivityAt: "2026-06-15T10:00:00Z" } });
+
+	it("shows all three operations together, distinctly, and each only once", async () => {
+		renderWithQuery(<SessionInspector session={pausedDead()} />);
+
+		const pauseSection = within(
+			(await screen.findByRole("heading", { name: "Paused" })).closest("section") as HTMLElement,
+		);
+		// Three controls in one place, so a person can tell them apart by reading
+		// them side by side — and never behind a menu, which would put "lift the
+		// pin", "relaunch the process" and "move to another harness" behind one
+		// affordance.
+		expect(pauseSection.getByRole("button", { name: /Resume this session/ })).toBeInTheDocument();
+		expect(pauseSection.getByRole("button", { name: "Restart agent" })).toBeInTheDocument();
+		expect(pauseSection.getByRole("button", { name: /Continue this session on kimi · kimi-k2/ })).toBeInTheDocument();
+
+		// Exactly one Restart on the screen. Activity used to own it; leaving it
+		// there as well would put the same mutation on screen twice, one copy
+		// detached from the incident it belongs to.
+		expect(screen.getAllByRole("button", { name: "Restart agent" })).toHaveLength(1);
+	});
+
+	it("sends Continue to its own endpoint with the displayed incident", async () => {
+		postMock.mockResolvedValue({ error: undefined, response: { status: 200 } });
+		renderWithQuery(<SessionInspector session={pausedDead()} />);
+
+		await userEvent.click(await screen.findByRole("button", { name: /Continue this session on/ }));
+		await waitFor(() =>
+			expect(postMock).toHaveBeenCalledWith("/api/v1/sessions/{sessionId}/continue", {
+				params: { path: { sessionId: "sess-1" } },
+				body: { incidentId: "limit-abc123" },
+			}),
+		);
+		// Not resume, and not resume-agent: three operations, three endpoints.
+		expect(postMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("offers Continue on the live cell too, without offering Restart", async () => {
+		renderWithQuery(
+			<SessionInspector
+				session={withFailover({ status: "idle", activity: { state: "idle", lastActivityAt: "2026-06-15T10:00:00Z" } })}
+			/>,
+		);
+
+		expect(await screen.findByRole("button", { name: /Resume this session/ })).toBeInTheDocument();
+		// Continue is meaningful on a live agent: the pin is what stops AO, not
+		// the process, so moving to the next rung is exactly what a person may
+		// want. Restart is not — nothing died.
+		expect(screen.getByRole("button", { name: /Continue this session on/ })).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Restart agent" })).not.toBeInTheDocument();
+	});
+
+	it("leaves Activity's Restart alone for a session that is merely exited", async () => {
+		renderWithQuery(
+			<SessionInspector
+				session={session([], {
+					status: "exited",
+					activity: { state: "exited", lastActivityAt: "2026-06-15T10:00:00Z" },
+				})}
+			/>,
+		);
+
+		// No pause, so no pause panel — and Restart stays where it has always been.
+		expect(screen.queryByRole("heading", { name: "Paused" })).not.toBeInTheDocument();
+		const activity = within(screen.getByText("Activity").closest("[data-testid='inspector-section']") as HTMLElement);
+		expect(activity.getByRole("button", { name: "Restart agent" })).toBeInTheDocument();
 	});
 });

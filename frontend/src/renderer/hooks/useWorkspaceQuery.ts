@@ -10,6 +10,7 @@ import {
 	toAgentProvider,
 	toProjectKind,
 	toSessionActivity,
+	toSessionFailover,
 	toSessionStatus,
 	type WorkspaceSummary,
 } from "../types/workspace";
@@ -112,6 +113,11 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						isPinned: session.isPinned ?? false,
 						// Pause is a durable pin, independent of activity/liveness.
 						pause: session.pause ?? undefined,
+						// Read-time failover preview (contract §9), nullable on the wire.
+						// Narrowed rather than passed straight through: a daemon that
+						// grows an eighth `reason` would otherwise reach the reason→copy
+						// map with a key it has no entry for.
+						failover: toSessionFailover(session.failover),
 						pinnedAt: session.pinnedAt ?? undefined,
 						prs: (session.prs ?? []).map(toPullRequestFacts),
 					};

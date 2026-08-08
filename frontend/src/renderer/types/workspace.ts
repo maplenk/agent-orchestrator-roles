@@ -1,3 +1,4 @@
+import type { components } from "../../api/schema";
 import { attentionZone as presentationAttentionZone } from "../lib/session-presentation";
 
 export type SessionStatus =
@@ -133,6 +134,82 @@ export type SessionPause = {
 	retryAfter?: string;
 };
 
+/**
+ * Read-time failover preview for a session, from the daemon's read model
+ * (docs/roles/PHASE3B_MVP_CONTRACT.md §9).
+ *
+ * Taken from the generated schema rather than re-declared, so a change to the
+ * block breaks this file instead of silently diverging from the daemon.
+ */
+export type SessionFailoverView = NonNullable<components["schemas"]["SessionFailoverView"]>;
+
+/**
+ * The next failover rung, already resolved by the host. The renderer treats both
+ * fields as opaque display strings: it must never map a harness id to a name or
+ * resolve a ladder itself (contract §7 — `domain.NextFailoverRung` is the only
+ * thing allowed to choose a rung). An empty model means "provider default",
+ * exactly as configured; never a wildcard.
+ */
+export type SessionFailoverTarget = NonNullable<SessionFailoverView["nextTarget"]>;
+
+/**
+ * Why the daemon says Continue is unavailable. Machine-readable precisely so the
+ * desktop can say *why* without inventing prose. `""` is the value the daemon
+ * uses when Continue IS available; it also covers an `available: false` block
+ * that names no reason, which is the one case the UI describes generically.
+ *
+ * Derived from the schema so that a daemon which grows an eighth reason fails
+ * the typecheck at the one place that has to care: the map from reason to
+ * localized copy.
+ */
+export type SessionFailoverReason = SessionFailoverView["reason"];
+
+// A Record, not a Set: this has to be exhaustive, and only a Record makes the
+// compiler say so. A reason the daemon knows and this list does not would
+// silently degrade to the generic copy even though specific copy exists.
+const sessionFailoverReasons: Record<SessionFailoverReason, true> = {
+	"": true,
+	no_role_pin: true,
+	no_ladder: true,
+	ladder_exhausted: true,
+	limit_reached: true,
+	not_paused: true,
+	switch_unsupported: true,
+};
+
+function toSessionFailoverTarget(raw: unknown): SessionFailoverTarget | null {
+	if (typeof raw !== "object" || raw === null) return null;
+	const target = raw as { harness?: unknown; model?: unknown };
+	// A target without a harness cannot label a button, and the renderer is not
+	// allowed to invent one — treat it as no target at all.
+	if (typeof target.harness !== "string" || target.harness === "") return null;
+	return { harness: target.harness, model: typeof target.model === "string" ? target.model : "" };
+}
+
+/**
+ * Narrow the daemon's failover block. Unknown `reason` values degrade to `""`
+ * (the generic "unavailable" copy) rather than throwing: a daemon that grows an
+ * eighth reason must not blank the pause surface in an older desktop.
+ */
+export function toSessionFailover(raw: unknown): SessionFailoverView | undefined {
+	if (typeof raw !== "object" || raw === null) return undefined;
+	const view = raw as Record<string, unknown>;
+	const reason =
+		typeof view.reason === "string" && Object.hasOwn(sessionFailoverReasons, view.reason)
+			? (view.reason as SessionFailoverReason)
+			: "";
+	return {
+		available: view.available === true,
+		roleId: typeof view.roleId === "string" ? view.roleId : "",
+		nextTarget: toSessionFailoverTarget(view.nextTarget),
+		nextRungIndex: typeof view.nextRungIndex === "number" ? view.nextRungIndex : 0,
+		attemptsUsed: typeof view.attemptsUsed === "number" ? view.attemptsUsed : 0,
+		maxAttempts: typeof view.maxAttempts === "number" ? view.maxAttempts : 0,
+		incidentId: typeof view.incidentId === "string" ? view.incidentId : "",
+		reason,
+	};
+}
+
 /** The daemon-committed controller currently responsible for the session. */
 export type SessionMode = "chat" | "tui";
 
@@ -179,6 +256,15 @@ export type WorkspaceSession = {
 	 * from here.
 	 */
 	pause?: SessionPause;
+	/**
+	 * Host-resolved failover preview; absent when the daemon sends no block.
+	 *
+	 * Computed at read time, never stored (contract §9). Everything the Continue
+	 * control needs — whether it is offered, the target that labels it, and the
+	 * machine-readable reason when it is not — comes from here. The renderer
+	 * neither resolves the ladder nor names a harness.
+	 */
+	failover?: SessionFailoverView;
 	/**
 	 * Live preview target set by the daemon (via `ao preview`) and streamed over
 	 * CDC. When non-empty, the browser panel opens and navigates here.

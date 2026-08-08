@@ -31,13 +31,13 @@ import {
 } from "../hooks/useSessionScmSummary";
 import { useSessionUsage, type SessionUsage } from "../hooks/useSessionUsage";
 import { useSessionWorkspaceFilesChangedCount } from "../hooks/useSessionWorkspaceFiles";
+import { useRestartAgent } from "../hooks/useRestartAgent";
 import { clearTerminateSessionState, useTerminateSession } from "../hooks/useTerminateSession";
 import { prBrowserUrl, prCardPresentation, sessionPRDisplaySummaries } from "../lib/pr-display";
 import { formatTokenCount } from "../lib/format-token-count";
 import type { WorkspaceSession, WorkspaceSummary } from "../types/workspace";
 import { findProjectOrchestrator, sortedPRs } from "../types/workspace";
 import { getAgentActivityView, getSessionTimelinePillView } from "../lib/session-presentation";
-import { aoBridge } from "../lib/bridge";
 import { BrowserPanelView, type BrowserAnnotationQueueModel } from "./BrowserPanel";
 import type { BrowserViewModel } from "../hooks/useBrowserView";
 import { useUiStore } from "../stores/ui-store";
@@ -331,9 +331,12 @@ function SummaryView({
 			</Section>
 
 			{/* Above the fold: a paused session is the first thing a human needs to
-			    understand, and Resume lives here while "Restart agent" stays down in
-			    Activity — deliberately separate controls, because Resume never
-			    starts a process (PHASE3A_PAUSE_CONTRACT §2). */}
+			    understand. The panel carries all three controls for a paused session
+			    — Resume, Restart agent, and Continue with <target> — deliberately as
+			    separate buttons, because Resume never starts a process and Continue
+			    is the only one that changes harness (PHASE3A_PAUSE_CONTRACT §2,
+			    PHASE3B_MVP_CONTRACT §2). Activity keeps Restart for sessions that
+			    are merely exited. */}
 			{session.pause ? (
 				<div className="px-4 pb-2">
 					<SessionPausePanel session={session} />
@@ -659,33 +662,15 @@ function formatHarnessName(harness: string): string {
 
 function ResumeAgentControl({ session }: { session: WorkspaceSession }) {
 	const { t } = useTranslation();
-	const queryClient = useQueryClient();
-	const resume = useMutation({
-		mutationFn: async () => {
-			if (usePreviewData) return;
-			const { data, error, response } = await apiClient.POST("/api/v1/sessions/{sessionId}/resume-agent", {
-				params: { path: { sessionId: session.id } },
-			});
-			if (error) throw new Error(apiErrorMessage(error, `Failed to resume agent (${response.status})`));
-			return data;
-		},
-		onSuccess: async (data) => {
-			await queryClient.invalidateQueries({ queryKey: workspaceQueryKey });
-			if (data?.resumeMode === "saved_prompt") {
-				void aoBridge.notifications
-					.show({
-						id: `resume-agent-fallback:${session.id}:${Date.now()}`,
-						title: t("inspector.startedFromPrompt"),
-						body: t("inspector.resumeFallbackBody"),
-					})
-					.catch((err) => {
-						console.warn("Unable to show resume fallback notification", err);
-					});
-			}
-		},
-	});
+	const resume = useRestartAgent(session.id);
 
 	if (session.isTerminated === true || session.activity?.state !== "exited") return null;
+	// A paused session shows Restart inside the pause panel, beside Resume and
+	// Continue, because the three operations only read as distinct when they are
+	// read together (PHASE3B_MVP_CONTRACT §2). Rendering it here as well would
+	// put two "Restart agent" buttons on the same screen — the same mutation,
+	// one of them detached from the incident it belongs to.
+	if (session.pause) return null;
 
 	const error = resume.error instanceof Error ? resume.error.message : null;
 	return (
