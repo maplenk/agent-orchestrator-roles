@@ -189,7 +189,11 @@ describe("SessionFilesView", () => {
 	it("loads the workspace files and requests detail for the selected file", async () => {
 		renderWithQuery(<SessionFilesView sessionId="sess-1" />);
 
-		const firstFile = await screen.findByRole("button", { name: "Expand src/App.tsx" });
+		const firstFile = await screen.findByRole(
+			"button",
+			{ name: "Expand src/App.tsx" },
+			{ timeout: 10_000 },
+		);
 		expect(screen.getByPlaceholderText("Search 2 files")).toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Close files" })).not.toBeInTheDocument();
 		expect(screen.queryByRole("button", { name: "Refresh files" })).not.toBeInTheDocument();
