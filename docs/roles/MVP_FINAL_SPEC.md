@@ -1,13 +1,24 @@
 # Final roles MVP specification
 
-**Status:** implementation, independent review, and promoted live acceptance
-complete. The repository-wide final gate is not fully green: the ordinary full
-backend run retains only three known untouched wall-clock failures. The
-verified MVP/static/API/frontend gates are complete.
+**Status:** implementation, independent review, promoted live acceptance, and
+the post-review default-data-dir runtime replay are complete on the exact SHAs
+below. The post-acceptance Grok fixes are integrated at `72f274a7`; the runtime
+replay passed on `3c3aef51`. The repository-wide final gate is not fully green:
+the ordinary full backend run retains only three known untouched wall-clock
+failures. The verified MVP/static/API/frontend gates are complete.
 
 **Accepted implementation and runner SHA:** `166e9e63`
 
 **Promoted live-evidence commit:** `322f9c18`
+
+**Post-evidence review integration:** `72f274a7` — runtime-server absence,
+consumer-specific recovery, Chat switch-preview and mutation preflight, and
+persisted-role read safety. Independent combined review reports no remaining
+P1/P2.
+
+**Default-data-dir runtime replay:** `3c3aef51` — exact runtime code shared by
+the later integration; the subsequent commits are storage/service-only. This
+targeted replay supplements rather than rewrites the promoted matrix.
 
 **Detailed worker-Continue contract:**
 [`PHASE3B_MVP_CONTRACT.md`](PHASE3B_MVP_CONTRACT.md)
@@ -35,9 +46,10 @@ AO ships:
 5. Manual operator pause as the failover trigger. No vendor limit detector is
    required for this MVP.
 
-The remaining critical path is gate completion, not feature implementation or
-live acceptance. The full worker/orchestrator matrix passed on immutable code
-`166e9e63` and is recorded by evidence commit `322f9c18`. The Chat rollback
+The remaining critical path is repository gate completion, not feature
+implementation or live acceptance. The full worker/orchestrator matrix passed
+on immutable code `166e9e63` and is recorded by evidence commit `322f9c18`;
+that dated result is not rewritten as evidence for `72f274a7`. The Chat rollback
 failure was classified as a test-only projector race and fixed by waiting for
 the exact AO/provider turn to persist as completed (`b21490a1`, integrated as
 `f8883529`). SQLite exact checks passed 5/5 and its race package passed in
@@ -72,8 +84,13 @@ Strict mode guarantees:
 
 Every role binding must explicitly provide both permission booleans:
 `permissions.workspaceWrites` and `permissions.canSpawn`. Missing or `null`
-values fail closed at the domain, HTTP, and CLI config boundaries; omission is
-not interpreted as `false`.
+values and unknown binding fields fail closed at the domain, HTTP, and CLI
+config boundaries; omission is not interpreted as `false`. Storage must not
+silently sanitize a persisted binding that violates the same contract: the
+project read fails explicitly and retains the original bytes, so an unrelated
+read-modify-write or dev import cannot erase unknown fields or replace the
+authored config with a partial/zero value. Valid stored role config preserves
+its decoded semantics, role-map SHA, and stable re-encoded bytes.
 
 Strict mode does **not** claim that the orchestrator is physically unable to
 write. The model is expected to follow the orchestrator role instructions. A
@@ -96,8 +113,8 @@ capability and does not weaken an explicitly read-only role.
 
 ## 3. Deliverable A — manual worker Continue
 
-The product surface, durable saga, reviewed runtime-probe correction, and final
-live acceptance are complete.
+The product surface, durable saga, promoted live acceptance, and later typed
+default-socket probe replay are complete.
 
 Required behavior:
 
@@ -124,24 +141,31 @@ The runtime adapter, not `session_manager`, owns tmux stderr classification.
 |---|---|
 | Existing session | alive |
 | Missing session on a responding server | authoritatively dead |
-| Literal `no server running` on an AO-namespaced socket | authoritatively dead |
-| Literal `no server running` on the shared default socket | uncertain |
+| Literal `no server running` on either a namespaced or default socket | typed server-level absence: error wrapping `ErrRuntimeServerAbsent` |
 | `error connecting`, permission failure, stale socket, malformed handle, or unknown output | uncertain/error |
 
-Only `(alive=false, err=nil)` proves death. `destroyRuntimeProbed` and the
-session-manager hard rule remain conceptually unchanged: an unknown or failed
-probe is never proof that a runtime is dead.
+The adapter never collapses server-wide absence into N ordinary per-session
+death answers. `ErrRuntimeServerAbsent` wraps `ErrRuntimeUnavailable`, so every
+consumer remains fail-closed unless it explicitly opts into the narrower fact.
+Only the reviewed effectful consumers do so: restart may create a replacement;
+boot live reconciliation may save and restore; boot reap may conclude that no
+old runtime can collide with restore; and `destroyRuntimeProbed`, after already
+targeting that handle for destruction, may finish the saga. Permission errors,
+stale sockets, `error connecting`, and unclassified probe failures remain
+uncertain everywhere.
 
-The socket is namespaced per **data directory**, not per session. One missing
-AO-owned server can therefore prove multiple runtimes dead at once. The
-existing reaper mass-death circuit breaker (at least five deaths and more than
-half the board) must remain load-bearing. Consumers outside the reaper must be
-reviewed for equivalent safe behavior before this probe change is accepted.
+The socket is selected per **data directory**, not per session. One missing
+tmux server can therefore prove multiple runtimes absent at once. The
+steady-state board reaper deliberately does **not** opt in: every probe error,
+including `ErrRuntimeServerAbsent`, remains `ProbeFailed`. Its existing
+mass-death circuit breaker (at least five deaths and more than half the board)
+also remains load-bearing for ordinary per-session dead answers. This separates
+the steady reaper from boot/restart/saga consumers rather than weakening issue
+#3475's board-wide safety rule.
 
-That consumer audit is now closed. Restart and live reconciliation no longer
-coerce `ErrRuntimeUnavailable` into death; an unresolved reap blocks restore,
-and only adapter-confirmed `(false, nil)` permits relaunch or dead-session
-handling. The default/shared tmux socket and ambiguous stderr remain uncertain.
+The code and consumer audit are closed at `6a07d5d6` and `24906d35`. The live
+default-data-dir replay passed on exact runtime head `3c3aef51`; the later
+storage/service-only commits do not alter this classification or its consumers.
 
 ## 4. Deliverable B — in-place cross-harness orchestrator switch
 
@@ -226,6 +250,15 @@ The desktop control must:
 - keep Resume, Restart agent, Continue, Switch, and Fresh Conversation as
   separate operations.
 
+Chat-mode orchestrators cannot enter the switch or fresh-conversation saga.
+Their backend preview is fail-closed (`available:false`, reason `unavailable`,
+no target), and the desktop renders neither Switch nor Fresh. TUI orchestrators
+retain both controls. A direct Chat mutation is independently rejected after
+the durable terminated/paused checks and before Fresh dispatch, role-map
+authorization, or a manager call, using the existing typed
+`409 SWITCH_CHAT_UNSUPPORTED`; hiding the control is not the authorization
+boundary.
+
 A desktop role-map editor is not part of the MVP.
 
 ### Current model-selection limitation
@@ -293,7 +326,7 @@ The reviewer attacks:
 
 Expected duration: **0.5 day**.
 
-### Wave 3 — live acceptance complete; repository gate completion pending
+### Wave 3 — promoted live acceptance and post-review replay complete; repository gate pending
 
 Every final record names the exact code SHA, isolated daemon/data directory,
 project, session, generation, and relevant ledger rows. The promoted matrix ran
@@ -333,7 +366,9 @@ including:
 - same-harness fresh conversation still green with no prompt stacking.
 
 The complete worker and orchestrator result is promoted live-acceptance
-evidence. It does not imply that the separate repository-wide gate is green.
+evidence for `166e9e63`. It does not imply that the separate repository-wide
+gate is green. The later runtime-server correction passed its separate,
+targeted default-data-dir replay on `3c3aef51`.
 
 ## 8. Final gate
 
@@ -393,7 +428,7 @@ Deferred beyond this MVP:
 - Pi/Muse orchestrator switching; and
 - automatic enforcement of model-quality/instruction-following behavior.
 
-## 10. Current status — code `166e9e63`, evidence `322f9c18`
+## 10. Current status — accepted code `166e9e63`, evidence `322f9c18`, review integration `72f274a7`
 
 Implementation and review close-out are integrated:
 
@@ -412,9 +447,35 @@ Implementation and review close-out are integrated:
 - `06aab758` closes the service/acceptance lint findings;
 - `166e9e63` is the immutable implementation and acceptance-runner SHA; and
 - `322f9c18` records the promoted live matrix without claiming the separate
-  repository gate is green.
+  repository gate is green;
+- `6a07d5d6` introduces typed runtime-server absence for both default and
+  namespaced tmux sockets without changing ambiguous reachability failures;
+- `24906d35` lets only reviewed boot/restart/saga consumers use that narrower
+  fact while the steady reaper remains fail-closed;
+- `31b6d7ef` prevents Chat orchestrators from advertising or rendering switch
+  operations their direct API correctly refuses;
+- `663f9339` makes malformed durable config an explicit read
+  failure that blocks read-modify-write persistence, without relaxing strict
+  HTTP/CLI ingress, while valid config retains its semantics, SHA, and bytes;
+  and
+- `72f274a7` rejects Chat switch/fresh requests in the service before target
+  authorization or manager dispatch, preserving terminated and paused error
+  precedence.
 
-The final live-acceptance claim is closed on `166e9e63`. The Chat test race is
+The default-data-dir replay used an isolated `HOME` with `AO_DATA_DIR` and
+`AO_RUN_FILE` unset, so tmux used the actual default socket path. On exact
+`3c3aef51`, a fresh absent-server boot became ready; killing the sole server and
+choosing Restart Agent created exactly one replacement; boot adopted a surviving
+runtime without duplication; server loss on an active row reconciled and
+restored once; and a terminated saved row passed boot reap plus `RestoreAll`,
+consumed its marker, and ended with one active row and one runtime. There were no
+boot/reconcile errors. Focused tmux, session-manager, and steady-reaper tests
+also passed under `-race`.
+
+The promoted live-acceptance claim is closed on `166e9e63`. The later runtime
+review fix passed its targeted default-data-dir replay on `3c3aef51`; that
+supplemental record is not folded into or used to rewrite the historical
+matrix. The Chat test race is
 fixed at integration head `f8883529`, the SQLite race package passed in
 622.846s, and race validation found zero data races. The ordinary run fails only
 the three known untouched wall-clock tests; every other package, including the

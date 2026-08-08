@@ -7,6 +7,8 @@ current boundary and acceptance authority.
 **Target roles trunk:** `roles/multi-sub-v1` (merge not claimed here)
 **Accepted implementation/runner:** `166e9e63`
 **Promoted evidence commit:** `322f9c18`
+**Post-evidence review integration:** `72f274a7`
+**Default-data-dir runtime replay:** PASS on exact `3c3aef51`
 **Frozen code:** `backend/internal/domain/failover_contract.go`,
 `backend/internal/session_manager/failover_contract.go` — frozen at `daee190a`
 on `roles/multi-sub-v1` (`go build ./...` green there), amended in place after
@@ -16,13 +18,15 @@ the durability review and green again.
 
 The original Phase 3B Wave 1/2 record below is retained. The final MVP added
 the probe close-out and the previously deferred in-place Codex↔Claude
-orchestrator switch. The final code and live-acceptance runner are frozen at
-`166e9e63`. The full promoted live matrix passed on that exact immutable SHA;
-see [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
+orchestrator switch. The accepted implementation and live-acceptance runner are
+frozen at `166e9e63` for the promoted evidence set. Post-evidence review fixes
+are integrated separately at `72f274a7`. The full promoted live matrix passed
+on the exact immutable runner SHA; see
+[`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
 
 | Wave | Commit | Result |
 |---|---|---|
-| Probe base | `be4321d1` | Namespaced tmux `no server running` is authoritative; shared/default socket and ambiguous stderr remain uncertain |
+| Probe base (historical) | `be4321d1` | Namespaced tmux `no server running` was treated as authoritative; this design was superseded after review because it did not cover the normal/default install path |
 | Probe consumer close-out | `66d4ceb3` | Restart and live reconciliation no longer coerce unavailable probes into death |
 | Strict-policy amendment | `4ab636fe` | Strict routing/delegation no longer implies read-only; explicit `workspaceWrites:false` remains capability gated |
 | Orchestrator switch core | `e3170a04` | Project-gated in-place Codex↔Claude switch, exact authorization, identity preservation, same-generation recovery |
@@ -40,6 +44,13 @@ see [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
 | Codex launch close-out | `f0585f70`, `a4215229` | Switch prompts are file-backed rather than tmux arguments; post-stop launch-size failure is a durable conflict |
 | Final acceptance invariants | `166e9e63` | Correct failed-rung exhaustion, sanitized worker-address proof, and exact injected-failure recovery phases |
 | Promoted live evidence | `322f9c18` | Records the complete immutable-SHA live matrix; does not claim the separate repository gate is green |
+| Typed server absence | `6a07d5d6` | Literal tmux server absence is a typed fact on default and namespaced sockets; ambiguous reachability remains uncertain |
+| Consumer-specific recovery | `24906d35` | Reviewed boot/restart/saga consumers may use typed absence; the steady board reaper keeps it inconclusive |
+| Chat preview correction | `31b6d7ef` | Chat orchestrators advertise no switch target and render no Switch/Fresh controls; direct mutation still returns the typed 409 |
+| Default-data-dir runtime replay | `3c3aef51` | Actual default tmux socket: Restart, boot live reconcile, and boot reap/restore each converge to one active row/runtime with no boot error |
+| Persisted-role read safety | `663f9339` | Malformed durable bindings fail the project read and retain their original bytes, preventing unrelated RMW/import paths from sanitizing or erasing config; valid bytes/semantics/SHA remain stable and HTTP/CLI authoring remains strict |
+| Chat mutation preflight | `72f274a7` | Service rejects Chat switch/fresh after terminated/paused precedence and before same-harness dispatch, role-map authorization, or manager entry |
+| Combined review | `72f274a7` | Independent review approved the integrated runtime, storage, preview, and mutation close-out with no remaining P1/P2 |
 
 ### Decisions pinned by review
 
@@ -57,8 +68,15 @@ see [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
   choices are advertised. Same-harness operation remains Fresh Conversation.
 - `limit_detection_supported=false` everywhere; no capability promotion is
   part of this MVP.
+- A persisted role binding that violates the strict contract is not silently
+  sanitized. Storage fails the read and preserves the original bytes; HTTP and
+  CLI ingress also require both permission booleans and reject unknown binding
+  fields.
+- Chat mode cannot enter the orchestrator switch/fresh saga. Its preview is
+  fail-closed and its desktop controls are hidden; the direct API's typed 409
+  remains the mutation boundary.
 
-### Final live gate
+### Promoted live gate and completed post-review replay
 
 Complete on `166e9e63`: harness self-test, worker records 1-12, strict
 Codex→Claude→Codex, API and live-mux pending fences, same-generation
@@ -70,6 +88,17 @@ capability matrix passed as a separate Go probe.
 The promoted evidence is recorded in
 [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md). Earlier exploratory
 records remain historical and are not represented as combined-SHA evidence.
+
+The later Grok-review fixes are not retroactively part of that evidence. The
+runtime portion's targeted replay passed on exact `3c3aef51` with an isolated `HOME`,
+`AO_DATA_DIR`/`AO_RUN_FILE` unset, and the actual default tmux socket. The run
+proved fresh absent-server boot, one replacement after sole-server loss,
+surviving-runtime adoption without duplication, active-row save/restore, and
+terminated-row reap plus `RestoreAll`; every scenario ended with one active row
+and one runtime, with no boot/reconcile errors. Focused tmux/session-manager/
+steady-reaper tests also passed under `-race`. The later `663f9339` and
+`72f274a7` commits are storage/service-only and do not alter the exercised
+runtime paths.
 
 ### Repository-wide final gate
 
@@ -391,13 +420,20 @@ conclusion that they were load artefacts rather than defects.
 > the local shell wrapper; its two underlying commands (`go test ./...` and
 > `golangci-lint run`) were run directly and both pass. Not a code failure.
 
-## Wave 3 — promoted live dogfood complete
+## Wave 3 — promoted live dogfood and post-review replay complete
 
 The exploratory records in `LIVE_DOGFOOD.md` remain historical. The complete
 worker 1–12 and orchestrator matrix was rerun from scratch on immutable SHA
 `166e9e63` and promoted by evidence commit `322f9c18`; see
 `FINAL_LIVE_ACCEPTANCE.md`. This closes live acceptance, not the separate
 repository-wide final gate.
+
+Grok's later probe review produced `6a07d5d6` and `24906d35`: literal tmux
+server absence is typed on both default and namespaced sockets, and only
+reviewed boot/restart/saga consumers use it while the steady reaper remains
+inconclusive. `31b6d7ef` closes the Chat-preview contradiction. The targeted
+default-data-dir replay passed on exact `3c3aef51`; the earlier promoted matrix
+remains a separate dated evidence set and is not rewritten.
 
 `limit_detection_supported` stays `false`; no capability is promoted by this
 MVP.
