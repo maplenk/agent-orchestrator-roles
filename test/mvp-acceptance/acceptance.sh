@@ -4,6 +4,13 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd "$script_dir/../.." && pwd -P)"
 
+# The tmux adapter bounds every CLI call at five seconds. The live duplicate
+# fault must hold the project/session fence long enough for a second request,
+# but it must release before CommandContext kills the wrapper instead of
+# reaching the real kill-session.
+tmux_call_timeout_seconds=5
+duplicate_delay_seconds=2
+
 die() { printf 'mvp-acceptance: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"; }
 safe_atom() { [[ "$1" =~ ^[A-Za-z0-9._-]+$ ]] || die "unsafe identifier: $1"; }
@@ -152,6 +159,10 @@ self_test() {
 	if (validate_runtime_termination_target mvpacc-1 mvpacc-1 ao-0123456789ab $'mvpacc-1\nother') >/dev/null 2>&1; then
 		die "runtime termination scope accepted a shared namespace"
 	fi
+	((duplicate_delay_seconds < tmux_call_timeout_seconds)) ||
+		die "duplicate delay must remain below the tmux command timeout"
+	grep -Eq 'defaultTimeout[[:space:]]*=[[:space:]]*5 \* time.Second' "$repo_root/backend/internal/adapters/runtime/tmux/tmux.go" ||
+		die "tmux default timeout changed; revalidate the acceptance duplicate delay"
 	printf 'acceptance harness self-test passed\n'
 }
 
@@ -312,7 +323,11 @@ fault_control() {
 	fi
 	case "$kind" in
 	keep-destroy | fail-create) [[ "$value" == on ]] || die "$kind expects on|off"; printf 'on\n' >"$file" ;;
-	delay-destroy) [[ "$value" =~ ^[1-9][0-9]*$ ]] || die "delay expects positive seconds|off"; printf '%s\n' "$value" >"$file" ;;
+	delay-destroy)
+		[[ "$value" =~ ^[1-9][0-9]*$ ]] || die "delay expects positive seconds|off"
+		((value < tmux_call_timeout_seconds)) || die "delay must be below tmux's ${tmux_call_timeout_seconds}s command timeout"
+		printf '%s\n' "$value" >"$file"
+		;;
 	esac
 	printf '%s fault enabled for %s\n' "$kind" "$sid"
 }

@@ -215,13 +215,15 @@ R08=$("$ACC" snapshot r08-redriven "$WORKER" mvpacc)
 
 ## Worker record 9 — duplicate while the saga is live
 
-Start fresh. The first client blocks inside source Destroy for eight seconds;
-the second request lands while `beginSwitch` is held.
+Start fresh. The first client blocks inside source Destroy for two seconds; the
+second request lands while `beginSwitch` is held. The delay deliberately stays
+below the tmux adapter's five-second per-call timeout, so the first Destroy
+eventually reaches the real `kill-session` instead of being cancelled.
 
 ```bash
 INC=r09-duplicate
 "$ACC" pause "$WORKER" "$INC" >"$ROOT/evidence/r09-pause.json"
-"$ACC" fault delay-destroy "$WORKER" 8
+"$ACC" fault delay-destroy "$WORKER" 2
 "$ACC" continue "$WORKER" "$INC" >"$ROOT/evidence/r09-first.json" 2>"$ROOT/evidence/r09-first.err" &
 FIRST=$!
 "$ACC" wait-pending "$WORKER" yes 10
