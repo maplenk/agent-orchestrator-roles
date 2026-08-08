@@ -4,6 +4,7 @@ set -euo pipefail
 provider="${AO_ACCEPTANCE_PROVIDER:-$(basename "$0")}"
 data_dir="${AO_DATA_DIR:-}"
 session_id="${AO_SESSION_ID:-}"
+stub_dir="$(cd "$(dirname "$0")" && pwd -P)"
 
 # Adapter discovery/version probes are not managed sessions. They must be
 # finite so an acceptance daemon can discover the stub without hanging.
@@ -22,6 +23,21 @@ control="$root/control/provider/${session_id}.${provider}"
 events="$root/evidence/provider-events.log"
 mkdir -p "$(dirname "$control")" "$(dirname "$events")"
 printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$session_id" "$provider" "launch" >>"$events"
+
+# Worker coordination lives in the host-composed SYSTEM prompt, not the
+# durable user prompt. When spawn_session pinned an active orchestrator, inspect
+# only this provider process's argv and readable prompt-file arguments for that
+# exact id. Persist a boolean proof, never prompt text.
+expected_file="$root/control/expected-orchestrator"
+if [[ -f "$expected_file" ]]; then
+	expected="$(tr -d '[:space:]' <"$expected_file")"
+	if [[ -n "$expected" && "$session_id" != "$expected" ]]; then
+		confirmed="$("$stub_dir/provider-address-check" "$expected" "$@")"
+		printf '%s\t%s\t%s\tconfirmed=%s\n' \
+			"$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$session_id" "$expected" "$confirmed" \
+			>>"$root/evidence/provider-addresses.log"
+	fi
+fi
 
 on_exit() {
 	printf '%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$session_id" "$provider" "exit" >>"$events"

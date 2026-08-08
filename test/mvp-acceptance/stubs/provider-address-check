@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+
+expected="${1:-}"
+shift || true
+if [[ -z "$expected" ]]; then
+	printf 'false\n'
+	exit 0
+fi
+
+for arg in "$@"; do
+	if [[ "$arg" == *"$expected"* ]]; then
+		printf 'true\n'
+		exit 0
+	fi
+	if [[ -f "$arg" && -r "$arg" ]] && grep -Fq -- "$expected" "$arg"; then
+		printf 'true\n'
+		exit 0
+	fi
+done
+
+printf 'false\n'

@@ -163,6 +163,11 @@ self_test() {
 		die "duplicate delay must remain below the tmux command timeout"
 	grep -Eq 'defaultTimeout[[:space:]]*=[[:space:]]*5 \* time.Second' "$repo_root/backend/internal/adapters/runtime/tmux/tmux.go" ||
 		die "tmux default timeout changed; revalidate the acceptance duplicate delay"
+	local address_check="$script_dir/stubs/provider-address-check"
+	[[ "$($address_check mvpacc-1 '--system=report-to-mvpacc-1')" == true ]] ||
+		die "provider address checker missed an argv address"
+	[[ "$($address_check wrong-id '--system=report-to-mvpacc-1')" == false ]] ||
+		die "provider address checker accepted the wrong expected id"
 	printf 'acceptance harness self-test passed\n'
 }
 
@@ -266,6 +271,19 @@ spawn_session() {
 	orchestrator) role=orchestrator; name=Orchestrator ;;
 	*) die "spawn kind must be worker or orchestrator" ;;
 	esac
+	if [[ "$kind" == worker ]]; then
+		local db owner_count owner_file orchestrator
+		db="$(db_path)"; owner_file="$AO_ACCEPTANCE_ROOT/control/expected-orchestrator"
+		owner_count="$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE project_id='mvpacc' AND kind='orchestrator' AND is_terminated=0;")"
+		((owner_count <= 1)) || die "worker launch found multiple active orchestrators"
+		if ((owner_count == 1)); then
+			orchestrator="$(sqlite3 "$db" "SELECT id FROM sessions WHERE project_id='mvpacc' AND kind='orchestrator' AND is_terminated=0;")"
+			safe_atom "$orchestrator"
+			printf '%s\n' "$orchestrator" >"$owner_file"
+		elif [[ -e "$owner_file" ]]; then
+			rm "$owner_file"
+		fi
+	fi
 	"$AO_ACCEPTANCE_BIN" spawn --project mvpacc --kind "$kind" --role "$role" \
 		--name "$name" --prompt "Hold for deterministic MVP acceptance." --skip-agent-check
 	local db; db="$(db_path)"
@@ -500,7 +518,14 @@ assert_handoff_count() {
 
 assert_worker_address() {
 	guard; safe_atom "${1:-}"; safe_atom "${2:-}"; local db; db="$(db_path)"
-	[[ "$(sqlite3 "$db" "SELECT COUNT(*) FROM sessions WHERE id='$1' AND kind='worker' AND instr(prompt,'$2')>0;")" == 1 ]] || die "worker $1 does not address orchestrator $2"
+	local expected_file="$AO_ACCEPTANCE_ROOT/control/expected-orchestrator"
+	local evidence="$AO_ACCEPTANCE_ROOT/evidence/provider-addresses.log"
+	[[ -f "$expected_file" && "$(tr -d '[:space:]' <"$expected_file")" == "$2" ]] ||
+		die "worker launch did not pin expected orchestrator $2"
+	[[ -f "$evidence" ]] || die "provider address evidence missing: $evidence"
+	awk -F '\t' -v worker="$1" -v orchestrator="$2" \
+		'$2 == worker && $3 == orchestrator && $4 == "confirmed=true" { found=1 } END { exit !found }' "$evidence" ||
+		die "worker $1 launch did not confirm orchestrator address $2"
 	local project; project="$(sqlite3 "$db" "SELECT project_id FROM sessions WHERE id='$1';")"
 	assert_owner "$project" "$2"
 }

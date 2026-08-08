@@ -44,7 +44,10 @@ exploratory.
 
 The wrappers only react when the scoped marker and exact data path validate.
 All provider input evidence records byte counts and SHA-256 digests, never task
-or prompt text.
+or prompt text. Worker coordination evidence is also sanitized: before worker
+launch the harness pins the current active orchestrator ID, and the provider
+stub records only whether its own argv/readable system-prompt file contained
+that exact address.
 
 ## Common start for one record root
 
@@ -242,20 +245,29 @@ R09=$("$ACC" snapshot r09-complete "$WORKER" mvpacc)
 
 ## Worker record 10 — exhausted ladder remains paused
 
-Start fresh. Spend the one worker rung successfully, then pause the moved
-session again with the same incident so its durable used-rung set applies.
+Start fresh. Spend the one worker rung with a terminal pre-stop failure: the
+attempt remains durable as `failed`, the pause and live source remain, and a
+failed rung is never re-offered. The next Continue for the same incident must
+therefore report an exhausted ladder without writing another attempt.
 
 ```bash
 INC=r10-exhausted
 "$ACC" pause "$WORKER" "$INC" >/dev/null
-"$ACC" continue "$WORKER" "$INC" >"$ROOT/evidence/r10-first.json"
-"$ACC" pause "$WORKER" "$INC" >/dev/null
+"$ACC" fault keep-destroy "$WORKER" on
+if "$ACC" continue "$WORKER" "$INC" >"$ROOT/evidence/r10-first.out" 2>"$ROOT/evidence/r10-first.err"; then
+  echo "expected terminal pre-stop failure" >&2; exit 1
+fi
+"$ACC" fault keep-destroy "$WORKER" off
+"$ACC" wait-attempt "$WORKER" "$INC" failed
 if "$ACC" continue "$WORKER" "$INC" >"$ROOT/evidence/r10-second.out" 2>"$ROOT/evidence/r10-second.err"; then
   echo "expected FAILOVER_NO_TARGET" >&2; exit 1
 fi
 grep -q FAILOVER_NO_TARGET "$ROOT/evidence/r10-second.err"
 R10=$("$ACC" snapshot r10-exhausted "$WORKER" mvpacc)
-jq -e '.session[0].pause_json!="" and (.attempts|length)==1' "$R10"
+GEN=$(jq -r '.attempts[0].generation_id' "$R10")
+jq -e '.session[0].pause_json!="" and (.attempts|length)==1 and .attempts[0].state=="failed"' "$R10"
+"$ACC" assert-ledger "$WORKER" switch "$GEN" requested,pre_stop,failed
+"$ACC" assert-ledger "$WORKER" failover "$GEN" requested,failed
 "$ACC" assert-runtime "$WORKER" 1
 ```
 
@@ -347,11 +359,17 @@ SOURCE_HANDLE=$(jq -r '.session[0].switch_pending_json|fromjson|.sourceRuntimeHa
 "$ACC" wait-pending "$ORCH" no 30
 OR=$("$ACC" snapshot orch-recovered "$ORCH" mvpacc)
 [[ "$(jq -r '.session[0].runtime_launch_id' "$OR")" == "$GEN" ]]
-"$ACC" assert-ledger "$ORCH" "$KIND" "$GEN" requested,pre_stop,post_stop,target_ack
+"$ACC" assert-ledger "$ORCH" "$KIND" "$GEN" requested,pre_stop,post_stop,failed,target_ack
 "$ACC" assert-runtime "$ORCH" 1
 "$ACC" assert-owner mvpacc "$ORCH"
 "$ACC" assert-worker-address "$WORKER" "$ORCH"
 ```
+
+The `failed` phase is required here because this scenario deliberately makes
+target creation fail before the crash; recovery later appends `target_ack` on
+the same generation without erasing that durable fact. A clean crash after
+`post_stop` but before any failed launch would not contain `failed` and is a
+different scenario.
 
 ## Unauthorized target and same-harness fresh regression
 
