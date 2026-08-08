@@ -217,13 +217,18 @@ func TestToAPIError_PostStopLaunchCommandTooLongKeepsRecoveryAndSizeRemedy(t *te
 	if apiErr.Code != "LAUNCH_COMMAND_TOO_LONG" {
 		t.Fatalf("code = %q, want LAUNCH_COMMAND_TOO_LONG", apiErr.Code)
 	}
-	if apiErr.Kind != apierr.KindInvalid {
-		t.Fatalf("kind = %v, want Invalid", apiErr.Kind)
+	if apiErr.Kind != apierr.KindConflict {
+		t.Fatalf("kind = %v, want Conflict (HTTP 409 after the source stopped)", apiErr.Kind)
 	}
-	for _, want := range []string{"source stopped", "handoff", "file-backed", "too large"} {
+	for _, want := range []string{
+		"source stopped", "handoff", "file-backed", "terminate", "recreate", "shorter assignment",
+	} {
 		if !strings.Contains(strings.ToLower(apiErr.Message), want) {
 			t.Errorf("message %q does not preserve actionable %q context", apiErr.Message, want)
 		}
+	}
+	if strings.Contains(strings.ToLower(apiErr.Message), "before recovering the same generation") {
+		t.Fatalf("message %q falsely claims a retained generation's prompt can be shortened", apiErr.Message)
 	}
 }
 

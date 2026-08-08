@@ -845,9 +845,10 @@ func toAPIError(err error) error {
 		// source is already gone, so the ordinary spawn-size message omits a
 		// critical recovery constraint; the generic post-stop answer, on the
 		// other hand, hides the exact size remedy.
-		return apierr.Invalid("LAUNCH_COMMAND_TOO_LONG",
-			"The source stopped and its handoff is retained for recovery, but the target launch command is too large. "+
-				"Use file-backed system instructions where the harness supports them, or shorten the task or role prompt before recovering the same generation", nil)
+		return apierr.Conflict("LAUNCH_COMMAND_TOO_LONG",
+			"The source stopped and its handoff is retained, but the target launch command is too large. "+
+				"Recovery will keep failing until the target adapter's file-backed launch support or command-size handling is fixed. "+
+				"Otherwise, terminate and recreate the session with a shorter assignment", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchPostStop):
 		return apierr.Conflict("SWITCH_POST_STOP",
 			"Source stopped but target switch did not complete; handoff retained for recovery", nil)
