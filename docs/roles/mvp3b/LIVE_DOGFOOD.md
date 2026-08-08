@@ -14,6 +14,14 @@ docs only)
 > strict Claude orchestration is now valid, while an explicit
 > `workspaceWrites:false` Claude role remains unsupported.
 
+> **Final-acceptance correction (2026-08-08):** this file preserves what the
+> exploratory run observed, but provider-process exit is not a reproducible way
+> to create runtime death: current AO intentionally leaves a keep-alive shell in
+> the tmux pane. Final record 2 therefore uses the acceptance kit's scoped
+> `terminate-runtime` operation, which requires one exact durable handle on one
+> isolated AO namespace and verifies literal `no server running` before
+> Continue. It never targets the shared/default socket.
+
 Non-strict deliberately: a strict map requires the orchestrator role to be
 `workspaceWrites:false`, which is still blocked on Claude read-only (Phase 1-B).
 The failover path does not depend on strictness — only on a durable role pin.
@@ -112,7 +120,9 @@ forward except Resume.
 > sockets only — see `PROBE_CLASSIFICATION.md`.
 
 That matters for 3B specifically because **paused-dead is a first-class MVP
-state** (record 2) and this is the ordinary way a session becomes paused-dead.
+state** (record 2). The historical run reached it this way; final deterministic
+acceptance does not claim that ordinary provider exit also removes AO's
+keep-alive runtime.
 
 Scope: `destroyRuntimeProbed` is **Phase 2A code**, unchanged by this MVP —
 `git log` shows no 3B commit touching it. This is a pre-existing gap that 3B is

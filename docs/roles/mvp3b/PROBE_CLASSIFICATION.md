@@ -6,10 +6,11 @@ namespaced (AO-owned) socket. Everything else is unchanged.
 
 **Why:** tmux panes live inside the server process. If that process does not
 exist, no pane it hosted can be alive. Reading that as inconclusive left a
-session whose agent had exited **permanently un-switchable**: every Continue,
+session whose runtime had exited **permanently un-switchable**: every Continue,
 switch and recovery answered `SWITCH_UNCERTAIN` forever. Phase 3B is the first
-feature to depend on this, because **paused-dead is a first-class MVP state**
-and an exited agent is the ordinary way a session reaches it.
+feature to depend on this, because **paused-dead is a first-class MVP state**.
+Agent-process exit alone is not deterministic runtime death: AO normally leaves
+an interactive keep-alive shell in the pane.
 
 ## The rule
 
@@ -75,7 +76,9 @@ In `internal/observe/reaper/reaper_test.go`:
    #3475 above this layer
 
 `TestContinueFailover_PausedDeadSourceWorks` covers the paused-dead continuation
-at manager level; the live version is dogfood record 2.
+at manager level; final live record 2 explicitly terminates the sole validated
+runtime in an isolated AO namespace and verifies literal server absence before
+Continue.
 
 The tests construct a real `*exec.ExitError`, because `IsAlive` only inspects
 output when `errors.As` finds one — a plain error would skip the whole branch and

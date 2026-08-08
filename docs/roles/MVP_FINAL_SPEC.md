@@ -283,7 +283,8 @@ an earlier SHA is not final acceptance evidence.
 
 Run all twelve records from `PHASE3B_MVP_CONTRACT.md` from scratch, including:
 
-- paused-live and naturally paused-dead Continue;
+- paused-live and explicitly paused runtime-dead Continue, including literal
+  `no server running` on an isolated AO namespace;
 - exact role/template identity preservation;
 - pre-stop and post-stop failures;
 - passive restart after post-stop;

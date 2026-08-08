@@ -36,6 +36,7 @@ Deterministic fault controls:
   fault fail-create SESSION on|off
   fault delay-destroy SESSION SECONDS|off
   provider SESSION codex|claude hold|exit|fail
+  terminate-runtime SESSION       Kill the sole validated AO-namespaced runtime
   seed-requested SESSION INCIDENT TARGET_HARNESS TARGET_MODEL RUNG GENERATION
 
 Evidence and assertions:
@@ -141,6 +142,16 @@ self_test() {
 		die "zero-row sqlite JSON did not normalize to []"
 	[[ "$(sqlite_json :memory: 'SELECT 1 AS value;')" == '[{"value":1}]' ]] ||
 		die "non-empty sqlite JSON changed during normalization"
+	validate_runtime_termination_target mvpacc-1 mvpacc-1 ao-0123456789ab mvpacc-1
+	if (validate_runtime_termination_target mvpacc-1 mvpacc-2 ao-0123456789ab mvpacc-2) >/dev/null 2>&1; then
+		die "runtime termination scope accepted a mismatched durable handle"
+	fi
+	if (validate_runtime_termination_target mvpacc-1 mvpacc-1 default mvpacc-1) >/dev/null 2>&1; then
+		die "runtime termination scope accepted a non-AO socket"
+	fi
+	if (validate_runtime_termination_target mvpacc-1 mvpacc-1 ao-0123456789ab $'mvpacc-1\nother') >/dev/null 2>&1; then
+		die "runtime termination scope accepted a shared namespace"
+	fi
 	printf 'acceptance harness self-test passed\n'
 }
 
@@ -323,6 +334,42 @@ tmux_socket() {
 	printf 'ao-%s\n' "${digest:0:12}"
 }
 
+validate_runtime_termination_target() {
+	local sid="${1:-}" handle="${2:-}" socket="${3:-}" names="${4:-}"
+	safe_atom "$sid"; safe_atom "$handle"
+	[[ "$handle" == "$sid" ]] || die "runtime handle $handle does not exactly match session $sid"
+	[[ "$socket" =~ ^ao-[0-9a-f]{12}$ ]] || die "refusing non-AO tmux namespace: $socket"
+	[[ "$names" == "$handle" ]] || die "runtime termination requires sole namespace session $handle; found: ${names:-<none>}"
+}
+
+# Record 2 needs an authoritatively runtime-dead paused session, but an agent
+# process exit alone leaves AO's keep-alive shell running. Resolve the durable
+# handle from the isolated database, require it to be the only session on the
+# data-dir-derived AO socket, and kill that exact handle. Starting an empty
+# server once after the kill makes tmux's stable subsequent answer the literal
+# "no server running" classification under test, without leaving a server or
+# session alive.
+terminate_runtime() {
+	guard
+	local sid="${1:-}" db handle socket names out lower status=0
+	safe_atom "$sid"; db="$(db_path)"
+	handle="$(sqlite3 "$db" "SELECT runtime_handle_id FROM sessions WHERE id='$sid';")"
+	[[ -n "$handle" ]] || die "session has no durable runtime handle: $sid"
+	socket="$(tmux_socket)"
+	names="$("$AO_ACCEPTANCE_REAL_TMUX" -L "$socket" list-sessions -F '#{session_name}')" ||
+		die "cannot inspect AO tmux namespace $socket"
+	validate_runtime_termination_target "$sid" "$handle" "$socket" "$names"
+	"$AO_ACCEPTANCE_REAL_TMUX" -L "$socket" kill-session -t "=$handle"
+	"$AO_ACCEPTANCE_REAL_TMUX" -L "$socket" start-server
+	out="$("$AO_ACCEPTANCE_REAL_TMUX" -L "$socket" has-session -t "=$handle" 2>&1)" || status=$?
+	((status != 0)) || die "runtime $handle still exists after scoped termination"
+	lower="$(printf %s "$out" | tr '[:upper:]' '[:lower:]')"
+	[[ "$lower" == *"no server running"* ]] ||
+		die "tmux did not produce authoritative namespaced absence: $out"
+	[[ "$(runtime_count "$sid")" == 0 ]] || die "runtime $handle remained listed after scoped termination"
+	printf 'terminated exact isolated runtime session=%s socket=%s; literal no-server absence verified\n' "$handle" "$socket"
+}
+
 runtime_count() {
 	guard; local sid="${1:-}"; safe_atom "$sid"
 	local socket names; socket="$(tmux_socket)"
@@ -491,6 +538,7 @@ send-expect-fenced) send_expect_fenced "$@" ;;
 mux-expect-fenced) mux_expect_fenced "$@" ;;
 fault) fault_control "$@" ;;
 provider) provider_control "$@" ;;
+terminate-runtime) terminate_runtime "$@" ;;
 snapshot) snapshot "$@" ;;
 wait-attempt) wait_attempt "$@" ;;
 wait-phase) wait_phase "$@" ;;

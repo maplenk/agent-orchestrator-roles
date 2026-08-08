@@ -86,16 +86,20 @@ AFTER=$("$ACC" snapshot r01-after "$WORKER" mvpacc)
 jq -e '.session[0].harness=="codex" and .session[0].pause_json=="" and .session[0].switch_pending_json==""' "$AFTER"
 ```
 
-## Worker record 2 — naturally paused-dead Continue
+## Worker record 2 — paused runtime-dead / namespaced-server absence
 
-Start from a fresh root. The source stub exits normally; because it is the only
-pane in this data-dir-specific server, the server exits with it. This is the
-honest `no server running` path fixed at `be4321d1`.
+Start from a fresh root containing exactly one runtime. AO deliberately leaves
+an interactive keep-alive shell after an agent exits, so provider exit is not
+runtime death. The scoped harness command resolves the durable handle, requires
+it to be the sole session in the data-dir-derived AO namespace, kills that exact
+session, and verifies tmux's literal `no server running` answer. This is the
+authoritative namespaced-absence path fixed at `be4321d1`; it never targets the
+default socket or a namespace containing another session.
 
 ```bash
 INC=r02-dead
 "$ACC" pause "$WORKER" "$INC" >"$ROOT/evidence/r02-pause.json"
-"$ACC" provider "$WORKER" claude exit
+"$ACC" terminate-runtime "$WORKER" >"$ROOT/evidence/r02-runtime-terminated.txt"
 "$ACC" wait-runtime "$WORKER" dead 20
 "$ACC" continue "$WORKER" "$INC" >"$ROOT/evidence/r02-continue.json"
 GEN=$(jq -r .generationId "$ROOT/evidence/r02-continue.json")
