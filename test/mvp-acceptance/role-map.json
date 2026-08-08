@@ -1,0 +1,33 @@
+{
+  "defaultBranch": "main",
+  "sessionPrefix": "mvpacc",
+  "roleMap": {
+    "role_map_schema_version": 1,
+    "strictDelegation": true,
+    "orchestratorRole": "orchestrator",
+    "roles": {
+      "orchestrator": {
+        "template": "orchestrator",
+        "harness": "codex",
+        "permissions": { "workspaceWrites": true, "canSpawn": true }
+      },
+      "implementor": {
+        "template": "implementor",
+        "harness": "claude-code",
+        "permissions": { "workspaceWrites": true, "canSpawn": false },
+        "when": ["implementation", "bugfix", "tests"]
+      }
+    },
+    "failover": {
+      "mode": "manual",
+      "roles": {
+        "orchestrator": [
+          { "harness": "claude-code", "model": "" }
+        ],
+        "implementor": [
+          { "harness": "codex", "model": "" }
+        ]
+      }
+    }
+  }
+}
