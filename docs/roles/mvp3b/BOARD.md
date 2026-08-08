@@ -3,7 +3,8 @@
 **Contract:** [`../PHASE3B_MVP_CONTRACT.md`](../PHASE3B_MVP_CONTRACT.md) — frozen, nobody edits.
 **Final cross-phase MVP:** [`../MVP_FINAL_SPEC.md`](../MVP_FINAL_SPEC.md) —
 current boundary and acceptance authority.
-**Branch:** `roles/multi-sub-v1`
+**Implementation branch:** `roles/multi-sub-v1`
+**Promoted evidence branch:** `codex/mvp-promoted-evidence`
 **Frozen code:** `backend/internal/domain/failover_contract.go`,
 `backend/internal/session_manager/failover_contract.go` — frozen at `daee190a`
 on `roles/multi-sub-v1` (`go build ./...` green there), amended in place after
@@ -13,9 +14,9 @@ the durability review and green again.
 
 The original Phase 3B Wave 1/2 record below is retained. The final MVP added
 the probe close-out and the previously deferred in-place Codex↔Claude
-orchestrator switch. Production code and independent review fixes are
-integrated through code head `06aab758`; the documentation close-out is
-`4c5e284a`. The clean full gate and final live acceptance are pending.
+orchestrator switch. The final code and live-acceptance runner are frozen at
+`166e9e63`. The full promoted live matrix passed on that exact immutable SHA;
+see [`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md).
 
 | Wave | Commit | Result |
 |---|---|---|
@@ -31,6 +32,11 @@ integrated through code head `06aab758`; the documentation close-out is
 | Review close-out | `051db38b` | Paused-switch refusal, post-ack promotion typing, response hydration, exact target presentation, and model-wire ambiguity fixed |
 | Final lint close-out | `06aab758` | Service and acceptance harness satisfy the final lint gate without changing product scope |
 | Documentation close-out | `4c5e284a` | Canonical MVP spec and active status/board links integrated |
+| Acceptance reproducibility | `90a4ebfa` | Snapshots pin the immutable role-profile checkout and normalize empty SQLite result sets |
+| Runtime-dead acceptance | `35e8a97a` | Scoped target termination validates the isolated root, data path, socket, and handle before the paused-dead probe |
+| Duplicate Continue close-out | `b23e4970`, `ff5c3b1c` | A duplicate caller preserves the in-flight attempt and receives a conflict instead of stranding or replaying it |
+| Codex launch close-out | `f0585f70`, `a4215229` | Switch prompts are file-backed rather than tmux arguments; post-stop launch-size failure is a durable conflict |
+| Final acceptance invariants | `166e9e63` | Correct failed-rung exhaustion, sanitized worker-address proof, and exact injected-failure recovery phases |
 
 ### Decisions pinned by review
 
@@ -49,18 +55,18 @@ integrated through code head `06aab758`; the documentation close-out is
 - `limit_detection_supported=false` everywhere; no capability promotion is
   part of this MVP.
 
-### Remaining gate
+### Final live gate
 
-1. Run the clean backend, race, lint, frontend and API-drift gate on one exact
-   immutable SHA.
-2. Independently review that immutable result.
-3. Rerun all 12 worker Continue records from scratch.
-4. Capture strict Codex→Claude and Claude→Codex orchestrator switches,
-   terminal/API fencing, same-generation post-stop recovery, one active owner,
-   and same-harness Fresh Conversation on the same SHA.
+Complete on `166e9e63`: harness self-test, worker records 1-12, strict
+Codex→Claude→Codex, API and live-mux pending fences, same-generation
+injected-failure crash recovery, unauthorized no-effect, and same-harness Fresh
+without stacking all passed sequentially from fresh isolated roots. Twenty
+sanitized snapshots independently report the exact frozen SHA; record 12's
+capability matrix passed as a separate Go probe.
 
-Nothing below claiming earlier evidence is rewritten to look like final
-combined-SHA acceptance.
+The promoted evidence is recorded in
+[`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md). Earlier exploratory
+records remain historical and are not represented as combined-SHA evidence.
 
 ## Why every agent keeps a todo file
 

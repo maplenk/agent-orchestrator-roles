@@ -23,6 +23,7 @@ Start with [architecture.md](architecture.md) for the current backend model and
 | [roles/MASTER_PLAN.md](roles/MASTER_PLAN.md)           | Canonical Target B product and architecture plan for the multi-sub roles fork.                                        |
 | [roles/REMAINING_PLAN.md](roles/REMAINING_PLAN.md)     | Living implementation status, remaining phases, ordering, and capability gates.                                      |
 | [roles/MVP_FINAL_SPEC.md](roles/MVP_FINAL_SPEC.md)     | Current final-MVP boundary, implementation decisions, execution waves, and acceptance gate.                           |
+| [roles/mvp3b/FINAL_LIVE_ACCEPTANCE.md](roles/mvp3b/FINAL_LIVE_ACCEPTANCE.md) | Promoted worker and orchestrator live-acceptance result on the frozen final-MVP SHA.                    |
 | [roles/UPSTREAM_SYNC2_PLAN.md](roles/UPSTREAM_SYNC2_PLAN.md) | Closed historical Sync 2 execution and acceptance record.                                                       |
 
 ## Mental model

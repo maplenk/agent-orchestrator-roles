@@ -1,11 +1,13 @@
 # MVP acceptance agent progress
 
-**Branch:** `codex/mvp-acceptance`
+**Branch:** `codex/mvp-promoted-evidence`
 
-**Base SHA:** `be4321d138868cdd1ae0f203d69c61cd0c429750`
+**Frozen evidence SHA:**
+`166e9e6338d0230b1a9c9f5c4976cf79789df188`
 
-**Scope:** adversarial review and isolated acceptance evidence only. This agent
-does not edit production behavior and never uses the default AO data directory.
+**Scope:** adversarial review, isolated acceptance tooling, and promoted live
+evidence. The final evidence run did not edit production or the frozen runner
+and never used the default AO data directory.
 
 ## Current status
 
@@ -17,13 +19,16 @@ does not edit production behavior and never uses the default AO data directory.
 | Worker records 1-12 harness | complete |
 | Orchestrator switch/recovery harness | complete |
 | Harness self-tests | complete |
+| Final worker records 1-12 on frozen SHA | **pass** |
+| Final orchestrator matrix on frozen SHA | **pass** |
+| Sanitized promoted evidence | **complete** |
 
-## Acceptance checkpoint
+## Final acceptance checkpoint
 
-Final evidence must be collected from an integrated SHA containing coordinator
-fix `e2ed8bf` in addition to the roles core and surface waves. The harness is
-based at `be4321d1` and deliberately does not import or duplicate that
-production fix; its runbook treats `e2ed8bf` as a promotion dependency.
+The complete promoted result is
+[`FINAL_LIVE_ACCEPTANCE.md`](FINAL_LIVE_ACCEPTANCE.md). All live scenarios ran
+sequentially from fresh roots against the immutable detached checkout at
+`166e9e63`; the evidence branch is based on that exact commit.
 
 The isolated kit lives under `test/mvp-acceptance/` with its one live Go probe
 under `backend/test/mvp_acceptance/`. It provides:
@@ -62,11 +67,22 @@ under `backend/test/mvp_acceptance/`. It provides:
   it. `fail-create` prevented target creation and `delay-destroy` held the live
   fence for its requested interval.
 
-No live AO record was promoted from this checkpoint: the role-map/surface
-integration and `e2ed8bf` are required before the twelve final records can be
-truthfully rerun on one SHA.
+### Promoted live result
 
-## P1: `ErrRuntimeUnavailable` becomes death outside the adapter
+- Worker records 1-12: pass.
+- Strict orchestrator Codex→Claude→Codex: pass.
+- Pending API and live-mux input fences: pass.
+- Injected target-create failure, daemon SIGKILL, and same-generation recovery
+  with exact `requested,pre_stop,post_stop,failed,target_ack`: pass.
+- Unauthorized-target no-effect: pass.
+- Same-harness Fresh with one handoff, one owner/runtime, and no stacking: pass.
+- Twenty sanitized snapshots all identify the full frozen SHA. Record 12's
+  capability matrix passed as a separate Go test.
+
+The earlier review below is retained as historical context. Its P1 defects were
+fixed before the frozen candidate; it is not the promoted evidence base.
+
+## Historical P1: `ErrRuntimeUnavailable` became death outside the adapter
 
 The adapter contract is sound at `be4321d1`: only a missing session on a live
 server or literal `no server running` on an AO-namespaced socket returns
