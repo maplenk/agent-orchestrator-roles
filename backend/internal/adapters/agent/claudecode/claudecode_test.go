@@ -203,6 +203,43 @@ func TestGetLaunchCommandInjectsSessionID(t *testing.T) {
 	}
 }
 
+func TestFreshLaunchesWithReusedAOSessionIDGetDistinctNativeIDs(t *testing.T) {
+	p := &Plugin{resolvedBinary: "claude"}
+	firstID := p.NewAgentSessionID()
+	secondID := p.NewAgentSessionID()
+	if firstID == secondID {
+		t.Fatalf("fresh native ids collided: %q", firstID)
+	}
+	for _, id := range []string{firstID, secondID} {
+		if _, err := uuid.Parse(id); err != nil {
+			t.Fatalf("fresh native id is not a UUID: %q (%v)", id, err)
+		}
+	}
+
+	first, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SessionID: "qbapi-1", AgentSessionID: firstID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := p.GetLaunchCommand(context.Background(), ports.LaunchConfig{
+		SessionID: "qbapi-1", AgentSessionID: secondID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsSubsequence(first, []string{"--session-id", firstID}) {
+		t.Fatalf("first command did not use reserved id: %#v", first)
+	}
+	if !containsSubsequence(second, []string{"--session-id", secondID}) {
+		t.Fatalf("second command did not use reserved id: %#v", second)
+	}
+	legacyID := claudeSessionUUID("qbapi-1")
+	if contains(first, legacyID) || contains(second, legacyID) {
+		t.Fatalf("reserved-id launches fell back to reusable AO id %q", legacyID)
+	}
+}
+
 func TestClaudeSessionUUIDDeterministicAndUnique(t *testing.T) {
 	a1 := claudeSessionUUID("alpha")
 	a2 := claudeSessionUUID("alpha")

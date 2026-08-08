@@ -289,6 +289,73 @@ func TestSwitchWorker_SystemPromptTargetHarnessFooter_CodexToClaude(t *testing.T
 	}
 }
 
+func TestSwitchWorker_ClaudeTargetUsesFreshDurableNativeID(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessCodex, ws, art, sha)
+	agent := &allocatingRecordingAgent{
+		recordingAgent: &recordingAgent{},
+		ids:            []string{"claude-target-native-1"},
+	}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	res, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessClaudeCode})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.restoreCalls != 0 || agent.launchCalls != 1 {
+		t.Fatalf("target dispatch restore=%d launch=%d, want a fresh launch", agent.restoreCalls, agent.launchCalls)
+	}
+	if got := agent.lastLaunch.AgentSessionID; got != "claude-target-native-1" {
+		t.Fatalf("target launch native id = %q", got)
+	}
+	if got := res.Session.Metadata.AgentSessionID; got != "claude-target-native-1" {
+		t.Fatalf("promoted target native id = %q", got)
+	}
+	if got := st.sessions[id].Metadata.AgentSessionID; got != "claude-target-native-1" {
+		t.Fatalf("durable target native id = %q", got)
+	}
+}
+
+func TestFreshConversation_AllocatesNewNativeID(t *testing.T) {
+	st := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, st)
+	id := domain.SessionID("mer-1")
+	workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
+	agent := &allocatingRecordingAgent{
+		recordingAgent: &recordingAgent{},
+		ids:            []string{"claude-fresh-native-2"},
+	}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	res, err := m.FreshConversation(ctx, id, domain.SemanticHandoffV1{Objective: "fresh context"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agent.restoreCalls != 0 || agent.launchCalls != 1 {
+		t.Fatalf("fresh dispatch restore=%d launch=%d, want a fresh launch", agent.restoreCalls, agent.launchCalls)
+	}
+	if got := res.Session.Metadata.AgentSessionID; got != "claude-fresh-native-2" {
+		t.Fatalf("fresh native id = %q, want claude-fresh-native-2", got)
+	}
+	if res.Session.Metadata.AgentSessionID == "native-old" {
+		t.Fatal("fresh conversation reused the source native id")
+	}
+}
+
 func TestRecover_SystemPromptTargetHarnessFooter(t *testing.T) {
 	st := newFakeStore()
 	ws := t.TempDir()

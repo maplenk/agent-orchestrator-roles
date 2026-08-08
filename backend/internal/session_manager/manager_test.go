@@ -698,6 +698,22 @@ type recordingAgent struct {
 	restoreCalls int
 }
 
+type allocatingRecordingAgent struct {
+	*recordingAgent
+	ids   []string
+	calls int
+}
+
+func (a *allocatingRecordingAgent) NewAgentSessionID() string {
+	a.calls++
+	if len(a.ids) == 0 {
+		return ""
+	}
+	id := a.ids[0]
+	a.ids = a.ids[1:]
+	return id
+}
+
 func (a *recordingAgent) GetLaunchCommand(_ context.Context, cfg ports.LaunchConfig) ([]string, error) {
 	a.launchCalls++
 	a.lastConfig = cfg.Config
@@ -3254,6 +3270,39 @@ func TestSpawn_ForwardsResolvedAgentConfigPermissions(t *testing.T) {
 	}
 	if agent.lastLaunch.Permissions != domain.PermissionModeBypassPermissions {
 		t.Fatalf("launch permissions = %q, want bypass", agent.lastLaunch.Permissions)
+	}
+}
+
+func TestSpawn_PersistsReservedAgentSessionIDBeforeLaunch(t *testing.T) {
+	st := newFakeStore()
+	st.projects["qbapi"] = domain.ProjectRecord{ID: "qbapi", Config: domain.ProjectConfig{
+		Worker: domain.RoleOverride{Harness: domain.HarnessClaudeCode},
+	}}
+	agent := &allocatingRecordingAgent{
+		recordingAgent: &recordingAgent{},
+		ids:            []string{"native-incarnation-1"},
+	}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "qbapi", Kind: domain.KindWorker, Prompt: "do it"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.ID != "qbapi-1" {
+		t.Fatalf("session id = %q, want qbapi-1", rec.ID)
+	}
+	if agent.calls != 1 {
+		t.Fatalf("native id allocations = %d, want 1", agent.calls)
+	}
+	if got := agent.lastLaunch.AgentSessionID; got != "native-incarnation-1" {
+		t.Fatalf("launch native id = %q, want native-incarnation-1", got)
+	}
+	if got := st.sessions[rec.ID].Metadata.AgentSessionID; got != "native-incarnation-1" {
+		t.Fatalf("durable native id = %q, want native-incarnation-1", got)
 	}
 }
 

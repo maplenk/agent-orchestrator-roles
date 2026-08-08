@@ -680,7 +680,8 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	// Reject an unknown harness before any durable state is created. Doing this
 	// after CreateSession would leave a terminated orphan row and waste a
 	// worktree on a spawn that can never launch.
-	if _, ok := m.agents.Agent(cfg.Harness); !ok {
+	agent, ok := m.agents.Agent(cfg.Harness)
+	if !ok {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: %w: %q", ErrUnknownHarness, cfg.Harness)
 	}
 
@@ -746,6 +747,12 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	}
 	seed := seedRecord(cfg, m.clock())
 	seed.Metadata.SpawnCapabilityHash = spawnHash
+	if mode == domain.SessionModeTUI {
+		seed.Metadata.AgentSessionID, err = freshAgentSessionID(agent)
+		if err != nil {
+			return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: native session id: %w", err)
+		}
+	}
 	rec, err := m.store.CreateSession(ctx, seed)
 	if err != nil {
 		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn: create: %w", err)
@@ -831,11 +838,6 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 		return rec, promptBytes, systemPromptBytes, nil
 	}
 
-	agent, ok := m.agents.Agent(cfg.Harness)
-	if !ok {
-		m.rollbackSeedSpawnWorkspace(ctx, rec, ws, workspaceProject, false)
-		return domain.SessionRecord{}, 0, 0, fmt.Errorf("spawn %s: no agent adapter for harness %q", id, cfg.Harness)
-	}
 	// Composed, and the ORDER is the invariant: project base, then upstream's
 	// per-spawn override, then the host-resolved role LAST. A role pin is
 	// host-authoritative — resolve already refuses a caller-supplied harness or
@@ -852,6 +854,7 @@ func (m *Manager) spawnUnderOwnership(ctx context.Context, cfg ports.SpawnConfig
 	}
 	launchCfg := ports.LaunchConfig{
 		DataDir:          m.dataDir,
+		AgentSessionID:   rec.Metadata.AgentSessionID,
 		SessionID:        string(id),
 		WorkspacePath:    ws.Path,
 		Kind:             cfg.Kind,
@@ -2117,6 +2120,13 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	agent, ok := m.agents.Agent(launchHarness)
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, launchHarness)
+	}
+	if o.ForceFresh && strings.TrimSpace(rec.Metadata.AgentSessionID) == "" {
+		nativeID, nativeErr := freshAgentSessionID(agent)
+		if nativeErr != nil {
+			return RestoreResult{}, fmt.Errorf("%s %s: native session id: %w", operation, rec.ID, nativeErr)
+		}
+		rec.Metadata.AgentSessionID = nativeID
 	}
 	// Ephemeral target identity for prompt/config generation on switch/fresh
 	// relaunches. Durable session Harness/Role pin stay on the source until
@@ -3945,6 +3955,18 @@ func seedRecord(cfg ports.SpawnConfig, now time.Time) domain.SessionRecord {
 	return rec
 }
 
+func freshAgentSessionID(agent ports.Agent) (string, error) {
+	allocator, ok := agent.(ports.AgentSessionIDAllocator)
+	if !ok {
+		return "", nil
+	}
+	id := strings.TrimSpace(allocator.NewAgentSessionID())
+	if id == "" {
+		return "", errors.New("adapter returned an empty native session id")
+	}
+	return id, nil
+}
+
 func defaultSessionBranch(id domain.SessionID, kind domain.SessionKind, prefix, branchNamespace string) string {
 	if kind == domain.KindOrchestrator {
 		return aoBranch(branchNamespace, prefix+"-orchestrator")
@@ -4951,6 +4973,7 @@ func freshLaunchArgv(ctx context.Context, agent ports.Agent, id domain.SessionID
 	// the runtime is live.
 	launchCfg := ports.LaunchConfig{
 		DataDir:          dataDir,
+		AgentSessionID:   meta.AgentSessionID,
 		SessionID:        string(id),
 		WorkspacePath:    workspacePath,
 		Kind:             kind,

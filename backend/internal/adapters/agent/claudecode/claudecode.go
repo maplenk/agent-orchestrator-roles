@@ -43,11 +43,10 @@ const (
 	adapterID = "claude-code"
 )
 
-// claudeSessionNamespace seeds the UUIDv5 derivation that maps an AO
-// session id onto a stable Claude Code `--session-id`. A fixed namespace makes
-// the mapping deterministic, so GetLaunchCommand (which pins --session-id at
-// launch) and GetRestoreCommand (which recomputes it as a fallback for
-// pre-hook sessions) agree without persisting anything.
+// claudeSessionNamespace preserves the pre-MVP fallback for existing rows that
+// have no durably pinned native id. New launches allocate and persist a random
+// UUID instead: AO display ids are reusable after database replacement, while
+// Claude transcripts survive under ~/.claude and must never collide.
 var claudeSessionNamespace = uuid.MustParse("a1f0c3d2-7b54-4e96-8a2b-0d9e1f2a3b4c")
 
 // Plugin is the Claude Code agent adapter. It is safe for concurrent use; the
@@ -62,6 +61,10 @@ type Plugin struct {
 func New() *Plugin {
 	return &Plugin{}
 }
+
+// NewAgentSessionID reserves a provider-native conversation id for a fresh AO
+// session incarnation. Session Manager persists it before Claude is started.
+func (p *Plugin) NewAgentSessionID() string { return uuid.NewString() }
 
 // EmitsSubmitActivity signals that Claude Code fires a user-prompt-submit hook
 // under AO's launch, so Activity.State can flip to active after a prompt is
@@ -78,6 +81,7 @@ func (p *Plugin) EmitsBlockedActivity() bool { return true }
 var _ adapters.Adapter = (*Plugin)(nil)
 var _ ports.Agent = (*Plugin)(nil)
 var _ ports.AgentAuthChecker = (*Plugin)(nil)
+var _ ports.AgentSessionIDAllocator = (*Plugin)(nil)
 var _ ports.AgentInterfaceHandoff = (*Plugin)(nil)
 var _ ports.AgentInterfaceHandoffHistoryProbe = (*Plugin)(nil)
 
@@ -159,8 +163,14 @@ func (p *Plugin) GetLaunchCommand(ctx context.Context, cfg ports.LaunchConfig) (
 	}
 
 	cmd = []string{binary}
-	if cfg.SessionID != "" {
-		cmd = append(cmd, "--session-id", claudeSessionUUID(cfg.SessionID))
+	sessionID := strings.TrimSpace(cfg.AgentSessionID)
+	if sessionID == "" && cfg.SessionID != "" {
+		// Compatibility for callers and durable rows created before AO began
+		// reserving the native id before launch.
+		sessionID = claudeSessionUUID(cfg.SessionID)
+	}
+	if sessionID != "" {
+		cmd = append(cmd, "--session-id", sessionID)
 	}
 	// A project's configured permissions drive the starting mode; the explicit
 	// LaunchConfig.Permissions wins when set so a per-spawn override still takes

@@ -676,6 +676,7 @@ func (m *Manager) finishSwitchTarget(
 	result, err := m.relaunchSession(ctx, "switch", rec, project, ws, nil, relaunchOpts{
 		LaunchHarness: toHarness,
 		ForceLaunchID: targetGen,
+		ForceFresh:    true,
 		RoleModel:     toModel,
 		// Post-stop recovery below refuses a terminated session, so the launch
 		// rollback must not terminate it; the ErrSwitchPostStop path here is the

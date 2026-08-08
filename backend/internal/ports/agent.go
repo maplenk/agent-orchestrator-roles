@@ -71,6 +71,15 @@ type AgentBinaryResolver interface {
 	ResolveBinary(ctx context.Context) (path string, err error)
 }
 
+// AgentSessionIDAllocator is an OPTIONAL capability for adapters whose native
+// CLI accepts a caller-reserved session id on a fresh launch. Session Manager
+// persists this id before starting the process, so a new AO session incarnation
+// cannot collide with provider history left by an older database while restart
+// and recovery keep using the same durable native identity.
+type AgentSessionIDAllocator interface {
+	NewAgentSessionID() string
+}
+
 // AgentInterfaceHandoff is an OPTIONAL capability for a TUI adapter whose
 // native resume identity is also understood by its structured Chat driver.
 // Merely supporting GetRestoreCommand is not enough: some harnesses expose a
@@ -313,13 +322,17 @@ const (
 
 // LaunchConfig carries inputs needed to build a new agent launch command.
 type LaunchConfig struct {
-	Config      AgentConfig
-	DataDir     string
-	IssueID     string
-	Kind        domain.SessionKind
-	Permissions PermissionMode
-	Prompt      string
-	SessionID   string
+	Config  AgentConfig
+	DataDir string
+	// AgentSessionID is a native id reserved and durably pinned by AO for this
+	// fresh session incarnation. Adapters that allocate one must prefer it over
+	// deriving an id from the reusable AO SessionID.
+	AgentSessionID string
+	IssueID        string
+	Kind           domain.SessionKind
+	Permissions    PermissionMode
+	Prompt         string
+	SessionID      string
 	// AllowedTools and DisallowedTools scope the agent to a tool allowlist when
 	// it runs in a non-bypass permission mode (allow rules auto-approve, deny
 	// rules auto-reject). They are the enforced read-only guarantee the reviewer
