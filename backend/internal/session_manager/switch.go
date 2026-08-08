@@ -132,14 +132,6 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		// relaunches it.
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrNotWorker)
 	}
-	// Cross-harness orchestrator switch is 2B-3, blocked on Claude RO: a strict
-	// orchestrator must be read-only and only Codex enforces that, so allowing
-	// it for non-strict projects would ship a path strict projects can never
-	// take. Same-harness fresh conversation is the whole of 2B-1.
-	if rec.Kind == domain.KindOrchestrator && !req.FreshConversation &&
-		req.TargetHarness != "" && req.TargetHarness != rec.Harness {
-		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrOrchestratorCrossHarness)
-	}
 	if rec.IsTerminated {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrTerminated)
 	}
@@ -154,7 +146,7 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 
 	fromHarness := rec.Harness
 	toHarness, kind, sameHarness := resolveSwitchTarget(req, fromHarness)
-	if rec.Kind == domain.KindOrchestrator {
+	if rec.Kind == domain.KindOrchestrator && sameHarness {
 		// A distinct kind so recovery and audit can tell the two sagas apart
 		// without re-reading the session: an orchestrator's recovery must run
 		// under the project gate, and its handoff carries fleet state.
@@ -527,15 +519,20 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	if toHarness == "" {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: missing target harness", sessionID)
 	}
-	// Recovery re-drives a DURABLE record, so it must re-apply the refusals the
-	// request path applies — a pending pin is not authorization. Without this,
-	// a row carrying {kind:"switch", from:"codex", to:"claude-code"} on an
-	// orchestrator would launch Claude Code into the canonical orchestrator
-	// workspace and promote it, doing at boot exactly what
-	// ErrOrchestratorCrossHarness refuses interactively.
+	// Recovery re-drives a durable target, but the pending pin is not by itself
+	// authorization. Re-check the exact target against the current host role map
+	// while the orchestrator project gate is held. Require the resolved model to
+	// equal the durable model: recovery must never reinterpret an empty/default
+	// target as a different fixed model.
 	if rec.Kind == domain.KindOrchestrator && toHarness != rec.Harness {
-		return SwitchResult{}, fmt.Errorf("recover switch %s: %w (pending target %q)",
-			sessionID, ErrOrchestratorCrossHarness, toHarness)
+		authorizedModel, authErr := m.authorizeOrchestratorSwitchTarget(ctx, rec, toHarness, toModel)
+		if authErr != nil {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: authorize target: %w", sessionID, authErr)
+		}
+		if authorizedModel != strings.TrimSpace(toModel) {
+			return SwitchResult{}, fmt.Errorf("recover switch %s: durable target model %q resolves to %q: %w",
+				sessionID, toModel, authorizedModel, domain.ErrSwitchTargetUnauthorized)
+		}
 	}
 	if _, ok := m.agents.Agent(toHarness); !ok {
 		return SwitchResult{}, fmt.Errorf("recover switch %s: %w: %q", sessionID, ErrUnknownHarness, toHarness)

@@ -1,21 +1,23 @@
 # Master plan: Multi-sub harness orchestration on AO
 
 **Status:** canonical Target B design; implementation is active and tracked in
-[`REMAINING_PLAN.md`](REMAINING_PLAN.md). Current integration acceptance is
-tracked in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
+[`REMAINING_PLAN.md`](REMAINING_PLAN.md). The current MVP boundary and
+integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
 **Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
 **Not base:** Intent asar; harness-orchestration as daily UI
 **Sources:** Intent RE, AO code/PRs, harness-orchestration PLAN, deep-research-report, Codex plan reviews
 
-**Execution checkpoint (2026-08-07):** Phase 1 foundation and Phase 2A are
-accepted. Phase 2B-0/1/2 landed; 2B-3 is blocked on Claude read-only
-enforcement. Phase 3A's durable pause, operator surface, desktop pause/role
+**Execution checkpoint (2026-08-08):** Phase 1 foundation and Phase 2A are
+accepted. Phase 2B-0/1/2 landed and the final-MVP 2B-3 in-place Codex↔Claude
+orchestrator switch is implemented under the amended strict policy. Phase 3A's durable pause, operator surface, desktop pause/role
 composer and detector boundary landed, but no vendor detector is promoted.
 Sync 2 is accepted on `roles/upstream-sync-2` @ `dd06d31a`: all eight steps are
 done, every required CI job is green, and the two live Step 5 dogfood records
 (orchestrator fresh conversation, and a genuine post-stop recovery on the
-original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Merging
-it to the roles trunk is the only outstanding action. Phase 3B has not started. The estimates below are original planning estimates, not a claim
+original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Phase
+3B manual worker Continue and the final-MVP 2B-3 core are implemented; probe
+review, surface integration, the clean final gate and live acceptance remain.
+The estimates below are original planning estimates, not a claim
 about remaining duration.
 
 ---
@@ -106,7 +108,11 @@ type RoleExecutionPolicy struct {
 
 **Pi:** not eligible for read-only **reviewer** (or any `workspaceWrites: false` role) until Phase 0 marks `read_only_enforced`. Configuration **rejects** rather than silently degrading.
 
-**Orchestrator strict:** `workspaceWrites: false`, `canSpawn: true`; single prompt builder with **one** no-edit rule (remove “confirm then edit”).
+**Orchestrator strict:** `canSpawn: true`; `workspaceWrites` is explicit policy,
+not implied by strictness. The default MVP role is writable so Codex and Claude
+Code can switch in place, while the single no-edit/delegate rule remains
+instruction-enforced. Configuring `workspaceWrites:false` still requires a
+read-only-enforced harness.
 
 **Reviewer:** prefer AO reviewer subsystem; else `workspaceWrites: false` + enforceable harness only.
 
@@ -177,10 +183,10 @@ On switch: write **immutable switch-history record** with prior harness/model + 
   "roles": {
     "orchestrator": {
       "template": "orchestrator",
-      "harness": "codex",
+      "harness": "claude-code",
       "model": null,
-      "permissions": { "workspaceWrites": false, "canSpawn": true },
-      "_comment": "Phase 1: only codex has read_only_enforced. Claude RO deferred until dontAsk/OS sandbox."
+      "permissions": { "workspaceWrites": true, "canSpawn": true },
+      "_comment": "Strict coordination is instruction-enforced. Set workspaceWrites=false only when technical write denial is required."
     },
     "implementor": {
       "template": "implementor",
@@ -207,6 +213,9 @@ On switch: write **immutable switch-history record** with prior harness/model + 
   "failover": {
     "mode": "manual",
     "roles": {
+      "orchestrator": [
+        { "harness": "codex", "model": null }
+      ],
       "implementor": [
         { "harness": "codex", "model": null }
       ]
@@ -352,9 +361,12 @@ Zai and Kimi validated **separately** on Pi.
 10. [x] SemanticHandoffV1 + ObservedWorkspaceV1 + compiler
 11. [x] Worker switch saga + fresh-conversation
 12. [x] Lifecycle ledger
-13. [~] Orchestrator switch protocol — in-place fresh and replacement recovery landed; cross-harness is blocked on Claude read-only
+13. [~] Orchestrator switch protocol — in-place fresh, Codex↔Claude switch,
+    gated same-generation recovery, and replacement recovery are implemented;
+    final-MVP live acceptance is pending
 14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
-15. [ ] Manual continue + opt-in auto-failover
+15. [~] Manual Continue implemented; final live acceptance pending. Opt-in
+    auto-failover is post-MVP
 16. [~] Dogfood against all DoD invariants — Phase 2A/2B/3A evidence exists; Sync 2 is accepted with its required CI green and both live Step 5 records captured. Still partial because invariants 7 and 8 (promoted limit detection, failover runtime) have no dogfood evidence yet
 
 ---

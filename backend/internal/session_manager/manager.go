@@ -90,11 +90,10 @@ var (
 	// ErrNotOrchestrator means an orchestrator-only operation was asked for a
 	// worker session.
 	ErrNotOrchestrator = errors.New("session: orchestrator kind required")
-	// ErrOrchestratorCrossHarness means a cross-harness orchestrator switch was
-	// requested. Deferred to 2B-3 and blocked on Claude read-only enforcement:
-	// a strict orchestrator must be workspaceWrites:false, which only Codex can
-	// satisfy today, so codex→codex (a fresh conversation) is the only legal
-	// strict in-place move.
+	// ErrOrchestratorCrossHarness is retained for wire/error compatibility with
+	// older callers. Cross-harness orchestrator switching now enters through the
+	// gated SwitchOrchestrator path; the worker entry point still rejects an
+	// orchestrator before any runtime effect.
 	ErrOrchestratorCrossHarness = errors.New("session: cross-harness orchestrator switch is not supported yet")
 	// ErrSwitchNothingToRecover means no incomplete post_stop saga exists for
 	// the session (already acked, never reached post_stop, or not a switch).

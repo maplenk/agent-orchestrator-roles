@@ -3,8 +3,8 @@
 > **Superseded checkpoint (written 2026-08-04).** Keep this for the detailed
 > Phase 1/2 history, but do not follow its branch, CI-debt or “start Phase 3A”
 > instructions. Current execution status is in
-> [`REMAINING_PLAN.md`](REMAINING_PLAN.md); the Sync 2 record and what follows it
-> are in [`UPSTREAM_SYNC2_PLAN.md`](UPSTREAM_SYNC2_PLAN.md).
+> [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md) and
+> [`REMAINING_PLAN.md`](REMAINING_PLAN.md).
 
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
 **Written:** 2026-08-04 (after Phase 2A close-out accept + `SwitchSupported` promotion).  
@@ -27,10 +27,10 @@
 | **`switch_supported`** | **true** for `claude-code` and `codex` only |
 | **`limit_detection_supported`** | **false** everywhere production — do not flip |
 | **`read_only_enforced`** | **true only for Codex**; Claude/Pi false by design for now |
-| **Phase 2B** | **2B-0a / 0b / 1 / 2 landed** (see `PHASE2B_PLAN.md`); **2B-3 blocked** — a strict orchestrator must be `workspaceWrites:false`, which needs `read_only_enforced`, which only Codex has |
-| **Critical path next** | **Phase 3A — structured limit envelopes + durable pause** (independent of Claude RO) |
-| **Parallel optional** | Phase 1-F strict dogfood / Claude RO (1-B) — no longer merely optional: it is what unblocks 2B-3 |
-| **CI-blocking debt** | `golangci-lint` is **not clean** on this branch and `go.yml` blocks at zero findings — fix before any merge |
+| **Phase 2B** | **2B-0a / 0b / 1 / 2 landed; final-MVP 2B-3 implemented, live acceptance pending.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
+| **Critical path next** | Close probe review, integrate core/surface, run the clean final gate, then capture worker/orchestrator evidence on one SHA |
+| **Parallel optional** | Phase 1-F / Claude RO (1-B) for explicitly read-only Claude roles; 2B-3 no longer depends on it |
+| **Current clean gate** | Probe base `be4321d1`: 4,600 backend tests, gofmt/vet clean, golangci-lint 0 on a cold cache; rerun after integration |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -334,8 +334,12 @@ Do not claim these in docs, PRs, or dogfood:
 3. **Claude RO** (`read_only_enforced=false`)
 4. **Pi switch** or other harness switch
 5. **Limit detection / durable pause / auto-failover runtime**
-6. **Cross-harness orchestrator switch** (2B-3) — blocked on Claude RO. In-place orchestrator fresh conversation (2B-1) and durable replacement recoverability (2B-2) **have** landed; successor-session handoff and live-worker rebind remain deferred non-claims
-7. Full `go test ./...` green as a formal gate (prefer focused packages; expand when doing 1-F)
+6. **Accepted live proof for the final integrated orchestrator switch.** The
+   in-place Codex↔Claude path is implemented; its two live records remain
+   pending on the combined SHA. Successor-session handoff/live-worker rebind
+   remain deferred.
+7. Final combined-SHA acceptance until the clean integration gate and all 14
+   live records (12 workers plus both orchestrator directions) are captured.
 
 ---
 
@@ -374,7 +378,7 @@ Suggested first steps for 2B:
 | 1-C registry | Done for current cells | |
 | 1-D role-map surface | Done | |
 | 1-E template authority | Done Option A | |
-| 1-F full verification + strict dogfood | **Open** | Full test suite, strict orch RO as daily driver |
+| 1-F full verification + strict dogfood | **Open** | Full test suite; writable strict orchestrator plus separately explicit RO roles |
 
 ### 8.3 Phase 3A — Limits + durable pause (~4–6 d)
 
@@ -525,22 +529,13 @@ High-level protocol used successfully:
 
 ## 14. Immediate next action for the successor agent
 
-1. `git fetch && git checkout roles/multi-sub-v1 && git pull` — confirm HEAD ≥ `7545304d`
-2. Read (in order):
-   - this file
-   - `REMAINING_PLAN.md` (snapshot + §2 remaining)
-   - `MASTER_PLAN.md` §5.4 (orch switch) + §8–10
-   - skim `PHASE2A_LIVE_DOGFOOD.md` (lessons 5.5–5.7)
-3. **Start Phase 3A** — 2B-0a/0b/1/2 have landed and 2B-3 is blocked on Claude RO,
-   so 3A (structured limit envelopes → durable pause → zero automatic
-   send/restart) is the critical path unless the human prioritizes Claude RO / 1-F:
-   - Read `PHASE2B_PLAN.md` + `PHASE2B1_LIVE_DOGFOOD.md` first — the switch saga,
-     fences and ledger 3A extends are documented there
-   - Implement in thin vertical slices with tests
-   - Keep `limit_detection_supported` **false** until structured-limit tests exist
-4. On each land: update `REMAINING_PLAN.md`, run focused tests, prefer push after human accept of risky slices
-5. **Never** promote `limit_detection_supported` without Phase 3 evidence
-6. **Do not** reopen 2A switch promotion without a production regression
+1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md` and `PHASE2B_PLAN.md`.
+2. Close the probe review and integrate probe → core → surface without
+   weakening unknown-probe handling.
+3. Run the clean final gate on one immutable SHA.
+4. Capture all 12 worker records and both strict orchestrator switch directions
+   on that same SHA. Keep `limit_detection_supported=false` and Claude
+   `read_only_enforced=false`.
 
 ---
 

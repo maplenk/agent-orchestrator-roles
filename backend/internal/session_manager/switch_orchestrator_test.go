@@ -27,7 +27,34 @@ func orchestratorSwitchHarness(t *testing.T) (*Manager, *fakeStore, domain.Sessi
 	workerSession(st, id, domain.HarnessCodex, ws, art, sha)
 	rec := st.sessions[id]
 	rec.Kind = domain.KindOrchestrator
+	rec.Metadata.Role.RoleID = "orchestrator"
+	rec.Metadata.Role.ResolvedPermissions = domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: true}
+	rec.Metadata.SpawnCapabilityHash = "source-capability-hash"
 	st.sessions[id] = rec
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{RoleMap: domain.RoleMap{
+			SchemaVersion:    domain.RoleMapSchemaVersion,
+			StrictDelegation: true,
+			OrchestratorRole: "orchestrator",
+			Roles: map[string]domain.RoleBinding{
+				"orchestrator": {
+					Template: "orchestrator",
+					Harness:  domain.HarnessClaudeCode,
+					Permissions: domain.RoleExecutionPolicy{
+						WorkspaceWrites: true,
+						CanSpawn:        true,
+					},
+				},
+			},
+			Failover: domain.FailoverConfig{
+				Mode: domain.FailoverModeManual,
+				Roles: map[string][]domain.FailoverTarget{
+					"orchestrator": {{Harness: domain.HarnessCodex}},
+				},
+			},
+		}},
+	}
 
 	m := New(Deps{
 		Runtime: &fakeRuntime{aliveByHandle: map[string]bool{}},
@@ -114,6 +141,33 @@ func TestFreshOrchestratorConversation_DoesNotHoldTheFenceWhileWaitingForTheGate
 	m.endSwitch(id)
 }
 
+func TestSwitchOrchestrator_TakesProjectGateBeforeSwitchFence(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	release, err := m.acquireProjectOwnership(context.Background(), st.sessions[id].ProjectID)
+	if err != nil {
+		t.Fatalf("pre-acquire: %v", err)
+	}
+	defer release()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+			SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+		})
+		done <- err
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("orchestrator switch completed while the project gate was held")
+	case <-time.After(150 * time.Millisecond):
+	}
+	if !m.beginSwitch(id) {
+		t.Fatal("switch fence held while waiting for project ownership: lock order is inverted")
+	}
+	m.endSwitch(id)
+}
+
 // TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence pins that
 // the gate is taken at all. Ordering is covered separately above.
 func TestFreshOrchestratorConversation_TakesProjectGateBeforeSwitchFence(t *testing.T) {
@@ -169,18 +223,145 @@ func TestSwitchWorker_RejectsOrchestrator(t *testing.T) {
 	}
 }
 
-// TestSwitchOrchestrator_RejectsCrossHarness: 2B-3, blocked on Claude RO. A
-// strict orchestrator must be workspaceWrites:false and only Codex enforces
-// that, so allowing cross-harness for non-strict projects would ship a
-// capability strict projects can never have.
-func TestSwitchOrchestrator_RejectsCrossHarness(t *testing.T) {
-	m, _, id := orchestratorSwitchHarness(t)
-	_, err := m.switchUnderOwnership(context.Background(), SwitchRequest{
-		SessionID:     id,
-		TargetHarness: domain.HarnessClaudeCode,
-	}, true)
-	if !errors.Is(err, ErrOrchestratorCrossHarness) {
-		t.Fatalf("err = %v, want ErrOrchestratorCrossHarness", err)
+func TestSwitchOrchestrator_CodexClaudeInPlacePreservesIdentityAndRotatesCredential(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		from domain.AgentHarness
+		to   domain.AgentHarness
+	}{
+		{name: "codex to claude", from: domain.HarnessCodex, to: domain.HarnessClaudeCode},
+		{name: "claude to codex", from: domain.HarnessClaudeCode, to: domain.HarnessCodex},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, st, id := orchestratorSwitchHarness(t)
+			st.sessions["mer-worker"] = domain.SessionRecord{
+				ID: "mer-worker", ProjectID: "mer", Kind: domain.KindWorker,
+				Harness:  domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityActive},
+				Metadata: domain.SessionMetadata{Role: domain.SessionRoleBinding{RoleID: "implementor"}},
+			}
+			rec := st.sessions[id]
+			rec.Harness = tc.from
+			rec.Metadata.Role.ResolvedHarness = tc.from
+			st.sessions[id] = rec
+			before := rec
+
+			res, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+				SessionID: id, TargetHarness: tc.to,
+			})
+			if err != nil {
+				t.Fatalf("switch orchestrator: %v", err)
+			}
+			after := st.sessions[id]
+			if res.Kind != domain.LifecycleKindSwitch {
+				t.Fatalf("kind = %q, want existing switch ledger kind", res.Kind)
+			}
+			if after.ID != before.ID || after.ProjectID != before.ProjectID || after.Kind != before.Kind {
+				t.Fatalf("durable identity drifted: before=%+v after=%+v", before, after)
+			}
+			if after.Metadata.WorkspacePath != before.Metadata.WorkspacePath || after.Metadata.Branch != before.Metadata.Branch {
+				t.Fatalf("canonical workspace drifted: before=%+v after=%+v", before.Metadata, after.Metadata)
+			}
+			if after.Metadata.Role.RoleID != before.Metadata.Role.RoleID ||
+				after.Metadata.Role.TemplateArtifactID != before.Metadata.Role.TemplateArtifactID ||
+				after.Metadata.Role.TemplateSHA256 != before.Metadata.Role.TemplateSHA256 ||
+				after.Metadata.Role.ResolvedPermissions != before.Metadata.Role.ResolvedPermissions {
+				t.Fatalf("role/template/permissions drifted: before=%+v after=%+v", before.Metadata.Role, after.Metadata.Role)
+			}
+			if !after.Metadata.Role.ResolvedPermissions.CanSpawn {
+				t.Fatal("CanSpawn was not preserved")
+			}
+			if after.Harness != tc.to || after.Metadata.Role.ResolvedHarness != tc.to {
+				t.Fatalf("target not promoted: session=%q role=%q", after.Harness, after.Metadata.Role.ResolvedHarness)
+			}
+			if before.Metadata.Role.ResolvedModel == "" {
+				t.Fatal("fixture must carry a non-empty source model to prove cross-provider clearing")
+			}
+			if after.Metadata.Role.ResolvedModel != "" {
+				t.Fatalf("source model leaked across harnesses: %q", after.Metadata.Role.ResolvedModel)
+			}
+			if after.Metadata.SpawnCapabilityHash == "" || after.Metadata.SpawnCapabilityHash == before.Metadata.SpawnCapabilityHash {
+				t.Fatalf("spawn credential did not rotate: before=%q after=%q",
+					before.Metadata.SpawnCapabilityHash, after.Metadata.SpawnCapabilityHash)
+			}
+			wantPhases := []domain.LifecycleLedgerPhase{
+				domain.LifecyclePhaseRequested,
+				domain.LifecyclePhasePreStop,
+				domain.LifecyclePhasePostStop,
+				domain.LifecyclePhaseTargetAck,
+			}
+			if len(st.ledger) != len(wantPhases) {
+				t.Fatalf("ledger = %+v, want exactly four switch phases", st.ledger)
+			}
+			for i, want := range wantPhases {
+				if st.ledger[i].Kind != domain.LifecycleKindSwitch || st.ledger[i].Phase != want ||
+					st.ledger[i].GenerationID != res.GenerationID {
+					t.Fatalf("ledger[%d] = %+v, want switch/%s generation %s", i, st.ledger[i], want, res.GenerationID)
+				}
+			}
+			runtime := m.runtime.(*fakeRuntime)
+			if runtime.created != 1 || runtime.destroyed != 1 {
+				t.Fatalf("runtime create/destroy = %d/%d, want one target and one source", runtime.created, runtime.destroyed)
+			}
+			agent := m.agents.(singleAgent).agent.(*recordingAgent)
+			combinedPrompt := agent.lastLaunch.SystemPrompt + "\n" + agent.lastLaunch.Prompt
+			if !strings.Contains(agent.lastLaunch.SystemPrompt, "Harness: "+string(tc.to)+".") {
+				t.Fatalf("authoritative role footer does not name target %q:\n%s", tc.to, agent.lastLaunch.SystemPrompt)
+			}
+			if strings.Count(combinedPrompt, "## Host-compiled handoff") != 1 ||
+				strings.Count(combinedPrompt, "### Observed fleet") != 1 ||
+				strings.Count(combinedPrompt, "mer-worker") != 1 {
+				t.Fatalf("orchestrator roster/handoff was omitted or stacked:\n%s", combinedPrompt)
+			}
+		})
+	}
+}
+
+func TestSwitchOrchestrator_RejectsUnauthorizedExactModelBeforeEffects(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode, TargetModel: "not-authorized",
+	})
+	if !errors.Is(err, domain.ErrSwitchTargetUnauthorized) {
+		t.Fatalf("err = %v, want domain.ErrSwitchTargetUnauthorized", err)
+	}
+	if len(st.ledger) != 0 || m.runtime.(*fakeRuntime).destroyed != 0 {
+		t.Fatalf("unauthorized target reached effects: ledger=%+v runtime=%+v", st.ledger, m.runtime)
+	}
+}
+
+func TestSwitchOrchestrator_RejectsRolelessOrchestratorBeforeEffects(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	rec.Metadata.Role = domain.SessionRoleBinding{}
+	st.sessions[id] = rec
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if !errors.Is(err, domain.ErrSwitchTargetUnauthorized) {
+		t.Fatalf("err = %v, want domain.ErrSwitchTargetUnauthorized", err)
+	}
+	if len(st.ledger) != 0 || m.runtime.(*fakeRuntime).destroyed != 0 {
+		t.Fatalf("roleless target reached effects: ledger=%+v runtime=%+v", st.ledger, m.runtime)
+	}
+}
+
+func TestSwitchOrchestrator_ExplicitReadOnlyRoleRejectsClaudeBeforeEffects(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedHarness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites = false
+	st.sessions[id] = rec
+
+	_, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+	})
+	if !errors.Is(err, ErrReadOnlyUnsupported) {
+		t.Fatalf("err = %v, want ErrReadOnlyUnsupported", err)
+	}
+	if len(st.ledger) != 0 || m.runtime.(*fakeRuntime).destroyed != 0 {
+		t.Fatalf("read-only target reached effects: ledger=%+v runtime=%+v", st.ledger, m.runtime)
 	}
 }
 
@@ -206,10 +387,10 @@ func TestSwitchWorker_RejectsOrchestratorEvenWhenTheGuardReadFails(t *testing.T)
 	}
 }
 
-// TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin: recovery
-// re-drives a DURABLE record, so it must re-apply the refusals the request path
-// applies. A pending pin is not authorization.
-func TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin(t *testing.T) {
+// Recovery re-drives a durable record, but the pending pin is not
+// authorization: removing the target from the role map while the daemon is
+// down must fail before probing or launching anything.
+func TestRecoverSwitch_ReauthorizesCrossHarnessOrchestratorPendingTarget(t *testing.T) {
 	m, st, id := orchestratorSwitchHarness(t)
 	rec := st.sessions[id]
 	rec.Metadata.SwitchPending = &domain.SwitchPending{
@@ -218,11 +399,72 @@ func TestRecoverSwitch_RefusesCrossHarnessOrchestratorFromPendingPin(t *testing.
 	}
 	rec.Metadata.RuntimeHandleID = ""
 	st.sessions[id] = rec
+	project := st.projects["mer"]
+	roleMap := project.Config.RoleMap
+	roleMap.Failover.Roles["orchestrator"] = nil
+	binding := roleMap.Roles["orchestrator"]
+	binding.Harness = domain.HarnessCodex
+	roleMap.Roles["orchestrator"] = binding
+	project.Config.RoleMap = roleMap
+	st.projects["mer"] = project
 
 	_, err := m.RecoverSwitchFromPostStop(context.Background(), id)
-	if !errors.Is(err, ErrOrchestratorCrossHarness) {
-		t.Fatalf("err = %v, want ErrOrchestratorCrossHarness: recovery would otherwise launch a "+
-			"different harness into the canonical orchestrator workspace at boot", err)
+	if !errors.Is(err, domain.ErrSwitchTargetUnauthorized) {
+		t.Fatalf("err = %v, want target authorization failure", err)
+	}
+	if m.runtime.(*fakeRuntime).created != 0 {
+		t.Fatal("unauthorized recovery launched a target")
+	}
+}
+
+func TestRecoverSwitch_CrossHarnessOrchestratorUsesSameGenerationAndOneOwner(t *testing.T) {
+	m, st, id := orchestratorSwitchHarness(t)
+	rec := st.sessions[id]
+	const compiled = "## Host-compiled handoff\n\n### Observed fleet (host; authoritative over any recollection of workers)\n- mer-worker"
+	const payload = `{"semantic":{"schemaVersion":1},"observed":{"schemaVersion":1,"generationId":"src-gen"},"compiled":"## Host-compiled handoff\n\n### Observed fleet (host; authoritative over any recollection of workers)\n- mer-worker"}`
+	rec.Metadata.SwitchPending = &domain.SwitchPending{
+		GenerationID: "gen-recover", Kind: domain.LifecycleKindSwitch,
+		FromHarness: domain.HarnessCodex, ToHarness: domain.HarnessClaudeCode,
+		RoleID: "orchestrator", SourceRuntimeHandleID: "rt-1",
+		PayloadJSON: payload,
+	}
+	rec.Metadata.Prompt = composeSwitchPrompt("coordinate", compiled)
+	rec.Metadata.RuntimeHandleID = ""
+	rec.Metadata.RuntimeLaunchID = ""
+	st.sessions[id] = rec
+
+	res, err := m.RecoverSwitchFromPostStop(context.Background(), id)
+	if err != nil {
+		t.Fatalf("recover orchestrator switch: %v", err)
+	}
+	if res.GenerationID != "gen-recover" || res.Session.Metadata.RuntimeLaunchID != "gen-recover" {
+		t.Fatalf("generation changed during recovery: result=%q runtime=%q",
+			res.GenerationID, res.Session.Metadata.RuntimeLaunchID)
+	}
+	if res.Session.Harness != domain.HarnessClaudeCode || res.Session.Metadata.SwitchPending != nil {
+		t.Fatalf("target not promoted after recovery: %+v", res.Session)
+	}
+	if m.runtime.(*fakeRuntime).created != 1 {
+		t.Fatalf("target runtime creates = %d, want exactly one", m.runtime.(*fakeRuntime).created)
+	}
+	agent := m.agents.(singleAgent).agent.(*recordingAgent)
+	combinedPrompt := agent.lastLaunch.SystemPrompt + "\n" + agent.lastLaunch.Prompt
+	if !strings.Contains(agent.lastLaunch.SystemPrompt, "Harness: claude-code.") {
+		t.Fatalf("recovered target footer does not name Claude:\n%s", agent.lastLaunch.SystemPrompt)
+	}
+	if strings.Count(combinedPrompt, "## Host-compiled handoff") != 1 ||
+		strings.Count(combinedPrompt, "### Observed fleet") != 1 ||
+		strings.Count(combinedPrompt, "mer-worker") != 1 {
+		t.Fatalf("recovery omitted or stacked the durable orchestrator handoff:\n%s", combinedPrompt)
+	}
+	activeOwners := 0
+	for _, got := range st.sessions {
+		if got.ProjectID == "mer" && got.Kind == domain.KindOrchestrator && !got.IsTerminated {
+			activeOwners++
+		}
+	}
+	if activeOwners != 1 {
+		t.Fatalf("active orchestrators = %d, want exactly one", activeOwners)
 	}
 }
 

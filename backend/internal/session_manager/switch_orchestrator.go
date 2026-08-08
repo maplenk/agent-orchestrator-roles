@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
@@ -102,36 +103,94 @@ const maxObservedTerminatedWorkers = 25
 // session midway through its own saga — the source stopped, a successor
 // spawned, and then the saga relaunching a target into a workspace it no longer
 // owns.
-//
-// Cross-harness is deliberately refused here. Under strict delegation an
-// orchestrator must be workspaceWrites:false, which requires
-// read_only_enforced, which only Codex advertises — so the only legal strict
-// in-place operation is codex -> codex, which is a fresh conversation and not a
-// switch. Rather than let a non-strict project take a path the strict one
-// cannot, cross-harness orchestrator switch is its own slice (2B-3) gated on
-// Claude RO.
 func (m *Manager) FreshOrchestratorConversation(ctx context.Context, sessionID domain.SessionID, semantic domain.SemanticHandoffV1) (SwitchResult, error) {
-	rec, ok, err := m.store.GetSession(ctx, sessionID)
-	if err != nil {
-		return SwitchResult{}, fmt.Errorf("orchestrator fresh %s: %w", sessionID, err)
-	}
-	if !ok {
-		return SwitchResult{}, fmt.Errorf("orchestrator fresh %s: %w", sessionID, ErrNotFound)
-	}
-	if rec.Kind != domain.KindOrchestrator {
-		return SwitchResult{}, fmt.Errorf("orchestrator fresh %s: %w", sessionID, ErrNotOrchestrator)
-	}
-
-	// Gate FIRST, then the saga's own fence inside SwitchWorker.
-	release, err := m.acquireProjectOwnership(ctx, rec.ProjectID)
-	if err != nil {
-		return SwitchResult{}, fmt.Errorf("orchestrator fresh %s: %w", sessionID, err)
-	}
-	defer release()
-
-	return m.switchUnderOwnership(ctx, SwitchRequest{
+	return m.orchestratorSwitch(ctx, SwitchRequest{
 		SessionID:         sessionID,
 		Semantic:          semantic,
 		FreshConversation: true,
-	}, true)
+	})
+}
+
+// SwitchOrchestrator moves a project's orchestrator to an exact target from
+// its host-owned role map. The project ownership gate is acquired before the
+// per-session switch fence inside switchUnderOwnership; this lock order is the
+// ownership boundary for the canonical orchestrator workspace.
+func (m *Manager) SwitchOrchestrator(ctx context.Context, req SwitchRequest) (SwitchResult, error) {
+	if req.FreshConversation {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: fresh conversation must use FreshOrchestratorConversation", req.SessionID)
+	}
+	return m.orchestratorSwitch(ctx, req)
+}
+
+func (m *Manager) orchestratorSwitch(ctx context.Context, req SwitchRequest) (SwitchResult, error) {
+	sessionID := req.SessionID
+	rec, ok, err := m.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, err)
+	}
+	if !ok {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, ErrNotFound)
+	}
+	if rec.Kind != domain.KindOrchestrator {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, ErrNotOrchestrator)
+	}
+
+	// Gate FIRST, then the saga's own fence inside switchUnderOwnership.
+	release, err := m.acquireProjectOwnership(ctx, rec.ProjectID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, err)
+	}
+	defer release()
+
+	// The pre-gate read exists only to find the ownership key. Reload both the
+	// session and project under the gate before target authorization; otherwise
+	// a role-map update can invalidate an authorization while this operation is
+	// waiting for ownership.
+	rec, ok, err = m.store.GetSession(ctx, sessionID)
+	if err != nil {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: reload under ownership: %w", sessionID, err)
+	}
+	if !ok {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, ErrNotFound)
+	}
+	if rec.Kind != domain.KindOrchestrator {
+		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, ErrNotOrchestrator)
+	}
+	if !req.FreshConversation {
+		model, authErr := m.authorizeOrchestratorSwitchTarget(ctx, rec, req.TargetHarness, req.TargetModel)
+		if authErr != nil {
+			return SwitchResult{}, fmt.Errorf("orchestrator switch %s: authorize target: %w", sessionID, authErr)
+		}
+		req.TargetModel = model
+	}
+
+	return m.switchUnderOwnership(ctx, req, true)
+}
+
+// authorizeOrchestratorSwitchTarget resolves the same primary+ladder target set
+// used by the service. Empty model retains the shared resolver's meaning:
+// provider default for a unique default target, or the one fixed model when
+// that harness has a unique configured entry.
+func (m *Manager) authorizeOrchestratorSwitchTarget(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	targetHarness domain.AgentHarness,
+	requestedModel string,
+) (string, error) {
+	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
+	if roleID == "" {
+		return "", fmt.Errorf("role pin required: %w", domain.ErrSwitchTargetUnauthorized)
+	}
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return "", err
+	}
+	roleMap := project.Config.RoleMap.WithDefaults()
+	if roleMap.IsZero() {
+		return "", fmt.Errorf("project has no role map: %w", domain.ErrSwitchTargetUnauthorized)
+	}
+	if _, ok := roleMap.Roles[roleID]; !ok {
+		return "", fmt.Errorf("role %q is absent from role map: %w", roleID, domain.ErrSwitchTargetUnauthorized)
+	}
+	return domain.ResolveAuthorizedSwitchModel(roleMap, roleID, targetHarness, requestedModel)
 }

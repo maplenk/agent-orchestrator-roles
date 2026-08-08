@@ -233,8 +233,9 @@ func failoverEligible(rec domain.SessionRecord) error {
 		return ErrTerminated
 	}
 	if rec.Kind != domain.KindWorker {
-		// Orchestrators do not failover in this MVP: a cross-harness
-		// orchestrator switch is blocked on Claude read-only.
+		// Worker Continue remains its own operator-paused ladder. Orchestrators
+		// switch through the gated orchestrator switch surface, not this incident
+		// state machine.
 		return ErrNotWorker
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
