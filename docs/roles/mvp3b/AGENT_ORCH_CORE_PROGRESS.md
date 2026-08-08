@@ -75,3 +75,26 @@
 4. Run all 12 worker acceptance records plus both orchestrator switch
    directions from scratch on that exact combined SHA. Phase 2B-3 is
    implemented; live acceptance remains pending.
+
+## 2026-08-08 — permission-presence follow-up
+
+- Review found that Go's plain `bool` JSON decoding made an omitted or null
+  `permissions.workspaceWrites` / `permissions.canSpawn` indistinguishable
+  from explicit false, despite both fields being required by OpenAPI.
+- Added presence-aware role-binding decoding at both config JSON ingress
+  representations: the daemon/domain wire used by raw HTTP and the CLI's
+  `--config-json` mirror. Missing/null values now fail during decoding, before
+  domain capability validation or any project-config request from the CLI.
+- Kept `RoleExecutionPolicy` as plain booleans and left its JSON field names,
+  marshaling, hashing, OpenAPI schema, generated API and durable representation
+  unchanged.
+- Wiring tests cover missing, null, explicit true and explicit false through
+  the real HTTP project-config route and CLI command.
+- Affected domain, roles, project service, SQLite storage, CLI, and HTTP/API
+  drift packages pass.
+- Compatibility: previously accepted raw/CLI documents that omitted or set
+  either required permission boolean to null are now rejected. Configs already
+  persisted by AO are compatible because AO marshaling always emitted both
+  non-omitempty booleans; only malformed or hand-authored stored role bindings
+  with missing/null permission fields (or unknown role-binding keys already
+  refused by strict HTTP config decoding) will now fail closed when decoded.

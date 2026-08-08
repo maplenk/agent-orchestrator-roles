@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -48,6 +49,51 @@ type RoleBinding struct {
 	Permissions RoleExecutionPolicy `json:"permissions"`
 	// When lists keyword hints for orchestrator role selection (non-authoritative).
 	When []string `json:"when,omitempty"`
+}
+
+// UnmarshalJSON keeps the durable execution policy as plain booleans while
+// requiring config authors to choose both values explicitly. encoding/json
+// otherwise maps a missing or null boolean to false, which would silently turn
+// an omitted workspaceWrites field into a technical read-only request.
+func (b *RoleBinding) UnmarshalJSON(data []byte) error {
+	type policyWire struct {
+		WorkspaceWrites *bool `json:"workspaceWrites"`
+		CanSpawn        *bool `json:"canSpawn"`
+	}
+	type bindingWire struct {
+		Template    string       `json:"template"`
+		Harness     AgentHarness `json:"harness"`
+		Model       string       `json:"model,omitempty"`
+		Permissions *policyWire  `json:"permissions"`
+		When        []string     `json:"when,omitempty"`
+	}
+
+	var wire bindingWire
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&wire); err != nil {
+		return err
+	}
+	if wire.Permissions == nil {
+		return fmt.Errorf("permissions: required")
+	}
+	if wire.Permissions.WorkspaceWrites == nil {
+		return fmt.Errorf("permissions.workspaceWrites: required boolean")
+	}
+	if wire.Permissions.CanSpawn == nil {
+		return fmt.Errorf("permissions.canSpawn: required boolean")
+	}
+	*b = RoleBinding{
+		Template: wire.Template,
+		Harness:  wire.Harness,
+		Model:    wire.Model,
+		Permissions: RoleExecutionPolicy{
+			WorkspaceWrites: *wire.Permissions.WorkspaceWrites,
+			CanSpawn:        *wire.Permissions.CanSpawn,
+		},
+		When: wire.When,
+	}
+	return nil
 }
 
 // FailoverTarget is one concrete execution alternative for a semantic role.

@@ -420,6 +420,43 @@ func TestProjectsAPI_RejectsUnknownConfigKeys(t *testing.T) {
 	}
 }
 
+func TestProjectsAPI_RequiresExplicitRolePermissionBooleans(t *testing.T) {
+	srv := newTestServer(t)
+	repo := gitRepo(t, "role-permission-presence")
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/projects", `{"path":`+quote(repo)+`,"projectId":"permission-presence"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("seed create = %d, want 201; body=%s", status, body)
+	}
+
+	for _, tc := range []struct {
+		name        string
+		harness     string
+		permissions string
+		valid       bool
+	}{
+		{name: "missing workspaceWrites", harness: "claude-code", permissions: `{"canSpawn":true}`},
+		{name: "null workspaceWrites", harness: "claude-code", permissions: `{"workspaceWrites":null,"canSpawn":true}`},
+		{name: "missing canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true}`},
+		{name: "null canSpawn", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":null}`},
+		{name: "explicit true", harness: "claude-code", permissions: `{"workspaceWrites":true,"canSpawn":true}`, valid: true},
+		{name: "explicit false", harness: "codex", permissions: `{"workspaceWrites":false,"canSpawn":true}`, valid: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request := `{"config":{"roleMap":{"role_map_schema_version":1,"strictDelegation":true,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"` + tc.harness + `","permissions":` + tc.permissions + `}}}}}`
+			body, status, _ := doRequest(t, srv, "PUT", "/api/v1/projects/permission-presence/config", request)
+			if tc.valid {
+				if status != http.StatusOK {
+					t.Fatalf("status = %d, want 200; body=%s", status, body)
+				}
+				return
+			}
+			// INVALID_JSON, rather than INVALID_PROJECT_CONFIG, proves the
+			// presence check runs while decoding and before domain validation.
+			assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
+		})
+	}
+}
+
 func TestProjectsRoutes_LegacyUnregistered(t *testing.T) {
 
 	srv := newTestServer(t)
