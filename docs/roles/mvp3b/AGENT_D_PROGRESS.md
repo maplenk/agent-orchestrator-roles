@@ -1,13 +1,20 @@
 # Agent D — the Restart-assignment defect
 
-## State: not started
+## State: DONE — verified by the orchestrator and committed
 
 ## Next action
-Read `docs/roles/PHASE3A_PAUSE_CONTRACT.md` §1, then
-`Manager.ResumeAgentWithMode` and `RestoreWithMode` in
-`backend/internal/session_manager/manager.go`, and find where
-`RestoreModeSavedPrompt` is reported relative to where the prompt is actually
-delivered.
+None. Integrated in wave-2 position 2. If reopened, the seam to watch is the
+post-`MarkSpawned` fence against Agent A's `ForceGenerationID` change to
+`switch.go` — they do not overlap today (A touches `switch.go` and new files;
+D touches `manager.go`'s relaunch region), but both reason about generation
+identity around launch.
+
+## Orchestrator verification (2026-08-08)
+`go test ./internal/session_manager/ -run 'Restore|Resume|Restart'` → **102
+passed**. The `go build ./...` failure Agent D reported was Agent B's in-flight
+`ctx.continueSession` in the shared checkout, not a defect in this slice; it is
+resolved and the tree builds. D reported it rather than editing the CLI, which
+was the correct call under the ownership rule.
 
 ## Brief
 
@@ -67,20 +74,37 @@ Then the full package once, accepting that Agent A's in-flight `failover*.go`
 files may break the build — if they do, report it rather than fixing their code.
 
 ## Done
-_(nothing yet)_
+- [x] Read the durable Agent D brief and confirmed the strict file ownership.
+- [x] Read the pause contract: pause and runtime liveness are independent facts; Restart must remain a separate explicit act from Resume.
+- [x] Read `AGENTS.md`; preserve durable/observed facts, and never infer death from failed or unknown runtime probes.
+- [x] Read `RestoreWithMode`, `ResumeAgentWithMode`, `relaunchSession`, prompt readiness/delivery, and `freshLaunchArgv`.
+- [x] Located the premature report: `freshLaunchArgv` sets `RestoreModeSavedPrompt` when a saved prompt merely exists, before after-start delivery runs.
+- [x] Finalized the manager-only fence: fresh argv construction returns a provisional `fresh` mode; relaunch promotes it to `saved_prompt` only after the selected delivery path succeeds. Command-delivered fallback additionally rechecks a generation-scoped supervised workload after `MarkSpawned`; only a confirmed dead result fails the launch, while unsupported/failed probes are not death conclusions.
+- [x] Implemented outcome-based mode promotion and actionable delivery-failure errors in the owned relaunch path.
+- [x] Implemented the post-`MarkSpawned` command-delivery fence and shared two-sample supervised-workload probe; after-start delivery remains fail-closed on an unknown probe, while command delivery logs and preserves unknown as unknown.
+- [x] Added `restart_contract_test.go` with the six required restart-contract tests, including a failed-probe subcase proving unknown liveness is not death.
+- [x] Ran the new restart-contract tests: all pass.
+- [x] Ran `go test ./internal/session_manager/ -run 'Restore|Resume|Restart'`: pass, including the existing Codex/OpenCode/Claude Code fallback family.
+- [x] Ran `go build ./...`: blocked by another agent's in-flight forbidden-layer change in `internal/cli/session.go:252` (`ctx.continueSession undefined`). Per ownership, did not edit CLI code.
+- [x] Ran the full `go test ./internal/session_manager/` package once: pass.
 
 ## Remaining
-- [ ] Read pause contract §1 + ResumeAgentWithMode + RestoreWithMode
-- [ ] Locate the premature `saved_prompt` report
-- [ ] Make mode describe the outcome
-- [ ] Exactly-once assignment restore
-- [ ] Launch-window observation fence
-- [ ] Honest delivery-failure error
-- [ ] Six tests above
-- [ ] Restore/Resume package tests green
+- [x] Read pause contract §1 + ResumeAgentWithMode + RestoreWithMode
+- [x] Locate the premature `saved_prompt` report
+- [x] Make mode describe the outcome
+- [x] Exactly-once assignment restore
+- [x] Launch-window observation fence
+- [x] Honest delivery-failure error
+- [x] Six tests above
+- [x] Restore/Resume package tests green
 
 ## Decisions / gotchas
-_(record anything a cold reader would need)_
+- Code graph access was attempted first as required, but both codebase-memory and context MCP reads were denied by the current permission mode; continue with scoped `Grep`/`Read` only.
+- `RestoreModeSavedPrompt` is currently an attempted-mode from `freshLaunchArgv`; for after-start adapters it must remain non-success until `deliverAfterStartPrompt` returns nil. In-command delivery is part of the launched argv and may be reported only after launch adoption plus the supervised startup fence.
+- The fence belongs after `MarkSpawned`: that lets it repair the exact race where an earlier launch-death observation was overwritten by the idle seed. A dead result parks the failed relaunch; an unsupported or failed probe is not converted into proof of death.
 
 ## Verification run so far
-_(none)_
+- `go test ./internal/session_manager/ -run '^TestRestartContract_'` — pass
+- `go test ./internal/session_manager/ -run 'Restore|Resume|Restart'` — pass
+- `go build ./...` — blocked outside Agent D ownership: `internal/cli/session.go:252:15: ctx.continueSession undefined`
+- `go test ./internal/session_manager/` — pass

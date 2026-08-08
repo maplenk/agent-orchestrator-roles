@@ -2173,6 +2173,9 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
 	}
+	// A fresh fallback with a saved prompt is still only an attempt. Its public
+	// mode is promoted after the selected delivery strategy succeeds below.
+	replaysSavedPrompt := mode == RestoreModeFresh && rec.Metadata.Prompt != ""
 	if err := m.validateAgentBinary(argv); err != nil {
 		m.cleanupSystemPromptDir(rec.ID)
 		return RestoreResult{}, fmt.Errorf("%s %s: %w", operation, rec.ID, err)
@@ -2220,7 +2223,26 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 		// AO cannot describe.
 		return RestoreResult{}, fmt.Errorf("%s %s: completed: %w", operation, rec.ID, errors.Join(err, cleanupErr))
 	}
-	if delivery == ports.PromptDeliveryAfterStart && rec.Metadata.Prompt != "" {
+	if replaysSavedPrompt && delivery != ports.PromptDeliveryAfterStart {
+		// In-command/custom delivery is owned by the launched process. Fence the
+		// adoption with a generation-scoped supervisor probe so a process that died
+		// during launch cannot be reported idle with a successfully replayed task.
+		// A failed/unsupported probe is not proof of death and preserves the prior
+		// behavior; only a confirmed dead workload fails the relaunch.
+		if err := m.confirmCommandDeliveredAssignment(ctx, handle, rec.ID, launchID); err != nil {
+			cleanupErr := m.parkFailedRelaunch(ctx, operation, rec.ID, handle, launchID, false)
+			return RestoreResult{}, relaunchAssignmentFailure(
+				operation,
+				rec.ID,
+				"the original assignment was included in the launch command, but the agent exited during startup before AO could confirm it accepted the task",
+				"Resolve why the agent exits during startup before restarting; an unchanged retry will end before the task can be confirmed",
+				err,
+				cleanupErr,
+			)
+		}
+		mode = RestoreModeSavedPrompt
+	}
+	if replaysSavedPrompt && delivery == ports.PromptDeliveryAfterStart {
 		launchCfg := ports.LaunchConfig{
 			DataDir:          m.dataDir,
 			SessionID:        string(rec.ID),
@@ -2237,14 +2259,31 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 			// the row already names the runtime and there is no post-stop state to
 			// preserve. Matches what this branch has always done.
 			cleanupErr := m.parkFailedRelaunch(ctx, operation, rec.ID, handle, launchID, false)
-			return RestoreResult{}, fmt.Errorf("%s %s: deliver prompt: %w", operation, rec.ID, errors.Join(err, cleanupErr))
+			return RestoreResult{}, relaunchAssignmentFailure(
+				operation,
+				rec.ID,
+				"AO could not confirm that the original assignment was delivered, so the task must be treated as unsent",
+				"Resolve the reported prompt-readiness or pane-delivery failure before restarting; an unchanged retry will fail before the task is sent",
+				err,
+				cleanupErr,
+			)
 		}
+		mode = RestoreModeSavedPrompt
 	}
 	updated, err := m.getRecord(ctx, rec.ID)
 	if err != nil {
 		return RestoreResult{}, err
 	}
 	return RestoreResult{Session: updated, Mode: mode}, nil
+}
+
+func relaunchAssignmentFailure(operation string, id domain.SessionID, taskOutcome, retryAction string, cause, cleanupErr error) error {
+	sessionOutcome := "the relaunched process was stopped and the session was parked as terminated for a later restore"
+	if cleanupErr != nil {
+		sessionOutcome = "AO attempted to stop the relaunched process and park the session, but cleanup was not fully confirmed; the joined cleanup error describes the remaining runtime or session state"
+	}
+	return fmt.Errorf("%s %s: %s; %s. %s: %w",
+		operation, id, taskOutcome, sessionOutcome, retryAction, errors.Join(cause, cleanupErr))
 }
 
 // relaunchSessionFresh bypasses native resume on both sides, so an empty
@@ -4554,26 +4593,67 @@ const promptDeliveryWorkloadRecheck = 250 * time.Millisecond
 // account for is the unrecoverable direction, and a refused delivery is the
 // recoverable one (same posture as sessionguard's fail-closed read).
 func (m *Manager) confirmWorkloadBeforePaste(ctx context.Context, id domain.SessionID, handle ports.RuntimeHandle, launchID string) error {
+	result, supported, err := m.probeSupervisedWorkload(ctx, id, handle, launchID)
+	switch {
+	case !supported:
+		return nil
+	case err != nil:
+		return fmt.Errorf("deliver %s: agent liveness unresolved before prompt delivery: %w", id, err)
+	case result == ports.ProbeDead:
+		return fmt.Errorf("deliver %s: %w during startup, before the task was delivered", id, ErrAgentExited)
+	default:
+		return nil
+	}
+}
+
+// confirmCommandDeliveredAssignment closes the launch-adoption window for a
+// saved prompt that the adapter embedded in argv. MarkSpawned necessarily seeds
+// ActivityIdle, so this runs immediately afterward and converts a confirmed
+// generation-scoped startup death into a failed relaunch instead of returning a
+// misleading saved_prompt success.
+//
+// Unlike after-start paste, a failed probe is not a reason to stop: the task is
+// already part of the command, and an unknown probe is never proof of death.
+func (m *Manager) confirmCommandDeliveredAssignment(ctx context.Context, handle ports.RuntimeHandle, id domain.SessionID, launchID string) error {
+	result, supported, err := m.probeSupervisedWorkload(ctx, id, handle, launchID)
+	if !supported {
+		return nil
+	}
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		m.logger.Warn("relaunch assignment liveness probe failed; not treating it as death",
+			"sessionID", id, "launchID", launchID, "error", err)
+		return nil
+	}
+	if result == ports.ProbeDead {
+		return fmt.Errorf("confirm command-delivered assignment for %s: %w during startup", id, ErrAgentExited)
+	}
+	return nil
+}
+
+func (m *Manager) probeSupervisedWorkload(ctx context.Context, id domain.SessionID, handle ports.RuntimeHandle, launchID string) (ports.ProbeResult, bool, error) {
 	inspector, ok := m.runtime.(ports.SupervisedProcessInspector)
 	if !ok || strings.TrimSpace(launchID) == "" || strings.TrimSpace(handle.ID) == "" {
-		return nil
+		return ports.ProbeFailed, false, nil
 	}
 	ref := ports.SupervisedProcessRef{SessionID: id, LaunchID: launchID}
 	alive, err := inspector.IsSupervisedProcessAlive(ctx, handle, ref)
 	if err == nil && alive {
-		return nil
+		return ports.ProbeAlive, true, nil
 	}
 	if err := sleepContext(ctx, promptDeliveryWorkloadRecheck); err != nil {
-		return err
+		return ports.ProbeFailed, true, err
 	}
 	alive, err = inspector.IsSupervisedProcessAlive(ctx, handle, ref)
 	switch {
 	case err != nil:
-		return fmt.Errorf("deliver %s: agent liveness unresolved before prompt delivery: %w", id, err)
+		return ports.ProbeFailed, true, err
 	case !alive:
-		return fmt.Errorf("deliver %s: %w during startup, before the task was delivered", id, ErrAgentExited)
+		return ports.ProbeDead, true, nil
 	default:
-		return nil
+		return ports.ProbeAlive, true, nil
 	}
 }
 
@@ -4837,11 +4917,10 @@ func freshLaunchArgv(ctx context.Context, agent ports.Agent, id domain.SessionID
 	if err != nil {
 		return nil, "", "", fmt.Errorf("launch command: %w", err)
 	}
-	mode := RestoreModeFresh
-	if meta.Prompt != "" {
-		mode = RestoreModeSavedPrompt
-	}
-	return argv, delivery, mode, nil
+	// Fresh is provisional here. A saved prompt merely being present describes
+	// the attempted fallback, not its outcome. relaunchSession promotes the
+	// result to saved_prompt only after the selected delivery path succeeds.
+	return argv, delivery, RestoreModeFresh, nil
 }
 
 // validateAgentBinary checks that argv[0] resolves via the manager's
