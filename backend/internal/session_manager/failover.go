@@ -1,0 +1,711 @@
+package sessionmanager
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+)
+
+// Phase 3B manual failover (PHASE3B_MVP_CONTRACT sections 6, 6a, 6b).
+//
+// Continue is the only one of the three pause controls that changes harness or
+// model, and it never changes role_id. It does not open a relaunch path of its
+// own: it drives the switch saga that already exists, pinning the generation it
+// minted so the durable attempt row and the runtime agree by identity rather
+// than by inference.
+//
+// The shape of this file is set by one rule from section 6a: terminal-vs-
+// recoverable is decided by whether the SOURCE WAS STOPPED, not by whether the
+// call returned an error. A failure after the source stops is finished by the
+// saga that already exists, so marking it terminal is what produced a `failed`
+// attempt later reaching target_ack, and a Continue that opened a second
+// runtime over an unrecovered switch.
+
+// failoverAttemptStore is the narrow durable surface Continue needs.
+//
+// Declared here and type-asserted from m.store rather than added to the Store
+// interface, which is the existing precedent (interface_transition.go does the
+// same with interfaceTransitionStore) and which avoids editing the 7000-line
+// fakeStore in manager_test.go that another agent is also working in.
+//
+// Unlike the interface-transition assertion, a missing implementation is NOT a
+// silent degrade: Continue returns ErrFailoverNotWired, because a continuation
+// that cannot record an attempt cannot be made idempotent, and an idempotence
+// check that silently always says "no prior attempt" is how one incident spends
+// every rung on the ladder.
+type failoverAttemptStore interface {
+	AppendSessionFailoverAttemptWithLedger(ctx context.Context, attempt domain.FailoverAttempt, ledger domain.LifecycleLedgerRecord) error
+	ListSessionFailoverAttemptsByIncident(ctx context.Context, sessionID domain.SessionID, incidentID string) ([]domain.FailoverAttempt, error)
+	ListSessionFailoverAttemptsBySession(ctx context.Context, sessionID domain.SessionID) ([]domain.FailoverAttempt, error)
+	UpdateSessionFailoverAttemptState(ctx context.Context, attemptID string, from, to domain.FailoverAttemptState, updatedAt time.Time) (bool, error)
+}
+
+func (m *Manager) failoverStore() (failoverAttemptStore, error) {
+	s, ok := m.store.(failoverAttemptStore)
+	if !ok {
+		return nil, ErrFailoverNotWired
+	}
+	return s, nil
+}
+
+// ContinueFailover moves a paused, role-pinned worker to the next authorized
+// failover rung and lifts the pause once the target acks.
+//
+// The order of operations is contract section 6 and is not negotiable. In
+// particular every refusal below happens BEFORE anything durable is written, so
+// a refused Continue leaves no ledger row, no attempt row and no runtime change
+// to explain later.
+func (m *Manager) ContinueFailover(
+	ctx context.Context,
+	id domain.SessionID,
+	req ContinueFailoverRequest,
+) (ContinueFailoverResult, error) {
+	incident := strings.TrimSpace(req.IncidentID)
+	if err := domain.ValidateIncidentID(incident); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: %w", id, ErrIncidentRequired, err)
+	}
+	store, err := m.failoverStore()
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+
+	// Lazy crash reconciliation, at an entry point this file owns. Boot's
+	// pausedSkip already excludes paused sessions from automatic post_stop
+	// recovery, so without this an attempt interrupted by a crash would still
+	// read as in-flight here. Exported as ReconcileFailoverAttempts so boot can
+	// call it too, without this file reaching into manager.go's reconcile
+	// region.
+	if err := m.ReconcileFailoverAttempts(ctx, id); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: reconcile: %w", id, err)
+	}
+
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read session: %w", id, err)
+	}
+	if !ok {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, ErrNotFound)
+	}
+	if err := failoverEligible(rec); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+
+	// The pin is checked against the CALLER's incident and is never re-read as
+	// authority: an action raised for incident A landing after B replaced it
+	// must fail, not continue B on evidence nobody looked at.
+	paused := rec.Metadata.Pause
+	if paused == nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, ErrNotPaused)
+	}
+	if paused.IncidentID != incident {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: holding incident is %s, not %s",
+			id, ErrIncidentMismatch, paused.IncidentID, incident)
+	}
+
+	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
+	if roleID == "" {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, domain.ErrFailoverRoleRequired)
+	}
+
+	attempts, err := store.ListSessionFailoverAttemptsByIncident(ctx, id, incident)
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read attempts: %w", id, err)
+	}
+
+	// Idempotence, BEFORE anything durable (contract section 6 rule 5). Keyed on
+	// Terminal() via ActiveFailoverAttempt, not on == requested: a post_stop is
+	// non-terminal, and failing to adopt one is how a duplicate Continue opens a
+	// second runtime over a source that is already stopped.
+	if active, ok := domain.ActiveFailoverAttempt(attempts); ok {
+		return m.adoptFailoverAttempt(ctx, store, rec, active)
+	}
+	// D5's convergence branch. `acked` is terminal, so the check above will not
+	// catch it, but a crash between the ack and the pin clear leaves exactly
+	// this: a still-paused session whose move already happened. Without it the
+	// retry would spend a SECOND rung to redo a completed continuation.
+	if latest, ok := domain.LatestFailoverAttempt(attempts); ok &&
+		latest.State == domain.FailoverAttemptAcked &&
+		latest.GenerationID != "" &&
+		latest.GenerationID == strings.TrimSpace(rec.Metadata.RuntimeLaunchID) {
+		return m.finishFailoverPinClear(ctx, rec, latest)
+	}
+
+	if domain.CountFailoverAttempts(attempts) >= domain.MaxFailoversPerIncident {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w (%d of %d)",
+			id, domain.ErrFailoverLimitReached, len(attempts), domain.MaxFailoversPerIncident)
+	}
+
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+	current := domain.FailoverTarget{
+		Harness: rec.Harness,
+		Model:   strings.TrimSpace(rec.Metadata.Role.ResolvedModel),
+	}
+	// `used` is every prior attempt for this incident in ANY state: a rung that
+	// failed is spent, not retried. Automatic retry is what this MVP refuses to
+	// build, and re-offering a rung that just failed is that feature wearing a
+	// manual button.
+	target, rungIndex, err := domain.NextFailoverRung(
+		project.Config.RoleMap, roleID, current, domain.UsedFailoverTargets(attempts))
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+
+	// Contract section 6b: the generation is minted HERE, before the durable
+	// write, and pinned into the saga. That is what lets the attempt row carry
+	// its generation from its very first write.
+	generation := m.newSwitchGeneration()
+	seq := domain.NextFailoverSeq(attempts)
+	now := m.clock()
+
+	attempt := domain.FailoverAttempt{
+		ID:           domain.FailoverAttemptID(id, incident, seq),
+		SessionID:    id,
+		ProjectID:    rec.ProjectID,
+		IncidentID:   incident,
+		Seq:          seq,
+		RoleID:       roleID,
+		FromHarness:  rec.Harness,
+		FromModel:    current.Model,
+		ToHarness:    target.Harness,
+		ToModel:      target.Model,
+		RungIndex:    rungIndex,
+		GenerationID: generation,
+		State:        domain.FailoverAttemptRequested,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	// ONE transaction for the ledger row and the attempt row (section 6 rule 1),
+	// both durable before the saga touches the runtime.
+	if err := store.AppendSessionFailoverAttemptWithLedger(ctx, attempt,
+		m.failoverLedgerRecord(attempt, domain.LifecyclePhaseRequested)); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+
+	m.logger.Info("failover continue requested",
+		"sessionID", id, "incident", incident, "seq", seq, "generation", generation,
+		"role", roleID, "from", string(rec.Harness), "to", string(target.Harness),
+		"toModel", target.Model, "rung", rungIndex)
+
+	// One relaunch path: the existing worker switch entry point.
+	res, switchErr := m.SwitchWorker(ctx, SwitchRequest{
+		SessionID:         id,
+		TargetHarness:     target.Harness,
+		TargetModel:       target.Model,
+		ForceGenerationID: generation,
+		Semantic: domain.SemanticHandoffV1{
+			SchemaVersion:    domain.SemanticHandoffSchemaVersion,
+			SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),
+			NativeSessionID:  rec.Metadata.AgentSessionID,
+		},
+	})
+	if switchErr != nil {
+		return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
+	}
+	return m.completeFailoverAttempt(ctx, store, rec, attempt, res, false)
+}
+
+// failoverEligible refuses the session kinds that cannot enter the saga at all.
+// Separate from the pause checks so the same order can be reused by the preview
+// without duplicating the reasoning.
+func failoverEligible(rec domain.SessionRecord) error {
+	if rec.IsTerminated {
+		return ErrTerminated
+	}
+	if rec.Kind != domain.KindWorker {
+		// Orchestrators do not failover in this MVP: a cross-harness
+		// orchestrator switch is blocked on Claude read-only.
+		return ErrNotWorker
+	}
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return ErrSwitchChatUnsupported
+	}
+	return nil
+}
+
+// adoptFailoverAttempt is contract section 6 rules 5 and 6: a duplicate
+// Continue returns the in-flight attempt rather than starting a new one, and an
+// incomplete post_stop belonging to that attempt is COMPLETED on the same
+// generation instead of being redone on a fresh rung.
+//
+// Neither branch advances the ladder. Both finish the same rung on the same
+// generation, which is exactly why neither is an automatic retry: only a
+// human's Continue ever selects a new rung.
+func (m *Manager) adoptFailoverAttempt(
+	ctx context.Context,
+	store failoverAttemptStore,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+) (ContinueFailoverResult, error) {
+	incompleteGen, hasIncomplete, err := m.incompleteSwitchGeneration(ctx, rec)
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read recovery state: %w", rec.ID, err)
+	}
+	if !hasIncomplete {
+		// A genuine duplicate: the saga is either running under beginSwitch
+		// right now or died before the point of no return. Nothing was
+		// destroyed, so the honest answer is the attempt already on record.
+		return failoverResult(rec, attempt, true), nil
+	}
+	if incompleteGen != attempt.GenerationID {
+		// Section 6b removed the guess that used to live here. The generation
+		// is an identity now, so a mismatch is a genuine ambiguity for a human
+		// rather than something to resolve by matching harness/model and ledger
+		// order — and a wrong resolution there is a second runtime.
+		return ContinueFailoverResult{}, fmt.Errorf(
+			"continue %s: %w: incomplete switch generation %s does not match attempt %s (generation %s)",
+			rec.ID, ErrFailoverRecoveryRequired, incompleteGen, attempt.ID, attempt.GenerationID)
+	}
+
+	res, err := m.RecoverSwitchFromPostStop(ctx, rec.ID)
+	if err != nil {
+		// Still recoverable, and still the same generation. The attempt stays
+		// non-terminal so the next Continue (or boot recovery) can finish it;
+		// writing `failed` here is precisely the section 6a defect.
+		if _, updErr := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
+			attempt.State, domain.FailoverAttemptPostStop, m.clock()); updErr != nil {
+			m.logger.Warn("failover: recording post_stop after failed recovery",
+				"sessionID", rec.ID, "attempt", attempt.ID, "error", updErr)
+		}
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: recover post_stop: %w", rec.ID, err)
+	}
+	return m.completeFailoverAttempt(ctx, store, rec, attempt, res, true)
+}
+
+// incompleteSwitchGeneration reports the generation of an unfinished switch, if
+// any, using the two durable sources the existing recovery machinery uses: the
+// pending pin, and the ledger fallback for when the pin is gone.
+func (m *Manager) incompleteSwitchGeneration(
+	ctx context.Context,
+	rec domain.SessionRecord,
+) (string, bool, error) {
+	if p := rec.Metadata.SwitchPending; p != nil && strings.TrimSpace(p.GenerationID) != "" {
+		return strings.TrimSpace(p.GenerationID), true, nil
+	}
+	events, err := m.store.ListLifecycleLedger(ctx, rec.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if post, ok := findRecoverablePostStop(events); ok {
+		return post.GenerationID, true, nil
+	}
+	return "", false, nil
+}
+
+// completeFailoverAttempt records a target_ack and lifts the pause.
+//
+// Order (D5): attempt -> acked, then the ledger target_ack row, then the pin
+// clear. The pin clear is LAST and is a compare-and-set on the same incident,
+// so a newer pause is never lifted by an older continuation, and a crash before
+// it leaves a paused session whose latest attempt is `acked` -- which the
+// convergence branch in ContinueFailover recognises and finishes rather than
+// redoing on a new rung.
+func (m *Manager) completeFailoverAttempt(
+	ctx context.Context,
+	store failoverAttemptStore,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+	res SwitchResult,
+	reused bool,
+) (ContinueFailoverResult, error) {
+	if _, err := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
+		attempt.State, domain.FailoverAttemptAcked, m.clock()); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: mark acked: %w", rec.ID, err)
+	}
+	acked := attempt
+	acked.State = domain.FailoverAttemptAcked
+
+	if err := m.appendFailoverLedger(ctx, acked, domain.LifecyclePhaseTargetAck); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", rec.ID, err)
+	}
+
+	out, err := m.finishFailoverPinClear(ctx, res.Session, acked)
+	if err != nil {
+		return ContinueFailoverResult{}, err
+	}
+	out.Reused = reused
+	m.logger.Info("failover continue acked",
+		"sessionID", rec.ID, "incident", acked.IncidentID, "seq", acked.Seq,
+		"generation", acked.GenerationID, "to", string(acked.ToHarness), "reused", reused)
+	return out, nil
+}
+
+// finishFailoverPinClear lifts the pause for this incident and returns the
+// completed result. Split out because it is also the whole of the convergence
+// branch: a retry after a crash between the ack and the clear does only this.
+func (m *Manager) finishFailoverPinClear(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+) (ContinueFailoverResult, error) {
+	cleared, err := m.store.ClearSessionPauseIfIncident(ctx, attempt.SessionID, attempt.IncidentID, m.clock())
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: clear pause: %w", attempt.SessionID, err)
+	}
+	if !cleared {
+		// The CAS names this incident, so a miss means the pin changed under us
+		// -- someone resumed it, or a newer incident now holds the session.
+		// Either way the move itself is done and recorded; re-read so the
+		// caller sees the truth rather than a stale snapshot.
+		current, ok, readErr := m.store.GetSession(ctx, attempt.SessionID)
+		if readErr != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: re-read after contended clear: %w",
+				attempt.SessionID, readErr)
+		}
+		if !ok {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", attempt.SessionID, ErrNotFound)
+		}
+		rec = current
+	} else {
+		rec.Metadata.Pause = nil
+	}
+	return failoverResult(rec, attempt, true), nil
+}
+
+// recordFailoverFailure classifies a saga failure as terminal or recoverable
+// and records it. This function is contract section 6a.
+//
+// The pause is untouched on every path: failure never lifts the pin.
+func (m *Manager) recordFailoverFailure(
+	ctx context.Context,
+	store failoverAttemptStore,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+	switchErr error,
+) (ContinueFailoverResult, error) {
+	state := m.failoverFailureState(ctx, rec.ID, attempt.GenerationID, switchErr)
+	if _, err := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
+		attempt.State, state, m.clock()); err != nil {
+		m.logger.Warn("failover: recording attempt failure",
+			"sessionID", rec.ID, "attempt", attempt.ID, "state", string(state), "error", err)
+	}
+	failed := attempt
+	failed.State = state
+
+	// A pre-stop failure is over, so it gets a ledger `failed` row. A post-stop
+	// failure does NOT: the saga is unfinished, not finished badly, and a
+	// `failed` row for a generation that is still going to be recovered is a
+	// false entry in an append-only audit trail. The switch saga's own post_stop
+	// row already records where it got to.
+	if state == domain.FailoverAttemptFailed {
+		if err := m.appendFailoverLedger(ctx, failed, domain.LifecyclePhaseFailed); err != nil {
+			m.logger.Warn("failover: recording failed ledger row",
+				"sessionID", rec.ID, "attempt", attempt.ID, "error", err)
+		}
+	}
+
+	m.logger.Info("failover continue failed",
+		"sessionID", rec.ID, "incident", attempt.IncidentID, "seq", attempt.Seq,
+		"generation", attempt.GenerationID, "state", string(state), "error", switchErr)
+	return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", rec.ID, switchErr)
+}
+
+// failoverFailureState decides terminal vs recoverable from what the saga
+// actually LEFT BEHIND, not from the shape of the error string.
+//
+// ErrSwitchPostStop is the explicit signal and is honoured first. But it is not
+// the only way to end up past the point of no return: the saga also returns a
+// plain "pre-stop" error when destroy could not confirm liveness, and in that
+// case it deliberately KEEPS the pending fence so recovery can probe and retry.
+// Reading that as terminal would mark `failed` an attempt whose generation can
+// still reach target_ack -- the exact defect section 6a exists to remove. So the
+// question asked here is the durable one: is there still a recoverable fence for
+// this generation? If yes the attempt is post_stop; only when nothing was left
+// behind is it safe to call the source confirmed-alive and the attempt failed.
+func (m *Manager) failoverFailureState(
+	ctx context.Context,
+	id domain.SessionID,
+	generation string,
+	switchErr error,
+) domain.FailoverAttemptState {
+	if errors.Is(switchErr, ErrSwitchPostStop) {
+		return domain.FailoverAttemptPostStop
+	}
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil || !ok {
+		// Cannot prove the source survived. Recoverable is the safe answer: a
+		// post_stop attempt can still be completed or re-examined, whereas a
+		// wrongly-terminal one silently spends a rung and invites a second
+		// runtime on the next Continue.
+		return domain.FailoverAttemptPostStop
+	}
+	gen, hasIncomplete, err := m.incompleteSwitchGeneration(ctx, rec)
+	if err != nil {
+		return domain.FailoverAttemptPostStop
+	}
+	if hasIncomplete && gen == generation {
+		return domain.FailoverAttemptPostStop
+	}
+	return domain.FailoverAttemptFailed
+}
+
+// ReconcileFailoverAttempts settles attempts a crash left mid-flight, using the
+// lifecycle ledger as the authority.
+//
+// Exported deliberately: boot can call it per session at integration without
+// this file editing manager.go's reconcile region, which another agent owns. It
+// is also called at the top of both entry points here, because boot's
+// pausedSkip excludes paused sessions from automatic post_stop recovery -- and
+// every session this feature cares about is paused.
+//
+// It never launches anything and never advances a ladder. It only makes the
+// attempt row agree with what the ledger already says happened.
+func (m *Manager) ReconcileFailoverAttempts(ctx context.Context, id domain.SessionID) error {
+	store, err := m.failoverStore()
+	if err != nil {
+		return err
+	}
+	attempts, err := store.ListSessionFailoverAttemptsBySession(ctx, id)
+	if err != nil {
+		return fmt.Errorf("reconcile failover %s: %w", id, err)
+	}
+	pending := make([]domain.FailoverAttempt, 0, len(attempts))
+	for _, a := range attempts {
+		if !a.State.Terminal() {
+			pending = append(pending, a)
+		}
+	}
+	if len(pending) == 0 {
+		return nil
+	}
+
+	events, err := m.store.ListLifecycleLedger(ctx, id)
+	if err != nil {
+		return fmt.Errorf("reconcile failover %s: read ledger: %w", id, err)
+	}
+	acked := map[string]bool{}
+	postStopped := map[string]bool{}
+	failedGen := map[string]bool{}
+	for _, e := range events {
+		if !isSwitchLedgerKind(e.Kind) || e.GenerationID == "" {
+			continue
+		}
+		switch e.Phase {
+		case domain.LifecyclePhaseTargetAck:
+			acked[e.GenerationID] = true
+		case domain.LifecyclePhasePostStop:
+			postStopped[e.GenerationID] = true
+		case domain.LifecyclePhaseFailed:
+			failedGen[e.GenerationID] = true
+		}
+	}
+
+	for _, a := range pending {
+		next, ok := reconciledFailoverState(a, acked, postStopped, failedGen)
+		if !ok {
+			continue
+		}
+		changed, err := store.UpdateSessionFailoverAttemptState(ctx, a.ID, a.State, next, m.clock())
+		if err != nil {
+			return fmt.Errorf("reconcile failover %s: attempt %s: %w", id, a.ID, err)
+		}
+		if changed {
+			m.logger.Info("failover attempt reconciled",
+				"sessionID", id, "attempt", a.ID, "generation", a.GenerationID,
+				"from", string(a.State), "to", string(next))
+		}
+	}
+	return nil
+}
+
+// reconciledFailoverState is the pure half of reconciliation: given what the
+// ledger says about an attempt's generation, what should the attempt row say?
+//
+// Only ever moves an attempt FORWARD along the state machine, and only on
+// durable evidence. Silence is a valid answer -- an attempt whose generation has
+// no verdict yet is left exactly as it is.
+func reconciledFailoverState(
+	a domain.FailoverAttempt,
+	acked, postStopped, failedGen map[string]bool,
+) (domain.FailoverAttemptState, bool) {
+	if a.GenerationID == "" {
+		return "", false
+	}
+	switch {
+	case acked[a.GenerationID]:
+		// The move demonstrably happened. Leaving it non-terminal would let the
+		// next Continue adopt an attempt that is already complete.
+		return domain.FailoverAttemptAcked, true
+	case postStopped[a.GenerationID] && a.State == domain.FailoverAttemptRequested:
+		// A crash after the source stopped but before the attempt row learned
+		// it. Both states are non-terminal so adoption already worked, but the
+		// row should not claim the source is still alive.
+		return domain.FailoverAttemptPostStop, true
+	case failedGen[a.GenerationID] && !postStopped[a.GenerationID] &&
+		a.State == domain.FailoverAttemptRequested:
+		// A `failed` ledger row with no post_stop for the same generation means
+		// the saga stopped while the source was still alive. Requiring the
+		// absence of post_stop is what keeps the uncertain-destroy path -- which
+		// writes `failed` and then KEEPS its pending fence -- from being marked
+		// terminal here.
+		return domain.FailoverAttemptFailed, true
+	default:
+		return "", false
+	}
+}
+
+// FailoverPreview answers "what would Continue do?" at read time. Derived,
+// never stored.
+//
+// Computed by the manager rather than the service so the ladder is resolved in
+// exactly one place, by the same code that will execute it: a second resolution
+// in the service is a second source of truth that can disagree with the button
+// it labels.
+func (m *Manager) FailoverPreview(ctx context.Context, id domain.SessionID) (FailoverPreview, error) {
+	out := FailoverPreview{
+		NextRungIndex: -1,
+		MaxAttempts:   domain.MaxFailoversPerIncident,
+	}
+	rec, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return FailoverPreview{}, fmt.Errorf("failover preview %s: %w", id, err)
+	}
+	if !ok {
+		return FailoverPreview{}, fmt.Errorf("failover preview %s: %w", id, ErrNotFound)
+	}
+
+	// Reason precedence is D8, and it is load-bearing beyond cosmetics: contract
+	// section 9 wants the whole block null for a session that is "not paused AND
+	// has no ladder", and the service derives that from
+	// (Pause == nil && Reason == no_ladder). That only works if no_ladder
+	// outranks not_paused, so this order is part of the wire contract.
+	if err := failoverEligible(rec); err != nil {
+		out.Reason = FailoverReasonSwitchUnsupported
+		return out, nil
+	}
+	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
+	out.RoleID = roleID
+	if roleID == "" {
+		out.Reason = FailoverReasonNoRolePin
+		return out, nil
+	}
+
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return FailoverPreview{}, fmt.Errorf("failover preview %s: %w", id, err)
+	}
+	roleMap := project.Config.RoleMap.WithDefaults()
+	if len(roleMap.Failover.Roles[roleID]) == 0 {
+		out.Reason = FailoverReasonNoLadder
+		return out, nil
+	}
+
+	paused := rec.Metadata.Pause
+	if paused == nil {
+		out.Reason = FailoverReasonNotPaused
+		return out, nil
+	}
+	out.IncidentID = paused.IncidentID
+
+	store, err := m.failoverStore()
+	if err != nil {
+		return FailoverPreview{}, fmt.Errorf("failover preview %s: %w", id, err)
+	}
+	attempts, err := store.ListSessionFailoverAttemptsByIncident(ctx, id, paused.IncidentID)
+	if err != nil {
+		return FailoverPreview{}, fmt.Errorf("failover preview %s: read attempts: %w", id, err)
+	}
+	out.AttemptsUsed = domain.CountFailoverAttempts(attempts)
+	if out.AttemptsUsed >= domain.MaxFailoversPerIncident {
+		out.Reason = FailoverReasonLimitReached
+		return out, nil
+	}
+
+	current := domain.FailoverTarget{
+		Harness: rec.Harness,
+		Model:   strings.TrimSpace(rec.Metadata.Role.ResolvedModel),
+	}
+	target, rungIndex, err := domain.NextFailoverRung(
+		roleMap, roleID, current, domain.UsedFailoverTargets(attempts))
+	if err != nil {
+		out.Reason = FailoverReasonLadderExhausted
+		return out, nil
+	}
+	// Capability is checked LAST, on the rung actually selected. A rung whose
+	// harness cannot switch is not skipped over in favour of the next one: the
+	// resolution rule is host-authorized order, and quietly stepping past an
+	// authorized rung would be a silent degrade.
+	if err := m.requireSwitchCaps(rec.Harness, target.Harness, rec.Harness == target.Harness); err != nil {
+		out.Reason = FailoverReasonSwitchUnsupported
+		return out, nil
+	}
+
+	out.Available = true
+	out.NextTarget = target
+	out.NextRungIndex = rungIndex
+	out.Reason = FailoverReasonNone
+	return out, nil
+}
+
+// failoverLedgerRecord builds one failover ledger row for an attempt phase.
+//
+// The generation_id column carries the REAL switch generation, not the incident
+// id. An earlier draft used the incident because the generation was unknown when
+// the requested row was written; section 6b made it known, and a real generation
+// lets an audit join ledger rows to the attempt row directly. This is only safe
+// because `failover` is not in isSwitchLedgerKind: every scan that interprets a
+// generation (findPhasePayload, findRecoverablePostStop, hasIncompletePostStop)
+// filters through it, so these rows can never be mistaken for a recoverable
+// switch phase. The incident stays addressable through the row id.
+func (m *Manager) failoverLedgerRecord(
+	attempt domain.FailoverAttempt,
+	phase domain.LifecycleLedgerPhase,
+) domain.LifecycleLedgerRecord {
+	return domain.LifecycleLedgerRecord{
+		ID:           domain.FailoverLedgerID(attempt.SessionID, attempt.IncidentID, attempt.Seq, phase),
+		SessionID:    attempt.SessionID,
+		ProjectID:    attempt.ProjectID,
+		Kind:         domain.LifecycleKindFailover,
+		Phase:        phase,
+		GenerationID: attempt.GenerationID,
+		FromHarness:  attempt.FromHarness,
+		ToHarness:    attempt.ToHarness,
+		FromModel:    attempt.FromModel,
+		ToModel:      attempt.ToModel,
+		RoleID:       attempt.RoleID,
+		PayloadJSON: fmt.Sprintf(`{"incidentId":%q,"attemptSeq":%d,"rungIndex":%d,"state":%q}`,
+			attempt.IncidentID, attempt.Seq, attempt.RungIndex, attempt.State),
+		CreatedAt: m.clock(),
+	}
+}
+
+// appendFailoverLedger writes a post-requested failover phase row. The
+// requested row is NOT written through here: it goes inside the rule-1
+// transaction alongside the attempt row.
+func (m *Manager) appendFailoverLedger(
+	ctx context.Context,
+	attempt domain.FailoverAttempt,
+	phase domain.LifecycleLedgerPhase,
+) error {
+	row := m.failoverLedgerRecord(attempt, phase)
+	if events, err := m.store.ListLifecycleLedger(ctx, attempt.SessionID); err == nil {
+		for _, e := range events {
+			if e.ID == row.ID {
+				return nil // retry-safe, same as the pause and switch appends
+			}
+		}
+	}
+	if err := m.store.AppendLifecycleLedger(ctx, row); err != nil {
+		return fmt.Errorf("lifecycle ledger %s/%s: %w", domain.LifecycleKindFailover, phase, err)
+	}
+	return nil
+}
+
+func failoverResult(rec domain.SessionRecord, attempt domain.FailoverAttempt, reused bool) ContinueFailoverResult {
+	return ContinueFailoverResult{
+		Session:      rec,
+		IncidentID:   attempt.IncidentID,
+		GenerationID: attempt.GenerationID,
+		Target:       attempt.Target(),
+		RungIndex:    attempt.RungIndex,
+		AttemptSeq:   attempt.Seq,
+		Reused:       reused,
+	}
+}
