@@ -1,259 +1,141 @@
 # Agent A — failover core
 
-## State: STOPPED by the orchestrator 2026-08-07, mid-migration — contract amended, ready to re-dispatch
+## State: COMPLETE on `roles/3b-agent-a`, ready for integration cherry-pick
 
-## Next action
-Re-read amended contract **§5, §6, §6a, §6b** (they changed under you), then
-update the `state` CHECK in the already-written 9008 migration to
-`('requested','post_stop','acked','failed')` and continue from
-`queries/session_failover.sql`.
+Worktree: `/Users/tagtaste/Documents/QBApps/.ao-worktrees/3b-agent-a`.
+All six units landed as checkpoint commits. Build green, 884 tests pass across
+the six packages touched, including the full pre-existing `session_manager`
+suite (512) — so the one authorized `switch.go` edit disturbed nothing.
 
-## ORCHESTRATOR AMENDMENT — read before resuming
+## Commits (oldest first, all on `roles/3b-agent-a`, based on `8f01dfbc`)
 
-An independent durability review caught two contradictions in the frozen
-contract **before** you implemented the saga. Both are now fixed in
-`PHASE3B_MVP_CONTRACT.md`; the frozen `domain/failover_contract.go` changed with
-them and still builds. What this means for your recorded design:
+| SHA | Unit |
+|---|---|
+| `5c1c2fd6` | migration 9008 + sqlc queries |
+| `4a55fa5e` | attempt store, ledger+attempt in one transaction |
+| `02a0d690` | `SwitchRequest.ForceGenerationID` (the one authorized `switch.go` edit) |
+| `4d957a5f` | domain folds over the frozen contract |
+| `baa8cee8` | `ContinueFailover`, `FailoverPreview`, `ReconcileFailoverAttempts` |
+| `f02bb67c` | exhausted-ladder test at the Continue level |
 
-**1. The attempt row and the `requested` ledger row are ONE transaction.**
-Contract §6 rule 1. Use the existing `Store.inTx`
-(`storage/sqlite/store/store.go:70`) — its callback receives a `*gen.Queries`
-that already carries `InsertLifecycleLedger`, so you can write both rows
-atomically **without editing `lifecycle_ledger_store.go`**, which you do not
-own. The previous wording left a crash window between two separate writes and
-specified no repair. Add a test that fails the second insert and proves neither
-row exists.
+## Verification
 
-**2. The state machine gained `post_stop`, and `failed` narrowed.**
-Contract §6a. Terminal-vs-recoverable is decided by *whether the source was
-stopped*: a post-stop failure is **recoverable** and must never be written
-`failed`. Idempotence now adopts any **non-terminal** attempt — use the new
-`domain.FailoverAttemptState.Terminal()` helper rather than testing for
-`requested`. Keying on `requested` alone was reachable as: `failed` attempt
-later reaching `target_ack`, an attempt stuck `failed` after a successful
-recovery, and a duplicate Continue launching a **second runtime** over an
-unrecovered post_stop.
-
-**3. D2 and D3 are SUPERSEDED. You get the `switch.go` hook after all.**
-Contract §6b freezes `SwitchRequest.ForceGenerationID string` — empty preserves
-today's behaviour exactly. Mint the generation yourself *before* the rule-1
-transaction and pass it in, so `FailoverAttempt.GenerationID` is **never empty**.
-Your D3 case 3 (adopt a `generation_id = ''` attempt by matching
-`to_harness`/`to_model`/`role_id` and ledger ordering) disappears — and it
-should, because a wrong guess there is a second runtime. You were right to flag
-the seam rather than edit broadly; the answer is that the seam is worth a
-three-line behaviour-preserving field, and **this is the one edit to `switch.go`
-you are authorized to make**. Add a test proving the empty case is identical to
-today.
-
-**4. D4's premise changed.** You chose to put the incident id in the ledger row's
-`generation_id` *because the switch generation was unknown at write time*. It is
-now known. Re-decide with that fact — a real generation there lets an audit join
-ledger to attempt directly. Your ledger-id composition and the
-`isSwitchLedgerKind` exclusion still stand either way.
-
-**D1, D5, D6, D7, D8 all survive unchanged** and are good calls. On D6: the
-orchestrator will wire `ReconcileFailoverAttempts` into boot at integration —
-keep it exported and keep it out of `manager.go`.
-
-**5. You now work in your own git worktree** on branch `roles/3b-agent-a`, not
-the shared checkout. Make checkpoint commits as you go. Your two in-flight files
-have been moved there for you.
-
-## Brief
-
-Own the durable half of manual failover: the attempt record, rung resolution
-against the pinned role, and the manager entry point that drives the **existing**
-switch saga.
-
-### You own (create/edit only these)
-
-- `backend/internal/domain/failover.go` + `failover_test.go`
-- `backend/internal/session_manager/failover.go` + `failover_test.go`
-- `backend/internal/storage/sqlite/migrations/9008_session_failover_attempts.sql`
-- `backend/internal/storage/sqlite/queries/session_failover*.sql`
-- `backend/internal/storage/sqlite/store/session_failover_store*.go`
-- regenerated `backend/internal/storage/sqlite/gen/*` (via `npm run sqlc`, never hand-edited)
-
-You may **read** anything. You may not edit `manager.go`'s restore/relaunch
-region (Agent D owns it), `service/`, `httpd/`, `cli/`, `frontend/`, or the two
-frozen `failover_contract.go` files.
-
-If the saga genuinely needs a hook inside `switch.go` that cannot live in
-`failover.go`, stop and report the exact hook rather than editing broadly.
-
-### Implement
-
-1. **Migration 9008** per contract §5. Do not modify any merged migration. The
-   lifecycle ledger needs no migration — `failover` is already in the 9002/9006
-   `kind` CHECK.
-2. **Store methods**: append an attempt, list attempts for
-   `(session_id, incident_id)`, update state + generation. sqlc-generated, not
-   hand-written SQL in Go.
-3. **`Manager.ContinueFailover(ctx, id, ContinueFailoverRequest) (ContinueFailoverResult, error)`**
-   with the frozen signature. Order of operations is contract §6 and is not
-   negotiable:
-   - load session; refuse non-worker (`ErrNotWorker`), chat
-     (`ErrSwitchChatUnsupported`), terminated (`ErrTerminated`);
-   - refuse if not paused (`ErrNotPaused`) or if the pin's incident differs from
-     the request (`ErrIncidentMismatch`) — never re-read the pin as authority;
-   - require a durable role pin (`domain.ErrFailoverRoleRequired`);
-   - idempotence check **before** anything durable: latest attempt for this
-     incident in `requested` state → adopt it (`Reused: true`), completing via
-     `RecoverSwitchFromPostStop` when an incomplete `post_stop` matches its
-     generation; a mismatched incomplete `post_stop` is
-     `ErrFailoverRecoveryRequired`;
-   - bound check against `domain.MaxFailoversPerIncident`;
-   - `domain.NextFailoverRung(...)` with `used` = every prior attempt for this
-     incident **in any state**;
-   - mint the generation, then write the ledger `failover`/`requested` row **and**
-     the attempt row in **one `inTx` transaction**, before the saga touches the
-     runtime (contract §6 rule 1);
-   - call the existing worker switch entry point, passing `ForceGenerationID`
-     (contract §6b). One relaunch path only — do not open a second;
-   - on `target_ack`: attempt → `acked`, then clear the pin **under a CAS on the
-     same incident id**;
-   - on **pre-stop** failure: attempt → `failed`, ledger `failed`, pin untouched,
-     no retry, nothing scheduled;
-   - on **post-stop** failure: attempt → `post_stop`, pin untouched. **Never
-     `failed`** — it is recoverable on the same generation (contract §6a).
-4. **`Manager.FailoverPreview(ctx, id) (FailoverPreview, error)`** — the read-time
-   answer Agent B surfaces. Derived, never stored. Populate `Reason` precisely;
-   the desktop renders it.
-5. **Crash recovery**: boot's existing post_stop reconcile must leave the attempt
-   row consistent (one runtime, one ack). Reconcile by `generation_id`.
-6. **Role identity invariance**: `role_id`, `template_artifact_id`,
-   `template_sha256` and `resolved_permissions` byte-identical across the move;
-   only `resolved_harness`/`resolved_model` change. Assert it in a test.
-
-### Tests you must write (manager + domain level)
-
-- no role pin → refused before any durable write
-- no ladder / exhausted ladder → `ErrFailoverNoTarget`, pause intact
-- stale incident → refused **before** any ledger, attempt or runtime change
-- a free-form target is structurally impossible (there is no field to carry one)
-- **pre-stop** launch failure → pause intact, attempt `failed`, no second attempt
-- **post-stop** launch failure → pause intact, attempt `post_stop` and **not**
-  `failed`; a subsequent Continue adopts it rather than spending a second rung
-- atomicity: fail the second insert of the rule-1 transaction, prove **neither**
-  the ledger row nor the attempt row exists
-- post-stop recovery → one runtime, one `target_ack`, same generation
-- duplicate Continue → one attempt row, `Reused: true`, same generation
-- `SwitchRequest.ForceGenerationID` empty → byte-identical to today's behaviour
-- `role_id` and template artifact unchanged
-- attempt bound reached → `ErrFailoverLimitReached`, still paused
-- paused-live **and** paused-dead sources both work
-
-### Verify
-
-```bash
-cd backend && go build ./... && go test ./internal/domain/... ./internal/session_manager/... ./internal/storage/...
-npm run sqlc   # from repo root, after any query/migration change
 ```
+cd backend && go build ./...                    # clean
+go vet ./internal/{session_manager,domain,storage/...}   # clean
+gofmt -l                                        # clean
+go test ./internal/session_manager/ ./internal/domain/ ./internal/storage/...
+  -> 884 passed in 6 packages
+```
+Failover-specific cases: **74** (55 manager, 13 domain, 6 store).
+Full `go test ./...` deliberately NOT run — other agents are mid-edit.
 
-Do not run the full `go test ./...` — other agents are mid-edit in packages you
-do not own; the orchestrator runs the full gate at integration.
+Two mutation checks, both caught by exactly the intended tests:
+1. force every saga failure terminal → the two post-stop tests fail, and the
+   adopting Continue then reports `no unused authorized target`, which is the
+   ladder-advance defect §6a describes, reproduced on demand.
+2. ignore `ForceGenerationID` → the §6b test fails while its *empty-case*
+   subtest still passes, proving the empty case is genuinely the old path.
 
-## Done
-- [x] Read the contract, both frozen `failover_contract.go` files, `switch.go`,
-      `pause.go`, `manager.go`'s `Store` interface, `rolemap.go`,
-      `switch_targets.go`, `session_pause.go`, `lifecycle_ledger.go`,
-      the 9002/9003/9007 migrations, `lifecycle_ledger_store.go`, `sqlc.yaml`.
+## Amendment handling — what happened to D1–D8
 
-## Remaining
-- [x] Read contract + switch.go + pause.go
-- [ ] Migration 9008
-- [ ] sqlc queries + store methods
-- [ ] `domain/failover.go` (helpers beyond the frozen resolution rule)
-- [ ] `ContinueFailover`
-- [ ] `FailoverPreview`
-- [ ] Crash-recovery reconciliation by generation
-- [ ] All ten acceptance tests
-- [ ] Package tests green
+- **D1 survives.** `failoverAttemptStore` is declared in `failover.go` and
+  type-asserted off `m.store`, precedent `interface_transition.go:95`. No edit to
+  `manager_test.go`'s `fakeStore`: the test fake **embeds** `*fakeStore` and adds
+  the four methods. A missing implementation returns `ErrFailoverNotWired`, not a
+  silent degrade.
+- **D2/D3 deleted**, as the amendment directed. The generation is minted before
+  the transaction and pinned via `ForceGenerationID`; the heuristic adoption rule
+  is gone.
+- **D4 re-decided.** The failover ledger row now carries the **real switch
+  generation**, not the incident id, so an audit joins ledger→attempt directly.
+  Safe only because `failover` is not in `isSwitchLedgerKind`, and every scan
+  that interprets a generation (`findPhasePayload`, `findRecoverablePostStop`,
+  `hasIncompletePostStop`) filters through it. Tested both directions.
+  Ledger id stays `<session>:<incident>:failover:<seq>:<phase>`.
+- **D5 survives and is kept explicitly.** `acked` is terminal so the adoption
+  check cannot see it, but a crash between the ack and the pin clear leaves
+  exactly that; without the branch a retry spends a second rung redoing a
+  completed move.
+- **D6 survives.** `ReconcileFailoverAttempts` is exported, lives outside
+  `manager.go`, launches nothing, and only makes the attempt row agree with the
+  ledger. Called at the top of both entry points; boot wiring is the
+  orchestrator's at integration.
+- **D7 SUPERSEDED — see below.**
+- **D8 survives.** Reason precedence implemented and tested, including that
+  `no_ladder` outranks `not_paused` because Agent B derives §9's null block from
+  that pair.
 
-## Decisions / gotchas
+## D7 was a misdiagnosis — the real sqlc 1.31 bug
 
-### D1 — the store surface is a NARROW OPTIONAL interface, not `Store`
-`sessionmanager.Store` (manager.go:258) is implemented by `fakeStore` in
-`manager_test.go` (7150 lines, shared with Agent D). Adding methods there would
-force an edit to a file I do not own and collide with Agent D.
+The existing notes in `queries/sessions.sql:119` and `queries/changelog.sql:10`
+attribute the truncation to literals/placeholders on the RHS of `=` in
+DELETE/UPDATE `WHERE` clauses. That is not the cause.
 
-Instead `failover.go` declares its own `failoverAttemptStore` and type-asserts
-`m.store` to it — **exact existing precedent**: `interface_transition.go:95`
-does the same with `interfaceTransitionStore`. Unlike that one, a missing
-implementation is NOT a silent degrade: Continue returns an error, because a
-continuation that cannot record an attempt cannot be made idempotent.
+**The cause is multi-byte UTF-8 anywhere earlier in the file.** The parser
+reports statement boundaries as rune offsets and sqlc slices the source with them
+as byte offsets, so every statement after the first non-ASCII character is cut
+short by the accumulated (bytes − runes) delta, and the severed tail leaks into
+the next generated const.
 
-### D2 — the switch generation is minted INSIDE the saga, so the attempt row is written with an empty generation and stamped afterwards
-`switchUnderOwnership` calls `m.newSwitchGeneration()` itself; `SwitchRequest`
-has no field to inject one, and `switch.go` is not mine. The frozen
-`FailoverAttempt.GenerationID` comment ("Empty until the saga has begun")
-anticipates exactly this, so no hook is requested.
+Evidence: the first draft of `queries/session_failover.sql` used `§` and `—` in
+its comments and mangled **all four** statements — including a plain `INSERT`
+with no `=` in it at all, which the old theory cannot explain. Rewriting the
+*identical SQL* with ASCII-only comments generated all four intact, guarded
+`UPDATE ... WHERE id = ? AND state = ?` included. Every other query file in the
+repo is pure ASCII; `sessions.sql` is the sole exception and its two non-ASCII
+lines sit *after* its last statement, which is why it never tripped.
 
-Consequence: a hard process crash between the attempt write and the stamp leaves
-`generation_id = ''` with a real incomplete `post_stop` in the ledger. Handled by
-an explicitly bounded adoption rule, not by guessing — see D3.
+Consequence for me: **no raw `ExecContext` fallback was needed.** The file now
+carries an `ASCII ONLY` banner and a NOTE recording this.
 
-### D3 — recovery matching, in order
-1. `attempt.GenerationID != ""` and it equals the incomplete `post_stop`
-   generation → `RecoverSwitchFromPostStop`.
-2. `attempt.GenerationID != ""` and it differs → `ErrFailoverRecoveryRequired`.
-3. `attempt.GenerationID == ""` (crash before the stamp) → adopt the incomplete
-   `post_stop` **only** when its `(to_harness, to_model, role_id)` match the
-   attempt's intent and its `requested` ledger row is not older than the attempt
-   row. The session is paused and `beginSwitch` fences, so nothing else can have
-   authored that generation. Anything else → `ErrFailoverRecoveryRequired`.
+Consequence for someone else: the hand-written fallbacks in `session_store.go`
+(`SetSessionPauseIfAbsent`, `ClearSessionPauseIfIncident`, `DeleteSession`) may
+be unnecessary. **Not acted on — those files are not mine.** Flagging only.
 
-### D4 — the failover ledger row's `generation_id` carries the INCIDENT id
-Like `appendPauseLedger`, not like `appendSwitchLedger`: the switch generation is
-unknown when the `requested` row is written, and a column whose meaning changes
-between phases is worse than one that consistently groups the incident. The
-switch generation lives on the attempt row and in the ledger payload JSON.
-Ledger id is `<session>:<incident>:failover:<seq>:<phase>` (unique per attempt
-per phase; `appendPauseLedger`'s `<session>:<incident>:<kind>` would collide
-across attempts). `failover` is **not** in `isSwitchLedgerKind`, so these rows
-can never be mistaken for a recoverable switch.
+## Files delivered
 
-### D5 — clearing the pin is the LAST durable act, and the retry path converges
-Order on success: attempt → `acked` (+generation), then ledger
-`failover`/`target_ack`, then `ClearSessionPauseIfIncident` (CAS on the same
-incident). A crash before the clear leaves a paused session whose latest attempt
-is `acked`; a retried Continue detects `latest.State == acked &&
-latest.GenerationID == rec.Metadata.RuntimeLaunchID` and just finishes the clear,
-returning `Reused: true`. Without that branch the retry would start a *second*
-continuation for a move that already happened.
+- `backend/internal/storage/sqlite/migrations/9008_session_failover_attempts.sql`
+- `backend/internal/storage/sqlite/queries/session_failover.sql`
+- `backend/internal/storage/sqlite/gen/*` (regenerated via `npm run sqlc`)
+- `backend/internal/storage/sqlite/store/session_failover_store.go` + test
+- `backend/internal/domain/failover.go` + test
+- `backend/internal/session_manager/failover.go` + test
+- `backend/internal/session_manager/switch.go` — **+17/−2**, the §6b field only
 
-### D6 — crash reconciliation is LAZY, at the entry points I own
-Boot's `pausedSkip` already excludes paused sessions from automatic post_stop
-recovery, and `manager.go`'s reconcile region belongs to Agent D. So
-`reconcileFailoverAttempts` runs at the top of both `ContinueFailover` and
-`FailoverPreview`: an attempt in `requested` whose generation already has a
-durable `target_ack` becomes `acked`; one whose generation has a `failed` row and
-no live pending becomes `failed`. It is exported as
-`Manager.ReconcileFailoverAttempts` so the orchestrator can additionally wire it
-into boot at integration without me editing `manager.go`.
+## Two edits outside the ownership table, both flagged
 
-### D7 — sqlc 1.31 SQLite parser bug
-`queries/sessions.sql:119-134` documents it: literals (and, it warns,
-placeholders) on the RHS of `=` in DELETE/UPDATE `WHERE` clauses get silently
-stripped and the truncated tail leaks into the NEXT generated const. The guarded
-state update (`WHERE id = ? AND state = ?`) is exactly that shape, so after
-`npm run sqlc` the generated const must be READ to confirm it is intact. If it is
-mangled, fall back to raw `ExecContext` in the store with a NOTE in the queries
-file, exactly as `SetSessionPauseIfAbsent` / `ClearSessionPauseIfIncident` do.
+1. `switch.go` — authorized by contract §6b. Exactly the field plus honouring it
+   at the single `newSwitchGeneration()` call site.
+2. `storage/sqlite/migrate_burned_versions_test.go` and
+   `migrate_renumbered_roles_test.go` — the migration ledger. Both are
+   append-only guards whose own failure messages instruct the author of a new
+   migration to update them *in the same change*; 9008 cannot be green
+   otherwise. One line each. `migrate_renumbered_roles_test.go` also says to
+   update `UPSTREAM_SYNC_PLAN.md` alongside — **I did not**, as that doc has no
+   9007/highest-migration reference to update. Worth an orchestrator glance.
 
-### D8 — `FailoverPreview` reason precedence, and how Agent B decides `null`
-Checked in this order: non-worker/chat/terminated → `switch_unsupported`;
-no role pin → `no_role_pin`; no ladder for the role → `no_ladder`; not paused →
-`not_paused`; bound reached → `limit_reached`; `NextFailoverRung` →
-`ladder_exhausted`; source/target `switch_supported=false` → `switch_unsupported`;
-otherwise `Available: true`, `Reason: ""`.
+## Test list — all covered
 
-Contract §9 wants the block `null` when the session is "not paused **and** has no
-ladder". The manager cannot express `null` in a value type, so **Agent B decides
-it from the pair it already holds**: `session.Metadata.Pause == nil &&
-preview.Reason == FailoverReasonNoLadder` → emit `null`. `NextRungIndex` is `-1`
-whenever there is no target.
+no role pin · no ladder · **exhausted ladder** · stale incident · free-form
+target structurally impossible (reflection over the request type) · pre-stop
+failure terminal · **post-stop failure non-terminal** · **a later Continue
+adopts it without spending a second rung** · **transaction atomicity (second
+insert fails, neither row survives)** · post-stop recovery is one runtime, one
+ack, same generation · duplicate Continue reuses · **`ForceGenerationID` empty is
+byte-identical** · role_id + template artifact + permissions invariant ·
+attempt bound keeps the pause · paused-live and paused-dead both work ·
+preview reason precedence · **preview identical across paused-live/paused-dead**
+(contract §2) · reconciliation from the ledger · unwired store is explicit.
 
-## Verification run so far
-_(none yet)_
+## Notes for integration
+
+- `ReconcileFailoverAttempts(ctx, sessionID)` is the boot hook. It is safe to
+  call on any session: it returns immediately when no attempt is non-terminal.
+- A session with an **empty** `RuntimeHandleID` is refused by the existing saga
+  with `ErrIncompleteHandle` before failover logic runs. Paused-dead in the
+  tested sense means the handle is still recorded and the process is gone, which
+  is what the destroy probe resolves. Left as the saga's existing rule, not
+  worked around.
+- `ErrFailoverNotWired` intentionally has no public API code (500, per the
+  orchestrator's clarification and the `ErrSwitchNotWired` precedent).
