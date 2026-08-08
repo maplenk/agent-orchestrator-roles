@@ -21,9 +21,22 @@ original generation) are captured in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. Phase
 3B manual worker Continue and the final-MVP 2B-3 core, service/read model, API,
 CLI and desktop surface are complete at immutable code/runner SHA `166e9e63`.
 Independent review is closed and the complete worker/orchestrator live matrix
-is promoted by evidence commit `322f9c18`. The exact race run found zero data
-races, but the repository-wide final gate remains open pending reproducible
-Chat rollback diagnosis and SQLite failure classification.
+is promoted by evidence commit `322f9c18`. The Chat rollback failure was
+classified as test-only asynchronous projection and fixed at integration head
+`f8883529`; SQLite exact checks passed 5/5, its race package passed in 622.846s,
+and race validation found zero data races. The ordinary full backend run fails
+only the known untouched fake/kilocode/opencode wall-clock trio; all other
+packages, including the MVP packages, pass. The repository-wide final gate
+remains non-green while those three failures remain. On exact integration head
+`f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
+before the test fix, full Vitest was 2039/2040. Its sole `SessionFilesView`
+failure is deterministic (0/20 exact-test passes, full file 27/28) and
+reproduces on pre-MVP baseline `be4321d1` with the relevant files unchanged, so
+it is not an MVP regression. Its test fix `56638949`, integrated as `6473b134`,
+passes 20/20 exact and 28/28 full-file runs while retaining the negative
+timeout. API drift passes two identical regenerations with a clean diff. The
+authoritative unsandboxed full Vitest run on exact `6473b134` passes 151/151
+files and 2040/2040 tests in 312.49s.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -376,8 +389,8 @@ Zai and Kimi validated **separately** on Pi.
     post-MVP
 16. [~] Dogfood against all DoD invariants — the final MVP worker/orchestrator
     matrix is promoted at `322f9c18`; vendor limit detection remains outside
-    this MVP and unpromoted. The repository-wide gate is still open on the two
-    diagnostics named above
+    this MVP and unpromoted. The repository-wide gate is still open on the
+    full-suite distinction named above
 
 ---
 

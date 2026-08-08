@@ -73,16 +73,28 @@ records remain historical and are not represented as combined-SHA evidence.
 
 ### Repository-wide final gate
 
-**Open.** The exact race run found **zero data races**, but that narrower result
-does not close the full gate. Two diagnostics remain before it can be called
-green:
+**Open.** Race validation found **zero data races**, and the SQLite race package
+passed in **622.846s**. The Chat rollback failure was a test-only projector race:
+`completeTurn` emitted completion asynchronously and returned before that exact
+AO/provider turn was durably settled. `b21490a1` (integrated as `f8883529`)
+waits for the fresh AO turn ID, provider turn ID, completed state, and non-null
+completion time before rollback proceeds.
 
-1. reproduce and diagnose the Chat rollback result; and
-2. classify the SQLite failure.
-
-Do not downgrade either item to a flake, infer gate success from the promoted
-live matrix, or rerun the live matrix merely because the repository gate is
-still open.
+The ordinary full backend run passes all other packages, including the MVP
+packages, and fails only the known untouched fake/kilocode/opencode wall-clock
+trio. On exact head `f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2,
+and typecheck pass. Before the test fix, full Vitest was 2039/2040. The sole
+`SessionFilesView` test fails 20/20 in isolation and 1/28 in its full file,
+remaining at `Loading files...`; it reproduces on pre-MVP baseline `be4321d1`
+with the relevant files unchanged, so it is a deterministic pre-existing gate
+failure rather than an MVP regression. `56638949` (integrated as `6473b134`)
+closes it: the exact test passes 20/20, its full file passes 28/28, and the
+never-resolving mutation still fails after 10.635s. API drift passes two
+byte-identical regenerations with a clean diff. The authoritative unsandboxed
+full Vitest run on exact `6473b134` passes **151/151 files and 2040/2040 tests**
+in 312.49s. Do not infer a fully green repository gate from the green race
+package, downgrade an unexplained result to a flake, or rerun the promoted live
+matrix merely because the repository gate is still open.
 
 ## Why every agent keeps a todo file
 

@@ -7,8 +7,10 @@
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
-**Current gate:** repository-wide close-out; live acceptance is complete, while
-Chat rollback diagnosis and SQLite failure classification remain
+**Current gate:** repository-wide close-out; live acceptance is complete. The
+ordinary full backend run fails only the known untouched fake/kilocode/opencode
+wall-clock trio; static checks, typecheck, API drift, and the full frontend gate
+pass, while the repository-wide suite is still not fully green
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -32,18 +34,19 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
 | Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
-| CI | The exact race run found zero data races. The repository-wide gate is **not green** pending reproducible Chat rollback diagnosis and SQLite failure classification. |
+| CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. The ordinary full backend run fails only the known untouched fake/kilocode/opencode wall-clock trio; all other packages, including the MVP packages, pass. The full repository gate is therefore **not fully green**. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
 > Claude Code because strictness enforces role/routing/delegation policy, not a
 > filesystem sandbox. Claude-only installs still cannot configure an explicit
 > `workspaceWrites:false` role; Claude remains `read_only_enforced=false`.
 
-**Next engineering actions, in order:** reproduce and diagnose the Chat
-rollback result, classify the SQLite failure, then rerun only the affected gate
-commands and close the repository-wide gate. Do not rerun the accepted live
-matrix merely to make the separate gate look green. Claude read-only remains
-post-MVP work for roles that genuinely require technical write denial.
+**Next engineering actions, in order:** record the verified MVP/static/API and
+full frontend gate as complete. Keep the full repository
+gate explicitly non-green while the three pre-existing wall-clock tests fail.
+Do not rerun the accepted live matrix merely to make the separate gate look
+green. Claude read-only remains post-MVP work for roles that genuinely require
+technical write denial.
 
 ---
 
@@ -242,7 +245,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 | Task | Detail |
 |------|--------|
-| Clean full gate | **Open:** exact race found zero data races; Chat rollback diagnosis and SQLite failure classification remain |
+| Clean full gate | **Not fully green:** zero races; SQLite exact 5/5 and package race pass; Chat test race fixed; ordinary full fails only the known untouched fake/kilocode/opencode wall-clock trio |
 | Worker dogfood | **Complete:** all 12 records passed on `166e9e63`; evidence `322f9c18` |
 | Orchestrator dogfood | **Complete:** Codex→Claude→Codex, fencing, unauthorized refusal, Fresh and same-generation recovery passed |
 | Promotion | **None.** Limit detection and Claude read-only stay false |
@@ -266,7 +269,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 | ~~Phase 2B-0a/0b/1/2~~ | **Done** | 2A patterns; ≈6–11 d actual, not the 3–5 first estimated |
 | ~~Phase 2B-3 (cross-harness orch)~~ | **Implemented and live-accepted** | Final MVP strict-policy amendment |
 | ~~Phase 3B manual Continue~~ | **Implemented and live-accepted** | Final probe review |
-| Final repository gate | active | Chat rollback diagnosis + SQLite classification |
+| Final repository gate | active | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; full backend retains three pre-existing wall-clock failures |
 
 ### Sequencing sketch
 
@@ -278,8 +281,13 @@ Sync 2 acceptance ──► DONE (2026-08-07)
 3B manual Continue ──► IMPLEMENTED + LIVE-ACCEPTED
 Final MVP core + surface ──► IMPLEMENTED / REVIEW FIXES INTEGRATED
 Live matrix @ 166e9e63 ──► ACCEPTED (evidence 322f9c18)
-Now ──► diagnose Chat rollback + classify SQLite failure
-     ──► rerun affected repository gate commands only
+Race close-out ──► Chat test fixed; SQLite exact 5/5 + package PASS; zero races
+Ordinary backend ──► MVP/all other packages PASS; known untouched wall-clock trio FAIL
+Static/typecheck ──► PASS on exact head f8883529
+API drift ──► PASS (two identical regenerations; clean diff)
+Frontend classification ──► deterministic pre-MVP failure (0/20 isolated; full file 27/28)
+Frontend fix @ 6473b134 ──► 20/20 exact + 28/28 file PASS; negative mutation retained
+Now ──► close verified MVP/static/API/frontend surface; keep full-repo gate distinct
      ║
      ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
 ```
@@ -355,9 +363,10 @@ Still open or partial:
 
 ## 7. Immediate next action
 
-1. Reproduce and diagnose the Chat rollback result from the final gate.
-2. Classify the SQLite failure without assuming it is a flake.
-3. Rerun the affected repository gate commands and close the gate only when
-   both results are explained. The accepted live matrix at `166e9e63` does not
-   need to be repeated. Claude read-only remains parallel post-MVP work and does
-   not gate 2B-3.
+1. Record the verified MVP/static/API and full frontend gate as complete at
+   integration head `6473b134`.
+2. Keep the full repository gate distinct from that narrower result.
+3. Keep the full repository gate non-green while the known untouched
+   fake/kilocode/opencode wall-clock trio fails. The accepted live matrix at
+   `166e9e63` does not need to be repeated. Claude read-only remains parallel
+   post-MVP work and does not gate 2B-3.

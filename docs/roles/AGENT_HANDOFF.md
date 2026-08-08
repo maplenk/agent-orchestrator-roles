@@ -8,10 +8,15 @@
 
 > **Current close-out (2026-08-08):** implementation and runner are accepted at
 > `166e9e63`; promoted live evidence is `322f9c18`. The exact race run found
-> zero data races, but the repository-wide gate remains open pending
-> reproducible Chat rollback diagnosis and SQLite failure classification. Do
-> not restart an older phase or rerun accepted live evidence from the
-> historical priority lists below.
+> zero data races. Chat rollback is classified and fixed test-only at
+> `f8883529`, and the SQLite race package passed in 622.846s. The ordinary full
+> backend run fails only the known untouched fake/kilocode/opencode wall-clock
+> trio. On exact head `f8883529`, static checks and typecheck pass; one frontend
+> test fails deterministically and API drift passes. The failure reproduces on
+> pre-MVP baseline `be4321d1` with the relevant files unchanged. Test-only fix
+> `56638949`, integrated as `6473b134`, passes 20/20 exact and 28/28 full-file
+> runs with the negative timeout retained. Do not restart an older phase or
+> rerun accepted live evidence from the historical priority lists below.
 
 **Purpose:** Everything a successor agent needs to continue the plan without re-discovering history.  
 **Written:** 2026-08-04 (after Phase 2A close-out accept + `SwitchSupported` promotion).  
@@ -35,9 +40,9 @@
 | **`limit_detection_supported`** | **false** everywhere production — do not flip |
 | **`read_only_enforced`** | **true only for Codex**; Claude/Pi false by design for now |
 | **Phase 2B** | **2B-0a / 0b / 1 / 2 / final-MVP 2B-3 implemented and live-accepted.** Strict delegation no longer implies `workspaceWrites:false`; writable Codex↔Claude switching does not promote Claude RO |
-| **Critical path next** | Diagnose the reproducible Chat rollback result and classify the SQLite failure, then close the affected repository gate commands |
+| **Critical path next** | Record the verified MVP/static/API/full-frontend gate as complete while keeping it distinct from the still non-green full-repository suite |
 | **Parallel optional** | Phase 1-F / Claude RO (1-B) for explicitly read-only Claude roles; 2B-3 no longer depends on it |
-| **Current clean gate** | **Not green.** Exact race found zero data races; Chat rollback and SQLite diagnostics remain. Live acceptance already passed on `166e9e63` and is recorded at `322f9c18` |
+| **Current clean gate** | **Not fully green repository-wide.** Zero races; SQLite exact 5/5 and package race passed; Chat test race fixed at `f8883529`; static/typecheck/API drift and full frontend (151/151 files, 2040/2040 tests) pass at `6473b134`; ordinary full fails only the known untouched wall-clock trio. Live acceptance passed on `166e9e63` and is recorded at `322f9c18` |
 
 **Do not re-open Phase 2A promotion debates.** Close-out was explicitly accepted by the human; promotion landed in a dedicated CL.
 
@@ -537,8 +542,9 @@ High-level protocol used successfully:
 ## 14. Immediate next action for the successor agent
 
 1. Read `MVP_FINAL_SPEC.md`, then `REMAINING_PLAN.md`.
-2. Reproduce and diagnose the Chat rollback result from the repository gate.
-3. Classify the SQLite failure, then rerun the affected gate commands.
+2. Record the verified MVP/static/API and full frontend gate at `6473b134`.
+3. Keep that result distinct from the full repository suite, which remains
+   non-green while the known wall-clock trio fails.
 4. Do not rerun the accepted worker/orchestrator matrix merely because the
    separate gate is open. Keep `limit_detection_supported=false` and Claude
    `read_only_enforced=false`; neither is promoted by this MVP.
@@ -548,7 +554,7 @@ High-level protocol used successfully:
 ## 15. Priority is already decided
 
 Do not ask the human to choose among Phase 2B, Claude RO, or Phase 1-F. The
-current priority is the final MVP repository-gate diagnosis in
+current priority is the final MVP repository-gate completion in
 `MVP_FINAL_SPEC.md`. Implementation, independent review, and promoted live
 acceptance are already complete. Claude RO is optional post-MVP work for
 explicit read-only roles and no longer gates writable strict switching.

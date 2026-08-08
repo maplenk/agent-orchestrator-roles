@@ -13,7 +13,7 @@ Local working tree: `/Users/tagtaste/Documents/QBApps/agent-orchestrator-roles`
 | Evidence integration | `codex/mvp-integration` @ `322f9c18`; merge to the roles trunk is not claimed here |
 | Accepted implementation/runner | `166e9e63` |
 | Promoted live evidence | `322f9c18` |
-| Active gate | Not green: Chat rollback diagnosis and SQLite failure classification remain; exact race found zero data races |
+| Active gate | Not fully green repository-wide: zero races, SQLite exact 5/5 and package race passed, Chat test race fixed at `f8883529`; static/typecheck/API drift and full frontend (151/151 files, 2040/2040 tests) pass at `6473b134`; ordinary full retains three known untouched wall-clock failures |
 
 Pin before feature work. Own migration numbers on this fork (do not collide with upstream 0042 races from #3548 / #3386).
 
@@ -39,8 +39,9 @@ Master plan (design): `MASTER_PLAN.md`
 - Phase 3B manual Continue and Phase 2B-3 in-place Codex↔Claude orchestrator
   switch are implemented with API/CLI/desktop surfaces.
 
-**Next:** diagnose the Chat rollback result, classify the SQLite failure, and
-rerun the affected repository gate commands. Worker/orchestrator live
+**Next:** record the verified MVP/static/API and full frontend gate as
+complete, and keep the full repository suite explicitly non-green while
+the known fake/kilocode/opencode wall-clock trio fails. Worker/orchestrator live
 acceptance is already complete on `166e9e63`. Vendor detection, automatic
 failover, and Claude read-only are post-MVP; no capability is promoted by this
 close-out.

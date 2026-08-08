@@ -1,8 +1,9 @@
 # Final roles MVP specification
 
 **Status:** implementation, independent review, and promoted live acceptance
-complete. The repository-wide final gate is not yet green: reproducible
-diagnosis of the Chat rollback result and SQLite failure classification remain.
+complete. The repository-wide final gate is not fully green: the ordinary full
+backend run retains only three known untouched wall-clock failures. The
+verified MVP/static/API/frontend gates are complete.
 
 **Accepted implementation and runner SHA:** `166e9e63`
 
@@ -34,12 +35,27 @@ AO ships:
 5. Manual operator pause as the failover trigger. No vendor limit detector is
    required for this MVP.
 
-The remaining critical path is gate diagnosis, not feature implementation or
+The remaining critical path is gate completion, not feature implementation or
 live acceptance. The full worker/orchestrator matrix passed on immutable code
-`166e9e63` and is recorded by evidence commit `322f9c18`. The exact race run
-reported zero data races, but the repository-wide gate remains open until the
-Chat rollback result is reproduced and diagnosed and the SQLite failure is
-classified. No capability is promoted by this close-out.
+`166e9e63` and is recorded by evidence commit `322f9c18`. The Chat rollback
+failure was classified as a test-only projector race and fixed by waiting for
+the exact AO/provider turn to persist as completed (`b21490a1`, integrated as
+`f8883529`). SQLite exact checks passed 5/5 and its race package passed in
+**622.846s**, with zero data-race reports. The ordinary full backend run passes
+all other packages, including the MVP packages, and fails only the known
+untouched fake/kilocode/opencode wall-clock trio. On exact integration head
+`f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass.
+Before the test fix, full Vitest was 2039/2040; the sole `SessionFilesView`
+failure reproduced 20/20 in isolation and 1/28 in its full file (27 passed),
+stuck at `Loading files...`.
+It reproduces on pre-MVP baseline `be4321d1` with the relevant component, test,
+hooks, API, setup, package, and lock files unchanged, so it is not an MVP
+regression. The one-assertion test fix is `56638949`, integrated as `6473b134`:
+the exact test passes 20/20, its full file passes 28/28, and a never-resolving
+request still fails after 10.635s at `Loading files...`. Typecheck and diff-check
+pass. API drift passes: two regenerations produced identical OpenAPI and
+TypeScript schema hashes and a clean diff. No capability is promoted by this
+close-out.
 
 ## 2. Strict-mode policy for this MVP
 
@@ -277,7 +293,7 @@ The reviewer attacks:
 
 Expected duration: **0.5 day**.
 
-### Wave 3 — live acceptance complete; repository gate diagnosis pending
+### Wave 3 — live acceptance complete; repository gate completion pending
 
 Every final record names the exact code SHA, isolated daemon/data directory,
 project, session, generation, and relevant ledger rows. The promoted matrix ran
@@ -321,11 +337,24 @@ evidence. It does not imply that the separate repository-wide gate is green.
 
 ## 8. Final gate
 
-**Current result:** open. The exact race run found **zero data races**. That is
-not a blanket pass: the Chat rollback result still needs a reproducible
-diagnosis, and the SQLite failure still needs classification before the final
-gate may be called green. Do not rerun or rewrite the accepted live matrix to
-paper over either diagnostic item.
+**Current result:** open. Race validation found **zero data races**; the SQLite
+race package passed in **622.846s**. The Chat rollback result was a test-only
+projection race, fixed by `b21490a1` / integration `f8883529`, whose helper now
+waits for the exact AO turn ID, provider turn ID, completed state, and completion
+timestamp. The ordinary full backend run passes every other package, including
+the MVP packages, but still fails the known untouched fake/kilocode/opencode
+wall-clock trio. The deterministic pre-existing frontend test failure is closed
+at `6473b134`. Do not infer a fully green repository gate from race or
+live-acceptance results. On exact head
+`f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
+full Vitest was 2039/2040 before the test fix. The sole `SessionFilesView`
+failure was deterministic (0/20 exact-test passes; full file 27/28) and also
+reproduced on pre-MVP baseline `be4321d1`. After integration at `6473b134`, the
+exact test passes 20/20 and its full file passes 28/28; the negative mutation
+still fails as required. API drift passes with identical
+before/pass1/pass2 hashes for both generated artifacts and a clean diff after
+each regeneration. The authoritative unsandboxed full Vitest run on exact
+`6473b134` passes **151/151 files and 2040/2040 tests** in 312.49s.
 
 Run from a clean checkout of the acceptance SHA:
 
@@ -385,10 +414,14 @@ Implementation and review close-out are integrated:
 - `322f9c18` records the promoted live matrix without claiming the separate
   repository gate is green.
 
-The final live-acceptance claim is closed on `166e9e63`. The repository-wide
-gate is intentionally still open pending reproducible Chat rollback diagnosis
-and SQLite failure classification. Its exact race run found zero data races;
-that narrower result must not be restated as a fully green gate.
+The final live-acceptance claim is closed on `166e9e63`. The Chat test race is
+fixed at integration head `f8883529`, the SQLite race package passed in
+622.846s, and race validation found zero data races. The ordinary run fails only
+the three known untouched wall-clock tests; every other package, including the
+MVP packages, passes. The repository-wide gate remains non-green while those
+three failures remain. The static gate, typecheck, API drift, and authoritative
+full frontend gate pass; those narrower results must not be restated as a fully
+green repository gate.
 
 Nothing is promoted: `limit_detection_supported=false` for every harness and
 Claude Code remains `read_only_enforced=false`. Here, “promoted live evidence”
