@@ -27,6 +27,11 @@ type failoverFakeStore struct {
 	// updateErrOnce injects one failure of the attempt state CAS.
 	updateAttemptErr error
 	appendCalls      int
+	// beforeUpdate runs immediately before the state CAS, so a test can move the
+	// row underneath an in-flight transition and make the CAS legitimately miss.
+	// That race is the only way to reach the miss branch: everywhere else the
+	// caller's expected state came from reading this same store.
+	beforeUpdate func()
 }
 
 func newFailoverStore() *failoverFakeStore {
@@ -82,6 +87,9 @@ func (f *failoverFakeStore) UpdateSessionFailoverAttemptState(
 ) (bool, error) {
 	if f.updateAttemptErr != nil {
 		return false, f.updateAttemptErr
+	}
+	if f.beforeUpdate != nil {
+		f.beforeUpdate()
 	}
 	for i, a := range f.attempts {
 		if a.ID != attemptID {
@@ -637,6 +645,111 @@ func TestContinueFailover_AckedButUnpromotedNeverClearsPauseOrSpendsARung(t *tes
 	}
 	if rt.created != 0 {
 		t.Fatalf("an unpromoted ack launched %d runtimes", rt.created)
+	}
+}
+
+// A SAME-harness rung with an empty model is a legal, meaningful ladder entry --
+// "fall back to this harness's provider default". ValidateRoleMap permits it,
+// and NextFailoverRung selects it because an empty model is an exact value and
+// not a wildcard.
+//
+// The saga's resolveTargetModel then rewrites that empty target to the SOURCE
+// model on a same-harness move, so the session lands on "sonnet-5" while the
+// attempt row still records "". Comparing the session against the attempt's raw
+// ToModel therefore never settled, and a crash between the ack and the pin clear
+// stuck the session permanently: there is no incomplete switch left to recover,
+// so Continue refused with FAILOVER_RECOVERY_REQUIRED forever, with the rung
+// already spent and only Resume as an escape.
+func TestContinueFailover_SameHarnessEmptyModelRungSettlesAfterPromotion(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor", GenerationID: "gen-same",
+		FromHarness: domain.HarnessClaudeCode, FromModel: "sonnet-5",
+		ToHarness: domain.HarnessClaudeCode, ToModel: "",
+		RungIndex: 0, State: domain.FailoverAttemptAcked,
+	})
+	// The move landed: same harness, and the saga kept the source model because
+	// the configured target model was empty on a same-harness switch.
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessClaudeCode
+	rec.Metadata.Role.ResolvedModel = "sonnet-5"
+	rec.Metadata.RuntimeLaunchID = "gen-same"
+	rec.Metadata.SwitchPending = nil
+	st.sessions[id] = rec
+
+	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("converge on a same-harness empty-model rung: %v", err)
+	}
+	if !res.Reused {
+		t.Fatal("convergence reported Reused=false")
+	}
+	if rt.created != 0 {
+		t.Fatalf("convergence launched %d runtimes; the move had already landed", rt.created)
+	}
+	if len(st.attempts) != 1 {
+		t.Fatalf("convergence spent a second rung: %d attempts", len(st.attempts))
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("the pin never cleared; the session is stuck on a move that completed")
+	}
+}
+
+// The ack CAS returns whether it actually wrote. Discarding that answer meant a
+// lost transition still appended target_ack and cleared the pin -- the inverse
+// of "the pause clears only after target_ack on THIS attempt", and it would let
+// a human's pause be lifted on an attempt the store says is not acked.
+func TestContinueFailover_LostAckTransitionDoesNotClearThePause(t *testing.T) {
+	st, _, m, id := failoverFixture(t)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor", GenerationID: "gen-lost",
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		RungIndex: 0, State: domain.FailoverAttemptRequested,
+	})
+	// Something else moves the row between the read and the CAS, so the
+	// transition this call believed it was making is lost.
+	st.beforeUpdate = func() {
+		for i := range st.attempts {
+			st.attempts[i].State = domain.FailoverAttemptFailed
+		}
+	}
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("err = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("a lost ack transition still cleared the pause")
+	}
+}
+
+// A cross-harness empty model is the OPPOSITE resolution -- provider default,
+// never the source model -- so the same comparison must still settle there.
+// Pinning both directions keeps the fix tied to resolveTargetModel's rule
+// rather than to one branch of it.
+func TestContinueFailover_CrossHarnessEmptyModelSettlesOnProviderDefault(t *testing.T) {
+	st, _, m, id := failoverFixture(t)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor", GenerationID: "gen-cross",
+		FromHarness: domain.HarnessClaudeCode, FromModel: "sonnet-5",
+		ToHarness: domain.HarnessCodex, ToModel: "",
+		RungIndex: 0, State: domain.FailoverAttemptAcked,
+	})
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedModel = "" // cross-harness never leaks the source model
+	rec.Metadata.RuntimeLaunchID = "gen-cross"
+	rec.Metadata.SwitchPending = nil
+	st.sessions[id] = rec
+
+	if _, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"}); err != nil {
+		t.Fatalf("converge on a cross-harness empty-model rung: %v", err)
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("the pin never cleared on a completed cross-harness move")
 	}
 }
 

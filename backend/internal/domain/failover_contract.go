@@ -185,6 +185,18 @@ func NextFailoverRung(m RoleMap, roleID string, current FailoverTarget, used []F
 		return FailoverTarget{}, -1, ErrFailoverNoTarget
 	}
 	for i, rung := range m.Failover.Roles[roleID] {
+		// Skipping an unknown harness is deliberate, and it is the one place in
+		// this file that looks like a silent degrade. It is not one that can
+		// affect authorization: skipping can only ever select a DIFFERENT
+		// configured rung, never an unauthorized target, so the host-authoritative
+		// guarantee is untouched.
+		//
+		// Validate() rejects an unknown harness at config-save, so a map
+		// containing one was hand-edited into the database or predates that rule.
+		// Failing the whole resolution on it would brick every continuation for
+		// the role -- turning a bad row in a ladder into a total loss of failover
+		// for that role -- which is a worse answer than using the rungs that are
+		// valid. Reviewed and kept as of the 3B review round.
 		if rung.Harness == "" || !rung.Harness.IsKnown() {
 			continue
 		}

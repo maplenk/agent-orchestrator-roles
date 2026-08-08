@@ -363,9 +363,39 @@ func (m *Manager) completeFailoverAttempt(
 	res SwitchResult,
 	reused bool,
 ) (ContinueFailoverResult, error) {
-	if _, err := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
-		attempt.State, domain.FailoverAttemptAcked, m.clock()); err != nil {
+	ok, err := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
+		attempt.State, domain.FailoverAttemptAcked, m.clock())
+	if err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: mark acked: %w", rec.ID, err)
+	}
+	if !ok {
+		// The CAS matched nothing, so the row is not in the state this call
+		// believed. Discarding that answer let the pin clear anyway -- the exact
+		// inverse of "the pause clears only after target_ack on THIS attempt",
+		// and it would also undermine the attempt row's job as the authority on
+		// which rungs are spent.
+		//
+		// Re-read rather than fail outright: post_stop has two legitimate
+		// completers racing to the same ack (an operator Continue and boot's
+		// recovery), so a loser here is ordinary. If the row is genuinely acked
+		// the move landed and only the pin clear is outstanding; anything else
+		// is a human's problem, not something to resolve by clearing a pause.
+		rows, readErr := store.ListSessionFailoverAttemptsByIncident(ctx, attempt.SessionID, attempt.IncidentID)
+		if readErr != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: re-read attempt after CAS miss: %w", rec.ID, readErr)
+		}
+		settled := false
+		for _, row := range rows {
+			if row.ID == attempt.ID && row.State == domain.FailoverAttemptAcked {
+				settled = true
+				break
+			}
+		}
+		if !settled {
+			return ContinueFailoverResult{}, fmt.Errorf(
+				"continue %s: %w: attempt %s did not reach acked (state transition from %q was lost)",
+				rec.ID, ErrFailoverRecoveryRequired, attempt.ID, attempt.State)
+		}
 	}
 	acked := attempt
 	acked.State = domain.FailoverAttemptAcked
@@ -400,7 +430,20 @@ func failoverPromotionSettled(rec domain.SessionRecord, attempt domain.FailoverA
 	if rec.Harness != attempt.ToHarness {
 		return false
 	}
-	if strings.TrimSpace(rec.Metadata.Role.ResolvedModel) != strings.TrimSpace(attempt.ToModel) {
+	// Compare against the model the SAGA resolves, not the ladder's configured
+	// one. resolveTargetModel rewrites an empty SAME-harness target to the
+	// source model, so a legal rung like {codex, ""} under a {codex, "gpt-5"}
+	// primary -- "fall back to the provider default on this harness", which
+	// ValidateRoleMap permits and which is a reasonable ladder entry -- lands on
+	// the session as "gpt-5" while the attempt row still records "".
+	//
+	// A raw equality against attempt.ToModel therefore never settles for that
+	// rung, and the session sticks: convergeUnpromotedAck finds no incomplete
+	// switch (the ack is durable and pending is already cleared), so it refuses
+	// with FAILOVER_RECOVERY_REQUIRED, the pin never clears through Continue,
+	// and the rung is spent. Only Resume escapes, and a resume is not a failover.
+	want := resolveTargetModel(attempt.ToModel, attempt.FromModel, attempt.FromHarness == attempt.ToHarness)
+	if strings.TrimSpace(rec.Metadata.Role.ResolvedModel) != strings.TrimSpace(want) {
 		return false
 	}
 	return strings.TrimSpace(rec.Metadata.RuntimeLaunchID) == strings.TrimSpace(attempt.GenerationID)
