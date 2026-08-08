@@ -425,6 +425,9 @@ Deferred beyond this MVP:
 - successor orchestrator sessions;
 - live-worker rebinding;
 - desktop role-map editing;
+- per-project containment for an unreadable or forward-versioned stored
+  `ProjectConfig` (today one bad row fails `ListProjects`; the follow-up must
+  keep other projects available while preserving and write-fencing that row);
 - Pi/Muse orchestrator switching; and
 - automatic enforcement of model-quality/instruction-following behavior.
 

@@ -74,6 +74,7 @@ post-MVP work for roles that genuinely require technical write denial.
 | ProjectConfig.roleMap + Validate (domain) | **Done** | `domain/projectconfig.go` |
 | CLI / API roleMap round-trip | **Done** | CLI `roleMap` mirror + set-config; live dogfood set roleMap via CLI |
 | Strict role JSON + durable read safety | **Done** | HTTP/CLI require both permission booleans and reject unknown binding fields; `663f9339` makes malformed persisted bindings fail reads without rewriting their bytes while valid semantics/SHA/bytes remain stable |
+| Per-project unreadable-config containment | **Deferred follow-up** | `ListProjects` currently fails the whole list when any one stored `ProjectConfig` cannot be decoded. This is fail-safe for writes but turns one corrupt or forward-versioned row into an app-wide availability failure, including rollback/mixed-version use. Required contract: keep other projects listable; expose the affected project as config-unreadable; preserve its raw bytes; and refuse config mutations for that row until repaired. Do not restore silent zero-config degradation. |
 | Host-authoritative `ao spawn --role` | **Done** | CLI + HTTP `roleId`; Resolve rejects free-form harness with role |
 | Strict: role required for workers; no harness override | **Done** | `roles/resolve.go` |
 | Strict orch auto-bind `orchestratorRole` | **Done** | Pins routing/delegation policy; explicit read-only remains capability-gated |
