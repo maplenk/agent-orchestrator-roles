@@ -38,12 +38,18 @@ actually writes the code) are tracked separately, because they fail
 independently: a wrapper can be alive and healthy while its delegate is refusing
 calls.
 
-| Agent | Slice | Wrapper | Delegation | Progress file | Wrapper status |
+| Agent | Slice | Wrapper | Delegation | Progress file | Status |
 |---|---|---|---|---|---|
-| A | Failover core: domain, manager saga, migration 9008, store | Claude Opus 5 | — (direct) | `AGENT_A_PROGRESS.md` | **stopped 2026-08-07** pending contract amendment |
-| B | Service + HTTP + OpenAPI + CLI | Claude Opus 5 wrapper → `gpt-5.6-sol` via CLIProxy | unconfirmed | `AGENT_B_PROGRESS.md` | running |
-| C | Desktop UI: Continue control, locales | Claude Opus 5 | — (direct) | `AGENT_C_PROGRESS.md` | running |
-| D | Restart-assignment defect (paused-dead seam) | Claude Opus 5 wrapper → `gpt-5.6-sol` via CLIProxy | unconfirmed | `AGENT_D_PROGRESS.md` | running |
+| A | Failover core: domain, manager saga, migration 9008, store | Claude Opus 5 | — (direct) | `AGENT_A_PROGRESS.md` | **merged** `ea257ac3` |
+| B | Service + HTTP + OpenAPI + CLI | Claude Opus 5 wrapper → `gpt-5.6-sol` via CLIProxy | **confirmed** — Codex did the work, two runs | `AGENT_B_PROGRESS.md` | **merged** `b4c71d07` |
+| C | Desktop UI: Continue control, locales | Claude Opus 5 | — (direct) | `AGENT_C_PROGRESS.md` | **merged** `a3f5ec1b` |
+| D | Restart-assignment defect (paused-dead seam) | Claude Opus 5 wrapper → `gpt-5.6-sol` via CLIProxy | **confirmed** | `AGENT_D_PROGRESS.md` | **merged** `8e15546d` |
+
+Delegation is no longer `unconfirmed`: Agent B reported that `gpt-5.6-sol` did
+all of its work across two runs (the first died mid-verification, the second
+resumed from the on-disk progress log and finished) — which is also the clearest
+evidence the progress-file discipline earns its keep, since the resume crossed a
+process boundary with no chat context at all.
 
 `codex-implementor` is a Claude Opus 5 agent whose only tool is Bash; it shells
 out to `~/.claude/bin/cliproxy-run gpt-5.6-sol`. So B and D are **thin-Claude,
@@ -127,13 +133,87 @@ typecheck alone would gate a slice by its least informative check, and the
 api-drift job is what CI fails on if the generated artifacts were not committed
 with the Go change.
 
+**The api-drift check is a POST-commit gate only.** Agent B pointed out that
+`git diff --exit-code` compares against `HEAD`, so while the generated artifacts
+are legitimately uncommitted work-in-progress the check cannot pass no matter
+how correct they are — as written it was an impossible pre-commit gate. The
+pre-commit property worth checking is different: run `npm run api` twice and
+confirm the artifacts are byte-identical across regenerations, which proves they
+match generator output with no hand-editing. Run the `--exit-code` form after
+the commit, which is what CI actually does. Both were run for this MVP and both
+passed.
+
 Then an independent reviewer (a model that did **not** implement the layer)
 attacks: incident replay, stale pause clearing, free-form target injection,
 capability bypass, pause cleared before ack, double runtime after recovery,
 failure enabling an automatic retry, role/template/model drift, restart falsely
 claiming assignment delivery.
 
+## Integration record (2026-08-08)
+
+All four slices merged. Trunk `roles/multi-sub-v1`:
+
+| Commit | Slice |
+|---|---|
+| `8e15546d` | D — restart reports `saved_prompt` only after delivery succeeds |
+| `ea257ac3` | A — 7 commits, cherry-picked from `roles/3b-agent-a` |
+| `b4c71d07` | B — service, HTTP, OpenAPI, CLI |
+| `a3f5ec1b` | C — desktop Continue control, eight locales |
+| `e8324e92` | orchestrator — lint integration cleanup |
+
+Gate results: `gofmt` clean · `go vet ./...` clean · `go test ./...` **4577
+passed / 131 packages** · `go test -race ./...` **zero DATA RACE reports** ·
+`golangci-lint` v2.12.2 **0 issues** · frontend typecheck clean · vitest **2028
+passed / 150 files** · api-drift clean.
+
+**Flaky-test honesty.** Three timeout-based failures appeared across the full
+runs — `opencode`'s `TestOpenCodeAuthStatusUnknownWithZeroCredentials`,
+`kilocode`'s `TestAuthStatusUnknownWhenKeyOnlyComesFromInteractiveShell`, and a
+fake-clock speedup assertion. None reproduce. All three are wall-clock
+assertions; all live in packages this MVP touched **zero** files in (verified
+with `git diff --name-only daee190a..HEAD | grep adapters/agent` → 0); and the
+two adapter packages pass 90/90 under `-race` in isolation. Four agents plus
+concurrent builds were saturating the machine. Recorded rather than re-run until
+green, because "it passed the second time" is not the same claim as "it was
+never ours".
+
+### Orchestrator decisions taken at integration
+
+1. **`ReconcileFailoverAttempts` is NOT wired into boot**, reversing what Agent A
+   was told. It is already called at the top of both entry points, and boot's
+   `pausedSkip` means boot never acts on a paused session, so a boot call would
+   write on every session at startup for no observable benefit. Lazy
+   reconciliation covers every read path.
+2. **The three `nilerr` reports in `FailoverPreview` are suppressed, not fixed.**
+   Those sites turn an error into a machine-readable `Reason`, which is the
+   preview's job; every infrastructure failure in that function still returns an
+   error, so an unreadable store never renders as an available preview.
+3. **A's sqlc finding is recorded, not acted on.** See below.
+
+### Carried forward — deliberately out of MVP scope
+
+- **The sqlc 1.31 truncation is misdiagnosed in this repo.** `queries/sessions.sql:119`
+  and `queries/changelog.sql:10` blame literals on the RHS of `=` in
+  DELETE/UPDATE. Agent A's evidence says the real cause is multi-byte UTF-8
+  earlier in the file (rune offsets sliced as byte offsets): its first draft used
+  `§` and `—` in comments and mangled all four statements *including a plain
+  INSERT with no `=` in it*, which the old theory cannot explain, and identical
+  SQL with ASCII-only comments generated all four intact. Consequence: the
+  hand-written `ExecContext` fallbacks in `session_store.go`
+  (`SetSessionPauseIfAbsent`, `ClearSessionPauseIfIncident`, `DeleteSession`) may
+  be unnecessary. Deserves its own change — those are durable pause paths.
+- `ROUTE_TEMPLATES` in `api-client.ts` claims to mirror `schema.ts` but omits
+  `/pause` and `/resume`. Add all three together in one follow-up.
+- `AGENTS.md`'s frontend checklist says `npm run build`, which does not exist in
+  `frontend/package.json`.
+- One unreproduced frontend flake (2027/1 in a single full-suite run under heavy
+  concurrent load; the same code then passed 3× full and 5× on the file).
+
 ## Wave 3 — live dogfood
 
-The nine acceptance records in contract §12. `limit_detection_supported` stays
-`false`; nothing is promoted by this MVP.
+The nine acceptance records in contract §12, none of which are done yet. They
+need a running daemon and a real paused role-pinned worker; contract §12 items
+1–2 are also the first time the desktop Continue control renders against a real
+`failover` block rather than a shaped read model.
+
+`limit_detection_supported` stays `false`; nothing is promoted by this MVP.
