@@ -118,6 +118,20 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	if rec.IsTerminated {
 		return SwitchWorkerOutcome{}, apierr.Conflict("SESSION_TERMINATED", "Session is terminated", nil)
 	}
+	// Preserve the saga's durable-state ordering at the service boundary. A
+	// pause is the more specific lifecycle refusal even when the committed mode
+	// is Chat, and it must be reported before any interface-specific preflight.
+	if rec.Metadata.Pause != nil {
+		return SwitchWorkerOutcome{}, toAPIError(sessionmanager.ErrSwitchPaused)
+	}
+	// Chat controllers cannot enter the switch/fresh saga. Refuse from the
+	// durable session record before same-harness dispatch, role-map reads, or a
+	// manager call. Relying only on the manager was insufficient: an unpinned
+	// Chat orchestrator could fail earlier with ROLE_PIN_REQUIRED, while Fresh
+	// could reach a controller-less saga through the no-role path.
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		return SwitchWorkerOutcome{}, toAPIError(sessionmanager.ErrSwitchChatUnsupported)
+	}
 
 	sc, ok := s.manager.(switchCommander)
 	if !ok {

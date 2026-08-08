@@ -166,23 +166,105 @@ func TestSwitchWorker_MapsNotSupported(t *testing.T) {
 	}
 }
 
-func TestSwitchWorker_ChatModeStillReturnsTypedConflict(t *testing.T) {
-	st := newFakeStore()
-	id := domain.SessionID("mer-1")
-	seedSwitchSession(st, id, domain.HarnessClaudeCode)
-	rec := st.sessions[id]
-	rec.Kind = domain.KindOrchestrator
-	rec.Mode = domain.SessionModeChat
-	st.sessions[id] = rec
-	cmd := &fakeCommander{switchErr: sessionmanager.ErrSwitchChatUnsupported}
-	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+func TestSwitchWorker_ChatModeRefusesEveryEntryBeforeAuthorizationOrManager(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*Service, domain.SessionID) (SwitchWorkerOutcome, error)
+	}{
+		{
+			name: "fresh endpoint",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.FreshConversation(context.Background(), id, "refresh")
+			},
+		},
+		{
+			name: "same harness switch",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+					SessionID: id, TargetHarness: domain.HarnessClaudeCode,
+				})
+			},
+		},
+		{
+			name: "cross harness switch",
+			run: func(svc *Service, id domain.SessionID) (SwitchWorkerOutcome, error) {
+				return svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+					SessionID: id, TargetHarness: domain.HarnessCodex,
+				})
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			id := domain.SessionID("mer-1")
+			// Deliberately no project config and no durable role pin. Chat-mode
+			// refusal must outrank target authorization for every entry point.
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+			st.sessions[id] = domain.SessionRecord{
+				ID: id, ProjectID: "mer", Kind: domain.KindOrchestrator,
+				Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeChat,
+			}
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: st})
 
-	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
-		SessionID: id, TargetHarness: domain.HarnessCodex,
-	})
-	var apiErr *apierr.Error
-	if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindConflict || apiErr.Code != "SWITCH_CHAT_UNSUPPORTED" {
-		t.Fatalf("err=%v, want 409 SWITCH_CHAT_UNSUPPORTED", err)
+			_, err := tc.run(svc, id)
+			var apiErr *apierr.Error
+			if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindConflict || apiErr.Code != "SWITCH_CHAT_UNSUPPORTED" {
+				t.Fatalf("err=%v, want 409 SWITCH_CHAT_UNSUPPORTED", err)
+			}
+			if cmd.switchCalls != 0 || cmd.orchestratorSwitchCalls != 0 || cmd.freshCalls != 0 || cmd.orchestratorFreshCalls != 0 {
+				t.Fatalf("manager calls worker/orchestrator/fresh/orchestratorFresh = %d/%d/%d/%d, want all zero",
+					cmd.switchCalls, cmd.orchestratorSwitchCalls, cmd.freshCalls, cmd.orchestratorFreshCalls)
+			}
+		})
+	}
+}
+
+func TestSwitchWorker_ChatPreflightPreservesDurableStateOrdering(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		rec  func(domain.SessionRecord) domain.SessionRecord
+		code string
+	}{
+		{
+			name: "terminated outranks chat",
+			rec: func(rec domain.SessionRecord) domain.SessionRecord {
+				rec.IsTerminated = true
+				return rec
+			},
+			code: "SESSION_TERMINATED",
+		},
+		{
+			name: "pause outranks chat",
+			rec: func(rec domain.SessionRecord) domain.SessionRecord {
+				rec.Metadata.Pause = &domain.SessionPause{IncidentID: "limit-1"}
+				return rec
+			},
+			code: "SWITCH_PAUSED",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := newFakeStore()
+			id := domain.SessionID("mer-1")
+			rec := domain.SessionRecord{
+				ID: id, ProjectID: "mer", Kind: domain.KindOrchestrator,
+				Harness: domain.HarnessClaudeCode, Mode: domain.SessionModeChat,
+			}
+			st.sessions[id] = tc.rec(rec)
+			cmd := &fakeCommander{}
+			svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+
+			_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+				SessionID: id, TargetHarness: domain.HarnessCodex,
+			})
+			var apiErr *apierr.Error
+			if !errors.As(err, &apiErr) || apiErr.Code != tc.code {
+				t.Fatalf("err=%v, want %s", err, tc.code)
+			}
+			if cmd.switchCalls+cmd.orchestratorSwitchCalls+cmd.freshCalls+cmd.orchestratorFreshCalls != 0 {
+				t.Fatal("durable-state refusal reached the manager")
+			}
+		})
 	}
 }
 
