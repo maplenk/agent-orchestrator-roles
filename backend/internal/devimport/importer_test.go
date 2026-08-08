@@ -2,6 +2,9 @@ package devimport
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +39,48 @@ func TestRunImportsIntoEmptyTarget(t *testing.T) {
 	}
 	if got.Path != project.Path || got.Config.DefaultBranch != "develop" || got.Config.SessionPrefix != "a" {
 		t.Fatalf("target project = %#v", got)
+	}
+}
+
+func TestRunRejectsMalformedSourceProjectConfigWithoutImporting(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	source, err := sqlitetest.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = source.Close() })
+	target := newStore(t)
+	if err := source.UpsertProject(ctx, testProject("alpha", "/repos/alpha")); err != nil {
+		t.Fatal(err)
+	}
+
+	rawConfig := `{"defaultBranch":"develop","roleMap":{"role_map_schema_version":1,"roles":{"orchestrator":{"template":"orchestrator","harness":"codex","permissions":{"canSpawn":true},"futureField":"must-not-be-dropped"}}}}`
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET config = ? WHERE id = ?`, rawConfig, "alpha"); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(ctx, source, target, Options{SourceDataDir: "src", TargetDataDir: "dst"})
+	if err == nil || !strings.Contains(err.Error(), "list source projects") {
+		t.Fatalf("Run error = %v, want source project decode failure", err)
+	}
+	if rep.Inserted != 0 || rep.Updated != 0 || rep.Skipped != 0 {
+		t.Fatalf("report = %#v, want no attempted imports", rep)
+	}
+	if projects, err := target.ListProjects(ctx); err != nil || len(projects) != 0 {
+		t.Fatalf("target projects = %#v, err=%v; want empty target", projects, err)
+	}
+	var persisted string
+	if err := db.QueryRowContext(ctx, `SELECT config FROM projects WHERE id = ?`, "alpha").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != rawConfig {
+		t.Fatalf("source config was rewritten: got %s want %s", persisted, rawConfig)
 	}
 }
 

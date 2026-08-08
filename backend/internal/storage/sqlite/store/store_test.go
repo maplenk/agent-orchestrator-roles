@@ -410,7 +410,7 @@ func TestProjectConfigRoundTrips(t *testing.T) {
 	}
 }
 
-func TestProjectConfigMalformedPersistedRoleBindingPreservesUnrelatedConfig(t *testing.T) {
+func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.T) {
 	dataDir := t.TempDir()
 	s := sqlitetest.MustOpenAt(t, dataDir)
 	ctx := context.Background()
@@ -421,10 +421,8 @@ func TestProjectConfigMalformedPersistedRoleBindingPreservesUnrelatedConfig(t *t
 		t.Fatalf("seed project: %v", err)
 	}
 
-	// Simulate a durable row authored before role permissions became
-	// presence-aware. The binding is malformed for current ingress (missing
-	// workspaceWrites and carrying an unknown field), but the rest of the
-	// ProjectConfig is valid and must survive a read-modify-write.
+	// Simulate a durable row whose role binding is malformed for current ingress:
+	// workspaceWrites is missing and the binding carries an unknown field.
 	rawConfig := `{
 		"defaultBranch":"develop",
 		"env":{"KEEP":"yes"},
@@ -453,31 +451,11 @@ func TestProjectConfigMalformedPersistedRoleBindingPreservesUnrelatedConfig(t *t
 		t.Fatalf("seed malformed persisted config: %v", err)
 	}
 
-	got, ok, err := s.GetProject(ctx, "legacy-role")
-	if err != nil || !ok {
-		t.Fatalf("get project: ok=%v err=%v", ok, err)
-	}
-	if got.Config.IsZero() || got.Config.DefaultBranch != "develop" || got.Config.Env["KEEP"] != "yes" || got.Config.AgentRules != "preserve me" {
-		t.Fatalf("decoded config = %#v, want unrelated fields preserved", got.Config)
-	}
-	binding, ok := got.Config.RoleMap.Roles["orchestrator"]
-	if !ok || binding.Permissions.WorkspaceWrites || !binding.Permissions.CanSpawn {
-		t.Fatalf("decoded persisted binding = %#v", binding)
-	}
-
 	// Mirrors the SCM observer's origin-URL backfill: it changes an unrelated
-	// project field and writes the whole row back. That path must never persist
-	// SQL NULL / a zero config because one old role binding was strict-invalid.
-	got.RepoOriginURL = "https://example.com/acme/legacy-role.git"
-	if err := s.UpsertProject(ctx, got); err != nil {
-		t.Fatalf("persist unrelated row update: %v", err)
-	}
-	after, ok, err := s.GetProject(ctx, "legacy-role")
-	if err != nil || !ok {
-		t.Fatalf("get updated project: ok=%v err=%v", ok, err)
-	}
-	if after.Config.IsZero() || after.Config.DefaultBranch != "develop" || after.Config.Env["KEEP"] != "yes" || after.Config.AgentRules != "preserve me" {
-		t.Fatalf("updated config = %#v, want unrelated fields preserved", after.Config)
+	// project field and writes the whole row back. The storage read must fail so
+	// the observer never receives a sanitized config it can persist.
+	if got, ok, err := s.GetProject(ctx, "legacy-role"); err == nil || ok || !got.Config.IsZero() {
+		t.Fatalf("get malformed project: got=%#v ok=%v err=%v, want decode error", got, ok, err)
 	}
 
 	var persisted sql.NullString
@@ -487,12 +465,12 @@ func TestProjectConfigMalformedPersistedRoleBindingPreservesUnrelatedConfig(t *t
 	if !persisted.Valid || persisted.String == "" {
 		t.Fatalf("persisted config = %#v, want non-zero JSON", persisted)
 	}
-	var persistedJSON map[string]any
-	if err := json.Unmarshal([]byte(persisted.String), &persistedJSON); err != nil {
-		t.Fatalf("decode persisted JSON: %v", err)
+	if persisted.String != rawConfig {
+		t.Fatalf("malformed config was rewritten:\n got: %s\nwant: %s", persisted.String, rawConfig)
 	}
-	if persistedJSON["defaultBranch"] != "develop" || persistedJSON["agentRules"] != "preserve me" {
-		t.Fatalf("persisted JSON = %#v, want unrelated fields", persistedJSON)
+
+	if projects, err := s.ListProjects(ctx); err == nil || projects != nil {
+		t.Fatalf("list projects = %#v, err=%v; want decode error", projects, err)
 	}
 }
 
