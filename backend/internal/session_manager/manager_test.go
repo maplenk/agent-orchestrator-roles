@@ -20,6 +20,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 	"github.com/aoagents/agent-orchestrator/backend/internal/roles"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 )
 
 var ctx = context.Background()
@@ -3657,6 +3658,59 @@ func TestSpawn_StrictOrchestratorReadOnlyLaunch_Codex(t *testing.T) {
 	}
 	if rec.Harness != domain.HarnessCodex {
 		t.Fatalf("harness = %q, want codex", rec.Harness)
+	}
+}
+
+func TestSpawn_StrictWritableOrchestratorLaunch_Claude(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"orchestrator.md": "---\nid: orchestrator\nname: Orch\n---\n# O\n",
+		"implementor.md":  "---\nid: implementor\nname: Impl\n---\n# I\n",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	st := newFakeStore()
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{RoleMap: domain.RoleMap{
+			SchemaVersion:    domain.RoleMapSchemaVersion,
+			StrictDelegation: true,
+			OrchestratorRole: "orchestrator",
+			Roles: map[string]domain.RoleBinding{
+				"orchestrator": {
+					Template: "orchestrator", Harness: domain.HarnessClaudeCode,
+					Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: true},
+				},
+			},
+		}},
+	}
+	agent := &recordingAgent{}
+	m := New(Deps{
+		Runtime: &fakeRuntime{}, Agents: singleAgent{agent: agent}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+
+	rec, _, _, err := m.Spawn(ctx, ports.SpawnConfig{ProjectID: "mer", Kind: domain.KindOrchestrator})
+	if err != nil {
+		t.Fatalf("strict writable Claude orchestrator spawn: %v", err)
+	}
+	if agent.lastLaunch.ReadOnly {
+		t.Fatal("strict delegation falsely forced Claude into read-only launch")
+	}
+	if rec.Harness != domain.HarnessClaudeCode || rec.Metadata.Role.RoleID != "orchestrator" {
+		t.Fatalf("strict role routing not pinned: %+v", rec)
+	}
+	if !rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites || !rec.Metadata.Role.ResolvedPermissions.CanSpawn {
+		t.Fatalf("configured permissions not preserved: %+v", rec.Metadata.Role.ResolvedPermissions)
+	}
+	if capabilities.For(domain.HarnessClaudeCode).ReadOnlyEnforced {
+		t.Fatal("writable strict launch must not promote Claude read_only_enforced")
 	}
 }
 

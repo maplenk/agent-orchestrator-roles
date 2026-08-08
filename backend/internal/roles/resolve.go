@@ -83,10 +83,10 @@ func Resolve(in ResolveInput) (Resolved, error) {
 		}
 	}
 
-	// Strict maps: auto-bind KindOrchestrator to orchestratorRole so policy is
-	// never skipped. That role must be workspaceWrites=false (Validate), so
-	// applyRoleMap then fails closed with ErrReadOnlyUnsupported until adapters
-	// implement read-only launch — never fall back to a legacy writable orch.
+	// Strict maps: auto-bind KindOrchestrator to orchestratorRole so routing,
+	// delegation instructions and spawn authority are never skipped. Strictness
+	// does not itself imply workspaceWrites=false; an explicitly read-only role
+	// is still capability-gated by applyRoleMap.
 	// Non-strict maps may still spawn KindOrchestrator without a RoleID.
 	if roleID == "" && in.Kind == domain.KindOrchestrator && m.StrictDelegation {
 		roleID = m.OrchestratorRole
@@ -166,6 +166,7 @@ func DelegationContractMarkdown(projectID domain.ProjectID, m domain.RoleMap) st
 	var b strings.Builder
 	b.WriteString("## HARD DELEGATION CONTRACT (host role map — non-negotiable)\n\n")
 	b.WriteString("You are the orchestrator. You MUST NOT implement code in this session.\n\n")
+	b.WriteString("This is an instruction-enforced coordination policy; workspace write denial applies only when the role is explicitly configured with workspaceWrites=false.\n\n")
 	b.WriteString("### Role catalog\n")
 	b.WriteString("| Role | Template | Harness | Model |\n")
 	b.WriteString("|------|----------|---------|-------|\n")

@@ -191,6 +191,39 @@ func TestValidateRoleMap_RejectsClaudeAndPiReadOnly(t *testing.T) {
 	}
 }
 
+func TestValidateRoleMap_AllowsStrictWritableClaudeOrchestratorAndCodexRung(t *testing.T) {
+	m := domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		StrictDelegation: true,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {
+				Template: "orchestrator",
+				Harness:  domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{
+					WorkspaceWrites: true,
+					CanSpawn:        true,
+				},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Mode: domain.FailoverModeManual,
+			Roles: map[string][]domain.FailoverTarget{
+				"orchestrator": {{Harness: domain.HarnessCodex}},
+			},
+		},
+	}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("domain validation rejected strict writable orchestrator: %v", err)
+	}
+	if err := ValidateRoleMap(m); err != nil {
+		t.Fatalf("capability validation rejected Claude/Codex writable ladder: %v", err)
+	}
+	if For(domain.HarnessClaudeCode).ReadOnlyEnforced {
+		t.Fatal("strict writable orchestration must not promote Claude read_only_enforced")
+	}
+}
+
 func TestValidateRoleMap_AllowsCodexReadOnly(t *testing.T) {
 	m := domain.RoleMap{
 		SchemaVersion:    domain.RoleMapSchemaVersion,

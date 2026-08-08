@@ -34,7 +34,7 @@ func testMap() domain.RoleMap {
 				Template: "orchestrator",
 				Harness:  domain.HarnessClaudeCode,
 				Permissions: domain.RoleExecutionPolicy{
-					WorkspaceWrites: false,
+					WorkspaceWrites: true,
 					CanSpawn:        true,
 				},
 			},
@@ -108,8 +108,8 @@ func TestResolve_StrictOrchestratorAutoBindsRole(t *testing.T) {
 	if r.Session.ResolvedHarness != domain.HarnessClaudeCode {
 		t.Fatalf("harness = %q", r.Session.ResolvedHarness)
 	}
-	if r.Session.ResolvedPermissions.WorkspaceWrites {
-		t.Fatal("orchestrator must pin workspaceWrites=false")
+	if !r.Session.ResolvedPermissions.WorkspaceWrites {
+		t.Fatal("strict orchestration must preserve the configured writable policy")
 	}
 }
 
@@ -158,6 +158,9 @@ func TestDelegationContractMarkdown(t *testing.T) {
 	}
 	if !strings.Contains(md, "### Forbidden") {
 		t.Fatal("contract must include Forbidden section")
+	}
+	if !strings.Contains(md, "instruction-enforced") {
+		t.Fatal("contract must state that strict coordination is instruction-enforced")
 	}
 	required := md
 	if i := strings.Index(md, "### Forbidden"); i >= 0 {

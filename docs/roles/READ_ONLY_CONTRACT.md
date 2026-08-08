@@ -58,17 +58,22 @@ All of the following must land before `read_only_enforced=true` for Claude:
 
 Full agent binary FS/Git write negation under Codex sandbox is best-effort outside CI when binary present.
 
-## 5. Orchestrator + `ao spawn` without write-capable shell
+## 5. Strict orchestration and explicit read-only are independent
 
-A strict orchestrator has `workspaceWrites:false` and `canSpawn:true`.
+A strict orchestrator has `canSpawn:true`. Strict mode pins its role and
+routing, rejects caller execution overrides, and injects the coordination-only
+delegation contract. It does **not** imply `workspaceWrites:false` and does not
+claim the model is physically unable to edit.
 
-| Allowed | How |
-|---------|-----|
-| Invoke `ao spawn` / session APIs | Session-scoped spawn capability — **application-level** |
-| Worktree writes | **Denied** by Codex OS sandbox |
-| General write shell | **Denied** by sandbox (Codex) |
+The configured permission remains authoritative:
 
-Phase 1 **RO orchestrator must use Codex** (or any future harness with true enforcement). Claude is rejected for `workspaceWrites:false`.
+| Orchestrator policy | Result |
+|---------------------|--------|
+| `workspaceWrites:true`, `canSpawn:true` | Codex or Claude Code may run it. The no-implementation rule is instruction-enforced. |
+| `workspaceWrites:false`, `canSpawn:true` | Requires `read_only_enforced`; today that means Codex. Worktree writes are sandbox-denied. |
+
+Claude remains rejected for an explicitly read-only orchestrator. Allowing a
+writable strict orchestrator does not promote Claude's capability cell.
 
 ## 6. When validated
 
@@ -83,5 +88,8 @@ Phase 1 **RO orchestrator must use Codex** (or any future harness with true enfo
 - Same-UID residual risk remains (agent clearing markers and reading runfiles).
 - **Codex:** OS sandbox residual depends on binary version/platform; network/side effects outside FS are out of scope.
 - **Claude:** deliberately **not** RO-enforced in v1 registry.
+- Strict orchestration with `workspaceWrites:true` is coordination policy, not
+  a filesystem-enforcement claim. A model that implements anyway has violated
+  its role instructions; it has not escaped a sandbox AO claimed to provide.
 - Pi remains not RO-capable until an external sandbox is wired.
 - `CAPABILITY_MATRIX.md` is documentation; the **runtime registry** is source of truth.
