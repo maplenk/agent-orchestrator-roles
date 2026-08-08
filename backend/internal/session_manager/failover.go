@@ -316,6 +316,14 @@ func (m *Manager) adoptFailoverAttempt(
 	}
 
 	res, err := m.RecoverSwitchFromPostStop(ctx, rec.ID)
+	if errors.Is(err, ErrSwitchInProgress) {
+		// The matching generation belongs to the live saga that still owns the
+		// switch fence. A duplicate Continue observes its durable pending pin,
+		// but must not promote the OUTER attempt while the first caller is still
+		// between pre_stop and target_ack. Doing so steals the first caller's
+		// requested->acked CAS after an otherwise successful switch.
+		return failoverResult(rec, attempt, true), nil
+	}
 	if err != nil {
 		// Still recoverable, and still the same generation. The attempt stays
 		// non-terminal so the next Continue (or boot recovery) can finish it;

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // failoverFakeStore adds the narrow failover surface to the shared fakeStore by
@@ -166,6 +167,22 @@ func failoverFixture(t *testing.T) (*failoverFakeStore, *fakeRuntime, *Manager, 
 	})
 	m.switchCapsOverride = testSwitchCaps
 	return st, rt, m, id
+}
+
+type blockingDestroyRuntime struct {
+	*fakeRuntime
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingDestroyRuntime) Destroy(ctx context.Context, handle ports.RuntimeHandle) error {
+	close(r.entered)
+	select {
+	case <-r.release:
+		return r.fakeRuntime.Destroy(ctx, handle)
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // --- structural guarantees -------------------------------------------------
@@ -568,6 +585,119 @@ func TestContinueFailover_ConcurrentDuplicateReusesWithoutLaunching(t *testing.T
 	}
 	if st.sessions[id].Metadata.Pause == nil {
 		t.Fatal("concurrent duplicate lifted the pause before any ack")
+	}
+}
+
+// A product-real duplicate: the first Continue has persisted switch_pending
+// and pre_stop, holds beginSwitch, and is blocked destroying the source. The
+// duplicate must report reuse without promoting the OUTER failover attempt to
+// post_stop. That phase belongs to the switch ledger; moving the attempt while
+// the first saga still owns it makes the first requested->acked CAS lose after
+// a completely successful target_ack.
+func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	blocking := &blockingDestroyRuntime{
+		fakeRuntime: rt,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	m.runtime = blocking
+
+	type outcome struct {
+		result ContinueFailoverResult
+		err    error
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	defer cancelFirst()
+	firstDone := make(chan outcome, 1)
+	go func() {
+		res, err := m.ContinueFailover(firstCtx, id, ContinueFailoverRequest{IncidentID: "inc-1"})
+		firstDone <- outcome{result: res, err: err}
+	}()
+
+	select {
+	case <-blocking.entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Continue never reached source Destroy")
+	}
+	beforeDuplicate := st.only(t)
+	if beforeDuplicate.State != domain.FailoverAttemptRequested {
+		close(blocking.release)
+		t.Fatalf("attempt state before duplicate = %q, want requested", beforeDuplicate.State)
+	}
+	pending := st.sessions[id].Metadata.SwitchPending
+	if pending == nil || pending.GenerationID != beforeDuplicate.GenerationID {
+		close(blocking.release)
+		t.Fatalf("first Continue did not durably pin its generation before Destroy: %+v", pending)
+	}
+
+	duplicate, duplicateErr := m.ContinueFailover(
+		context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"},
+	)
+	duringDestroy := st.only(t)
+	close(blocking.release)
+	var first outcome
+	select {
+	case first = <-firstDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first Continue did not finish after Destroy was released")
+	}
+
+	if duplicateErr != nil {
+		t.Fatalf("duplicate Continue while Destroy was blocked: %v", duplicateErr)
+	}
+	if !duplicate.Reused || duplicate.GenerationID != beforeDuplicate.GenerationID || duplicate.AttemptSeq != 1 {
+		t.Fatalf("duplicate did not reuse the one durable attempt: %+v", duplicate)
+	}
+	if duringDestroy.State != domain.FailoverAttemptRequested {
+		t.Fatalf("duplicate stole attempt promotion during pre_stop: state=%q, want requested", duringDestroy.State)
+	}
+	if first.err != nil {
+		t.Fatalf("first Continue returned an error after target acknowledgement: %v", first.err)
+	}
+	if first.result.Reused || first.result.GenerationID != duplicate.GenerationID {
+		t.Fatalf("first result = %+v, duplicate = %+v", first.result, duplicate)
+	}
+
+	attempt := st.only(t)
+	if attempt.State != domain.FailoverAttemptAcked {
+		t.Fatalf("final attempt state = %q, want acked", attempt.State)
+	}
+	rec := st.sessions[id]
+	if rec.Metadata.Pause != nil || rec.Metadata.SwitchPending != nil {
+		t.Fatalf("successful first Continue left durable pins: pause=%+v pending=%+v",
+			rec.Metadata.Pause, rec.Metadata.SwitchPending)
+	}
+	if rec.Harness != domain.HarnessCodex || rec.Metadata.RuntimeLaunchID != attempt.GenerationID {
+		t.Fatalf("target promotion = harness %q generation %q, want codex/%q",
+			rec.Harness, rec.Metadata.RuntimeLaunchID, attempt.GenerationID)
+	}
+	if rt.destroyed != 1 || rt.created != 1 || rec.Metadata.RuntimeHandleID == "" {
+		t.Fatalf("runtime destroy/create/active = %d/%d/%q, want 1/1/non-empty",
+			rt.destroyed, rt.created, rec.Metadata.RuntimeHandleID)
+	}
+	var failoverPhases, switchPhases []domain.LifecycleLedgerPhase
+	for _, event := range st.ledger {
+		if event.GenerationID != attempt.GenerationID {
+			continue
+		}
+		switch event.Kind {
+		case domain.LifecycleKindFailover:
+			failoverPhases = append(failoverPhases, event.Phase)
+		case domain.LifecycleKindSwitch:
+			switchPhases = append(switchPhases, event.Phase)
+		}
+	}
+	wantFailover := []domain.LifecycleLedgerPhase{
+		domain.LifecyclePhaseRequested, domain.LifecyclePhaseTargetAck,
+	}
+	wantSwitch := []domain.LifecycleLedgerPhase{
+		domain.LifecyclePhaseRequested, domain.LifecyclePhasePreStop,
+		domain.LifecyclePhasePostStop, domain.LifecyclePhaseTargetAck,
+	}
+	if !reflect.DeepEqual(failoverPhases, wantFailover) || !reflect.DeepEqual(switchPhases, wantSwitch) {
+		t.Fatalf("ledger phases failover=%v switch=%v, want %v / %v",
+			failoverPhases, switchPhases, wantFailover, wantSwitch)
 	}
 }
 
