@@ -262,12 +262,14 @@ var (
 	// with no message (issue #2775).
 	ErrRuntimeWorkspaceCwdMismatch = errors.New("runtime: session working directory mismatch")
 	// ErrRuntimeUnavailable reports that a liveness probe could not reach the
-	// runtime infrastructure at all (e.g. tmux "no server running" or "error
-	// connecting"). It says nothing about any individual session, so callers
-	// must treat it as an inconclusive probe, never as per-session death
-	// (issue #3475: reading a server-level outage as N session deaths archived
-	// every session on the board). Adapters wrap this sentinel via fmt.Errorf
-	// so callers can match it with errors.Is.
+	// runtime infrastructure and learned nothing authoritative about the target
+	// session (for tmux, "error connecting" or "no server running" on the shared
+	// default socket). Callers must treat it as an inconclusive probe, never as
+	// per-session death. An adapter that can prove infrastructure absence also
+	// proves session absence and returns (false, nil) instead; the tmux adapter
+	// does this only for literal server absence on an AO-namespaced socket.
+	// Adapters wrap this sentinel via fmt.Errorf so callers can match it with
+	// errors.Is (issue #3475).
 	ErrRuntimeUnavailable = errors.New("runtime: infrastructure unavailable")
 )
 

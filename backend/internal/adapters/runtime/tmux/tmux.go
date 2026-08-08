@@ -533,13 +533,14 @@ func (r *Runtime) paneSessionIDs(ctx context.Context, id string) []int {
 
 // IsAlive reports whether the handle's session still exists via `tmux
 // has-session`. Exit 0 means alive. A non-zero exit with output naming this
-// session as missing is a definitive false, nil. A server-level failure ("no
-// server running", "error connecting") wraps ports.ErrRuntimeUnavailable: the
-// probe learned nothing about this session — the agent process may well still
-// be running as an orphan of the dead server — so it must never be read as
-// per-session death (issue #3475). Any other non-zero exit is a plain probe
-// error so callers (the reaper feeding the LCM) treat it as a failed probe
-// and never kill a session on a transient error.
+// session as missing is a definitive false, nil. Literal "no server running"
+// is also definitive for an AO-namespaced server: every session lives inside
+// that server process, so its absence proves all of them absent. The default
+// server is shared with the human's tmux and remains inconclusive. "error
+// connecting" is always inconclusive because it can describe permissions or a
+// stale socket; those reachability failures wrap ports.ErrRuntimeUnavailable.
+// Any other non-zero exit is a plain probe error. Callers must treat every
+// error as failed observation, never as per-session death (issue #3475).
 func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool, error) {
 	id, err := handleID(handle)
 	if err != nil {
