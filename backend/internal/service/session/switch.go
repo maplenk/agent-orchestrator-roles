@@ -33,13 +33,21 @@ type SwitchWorkerOutcome struct {
 }
 
 const (
-	SwitchPreviewReasonNoRolePin   = "no_role_pin"
-	SwitchPreviewReasonNoRoleMap   = "no_role_map"
-	SwitchPreviewReasonRoleAbsent  = "role_not_in_map"
-	SwitchPreviewReasonNoTarget    = "no_target"
-	SwitchPreviewReasonInProgress  = "in_progress"
-	SwitchPreviewReasonPaused      = "paused"
-	SwitchPreviewReasonTerminated  = "terminated"
+	// SwitchPreviewReasonNoRolePin means the orchestrator has no durable role.
+	SwitchPreviewReasonNoRolePin = "no_role_pin"
+	// SwitchPreviewReasonNoRoleMap means the project has no routing map.
+	SwitchPreviewReasonNoRoleMap = "no_role_map"
+	// SwitchPreviewReasonRoleAbsent means the pinned role left the routing map.
+	SwitchPreviewReasonRoleAbsent = "role_not_in_map"
+	// SwitchPreviewReasonNoTarget means no cross-harness target is selectable.
+	SwitchPreviewReasonNoTarget = "no_target"
+	// SwitchPreviewReasonInProgress means a durable switch fence is held.
+	SwitchPreviewReasonInProgress = "in_progress"
+	// SwitchPreviewReasonPaused means pause forbids lifecycle relaunches.
+	SwitchPreviewReasonPaused = "paused"
+	// SwitchPreviewReasonTerminated means the orchestrator is no longer active.
+	SwitchPreviewReasonTerminated = "terminated"
+	// SwitchPreviewReasonUnavailable means target resolution could not complete.
 	SwitchPreviewReasonUnavailable = "unavailable"
 )
 

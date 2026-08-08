@@ -3,7 +3,6 @@ package mvpacceptance
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -72,7 +71,7 @@ func TestLiveMuxInputFence(t *testing.T) {
 		if got.Type != "error" || got.Error != "input blocked: switch in progress" {
 			t.Fatalf("frame = %+v, want terminal error fence", got)
 		}
-		t.Log(fmt.Sprintf("durable mux input fence refused terminal %s", terminalID))
+		t.Logf("durable mux input fence refused terminal %s", terminalID)
 		return
 	}
 }
