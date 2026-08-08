@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ type fakeStore struct {
 	threads         map[string][]domain.PullRequestReviewThread
 	comments        map[string][]domain.PullRequestComment
 	num             int
-	getProjectCalls int
+	getProjectCalls atomic.Int64
 	getProjectErr   error
 }
 
@@ -231,7 +232,7 @@ func (f *fakeStore) ListPRComments(_ context.Context, prURL string) ([]domain.Pu
 }
 
 func (f *fakeStore) GetProject(_ context.Context, id string) (domain.ProjectRecord, bool, error) {
-	f.getProjectCalls++
+	f.getProjectCalls.Add(1)
 	if f.getProjectErr != nil {
 		return domain.ProjectRecord{}, false, f.getProjectErr
 	}

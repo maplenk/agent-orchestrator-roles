@@ -383,8 +383,8 @@ func TestSwitchPreview_WorkerDoesNotReadProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.getProjectCalls != 0 {
-		t.Fatalf("project reads=%d, want zero for ordinary worker", st.getProjectCalls)
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("project reads=%d, want zero for ordinary worker", got)
 	}
 	if preview.Available || len(preview.Targets) != 0 {
 		t.Fatalf("worker preview=%+v", preview)
@@ -478,8 +478,8 @@ func TestSwitchPreview_PausedOrchestratorRefusesAllLifecycleActions(t *testing.T
 	if preview.Available || preview.Reason != SwitchPreviewReasonPaused || len(preview.Targets) != 0 {
 		t.Fatalf("paused preview = %+v", preview)
 	}
-	if st.getProjectCalls != 0 {
-		t.Fatalf("paused preview read project %d time(s), want zero", st.getProjectCalls)
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("paused preview read project %d time(s), want zero", got)
 	}
 }
 
@@ -503,7 +503,7 @@ func TestSwitchPreview_PendingUsesDurableTargetWithoutProjectRead(t *testing.T) 
 	if preview.Available || preview.Reason != SwitchPreviewReasonInProgress || preview.Pending == nil {
 		t.Fatalf("preview=%+v", preview)
 	}
-	if st.getProjectCalls != 0 {
-		t.Fatalf("project reads=%d, want zero for durable pending state", st.getProjectCalls)
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("project reads=%d, want zero for durable pending state", got)
 	}
 }
