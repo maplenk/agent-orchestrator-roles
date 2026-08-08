@@ -240,6 +240,10 @@ export function SessionView({ sessionId }: SessionViewProps) {
 		);
 	}, [shellTerminals]);
 	const isOrchestrator = session ? isOrchestratorSession(session) : false;
+	// Chat controllers cannot enter switch or fresh-conversation sagas. The
+	// backend still returns a fail-closed preview for non-desktop consumers, but
+	// the desktop must not render controls whose direct calls are guaranteed 409s.
+	const showOrchestratorSwitch = isOrchestrator && session?.mode !== "chat";
 	// Orchestrators get the full workspace width; only workers need the inspector rail.
 	const hasInspector = Boolean(session && !isOrchestrator);
 	const activeInterfaceTransition = interfaceTransitionIsActive(interfaceSwitch.transition);
@@ -300,7 +304,7 @@ export function SessionView({ sessionId }: SessionViewProps) {
 	) : null;
 	const sessionHeaderActions = (
 		<SessionInterfaceActionGroup>
-			{isOrchestrator ? (
+			{showOrchestratorSwitch ? (
 				<OrchestratorSwitchControl
 					disabled={
 						!session ||

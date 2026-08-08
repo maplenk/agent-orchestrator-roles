@@ -179,7 +179,8 @@ type SessionSwitchPendingView struct {
 }
 
 // SessionSwitchView is the safe orchestrator switch preview. `unavailable`
-// means resolution failed and therefore never carries a target.
+// means resolution could not produce a usable offer (including a committed
+// session mode that cannot enter the saga) and therefore never carries a target.
 type SessionSwitchView struct {
 	Available bool                      `json:"available"`
 	RoleID    string                    `json:"roleId"`

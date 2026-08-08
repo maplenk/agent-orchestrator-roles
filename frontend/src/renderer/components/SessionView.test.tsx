@@ -449,6 +449,7 @@ describe("SessionView", () => {
 	it("offers only exact role-authorized orchestrator targets", async () => {
 		const user = userEvent.setup();
 		const orchestrator = workerSession("sess-orch");
+		orchestrator.mode = "tui";
 		orchestrator.switch = {
 			available: true,
 			roleId: "lead",
@@ -467,6 +468,26 @@ describe("SessionView", () => {
 			target: { harness: "codex", model: "" },
 		});
 		expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+	});
+
+	it("hides Switch and Fresh Conversation for a chat orchestrator", () => {
+		const orchestrator = workerSession("sess-orch");
+		orchestrator.mode = "chat";
+		orchestrator.switch = {
+			available: false,
+			roleId: "lead",
+			current: { harness: "claude-code", model: "sonnet" },
+			targets: [],
+			pending: null,
+			reason: "unavailable",
+		};
+
+		render(<SessionView sessionId="sess-orch" />);
+
+		expect(screen.queryByRole("button", { name: "Switch" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Fresh Conversation" })).not.toBeInTheDocument();
+		expect(screen.queryByText("Switch targets are temporarily unavailable.")).not.toBeInTheDocument();
+		expect(orchestratorSwitchMutation.mutate).not.toHaveBeenCalled();
 	});
 
 	it("keeps Fresh Conversation distinct from cross-harness Switch", () => {

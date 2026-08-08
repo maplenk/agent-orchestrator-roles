@@ -47,7 +47,8 @@ const (
 	SwitchPreviewReasonPaused = "paused"
 	// SwitchPreviewReasonTerminated means the orchestrator is no longer active.
 	SwitchPreviewReasonTerminated = "terminated"
-	// SwitchPreviewReasonUnavailable means target resolution could not complete.
+	// SwitchPreviewReasonUnavailable means target resolution could not complete,
+	// including when the committed session mode cannot enter the switch saga.
 	SwitchPreviewReasonUnavailable = "unavailable"
 )
 
@@ -247,6 +248,16 @@ func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (
 	}
 	if rec.Metadata.Pause != nil {
 		preview.Reason = SwitchPreviewReasonPaused
+		return preview, nil
+	}
+	// Chat controllers cannot enter the switch/fresh saga. Keep the preview
+	// non-null so the read model truthfully reports that target resolution is
+	// unavailable for this orchestrator, but never read the project or advertise
+	// a target the direct mutation would reject with SWITCH_CHAT_UNSUPPORTED.
+	// Durable pending/paused/terminated states above retain their more specific
+	// reason because they also own input fencing and recovery guidance.
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		preview.Reason = SwitchPreviewReasonUnavailable
 		return preview, nil
 	}
 	if preview.RoleID == "" {

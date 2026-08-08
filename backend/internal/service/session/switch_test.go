@@ -166,6 +166,26 @@ func TestSwitchWorker_MapsNotSupported(t *testing.T) {
 	}
 }
 
+func TestSwitchWorker_ChatModeStillReturnsTypedConflict(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Mode = domain.SessionModeChat
+	st.sessions[id] = rec
+	cmd := &fakeCommander{switchErr: sessionmanager.ErrSwitchChatUnsupported}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+
+	_, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+	var apiErr *apierr.Error
+	if !errors.As(err, &apiErr) || apiErr.Kind != apierr.KindConflict || apiErr.Code != "SWITCH_CHAT_UNSUPPORTED" {
+		t.Fatalf("err=%v, want 409 SWITCH_CHAT_UNSUPPORTED", err)
+	}
+}
+
 func TestFreshConversation_NoFreeFormHarness(t *testing.T) {
 	st := newFakeStore()
 	id := domain.SessionID("mer-1")
@@ -388,6 +408,28 @@ func TestSwitchPreview_WorkerDoesNotReadProject(t *testing.T) {
 	}
 	if preview.Available || len(preview.Targets) != 0 {
 		t.Fatalf("worker preview=%+v", preview)
+	}
+}
+
+func TestSwitchPreview_ChatOrchestratorIsUnavailableWithoutProjectRead(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	seedSwitchSession(st, id, domain.HarnessClaudeCode)
+	rec := st.sessions[id]
+	rec.Kind = domain.KindOrchestrator
+	rec.Mode = domain.SessionModeChat
+	st.sessions[id] = rec
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonUnavailable || len(preview.Targets) != 0 {
+		t.Fatalf("chat preview=%+v, want unavailable with no targets", preview)
+	}
+	if got := st.getProjectCalls.Load(); got != 0 {
+		t.Fatalf("chat preview read project %d time(s), want zero", got)
 	}
 }
 
