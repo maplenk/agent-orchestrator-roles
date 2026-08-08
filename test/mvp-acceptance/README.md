@@ -9,11 +9,17 @@ fault timing is evidence rather than luck.
 It never uses or reads the default `~/.ao` state. Every command fails unless
 `AO_ACCEPTANCE_ROOT` is marked and lives below `/tmp`, `AO_DATA_DIR` is exactly
 `$AO_ACCEPTANCE_ROOT/data`, `AO_RUN_FILE` is exactly the root's `running.json`,
-`HOME` is exactly `$AO_ACCEPTANCE_ROOT/home`, and the data-dir-specific tmux
-wrapper is first on `PATH`. The isolated home prevents Claude's required
-workspace-trust prelaunch hook from updating the human's `~/.claude.json`.
+`HOME` is exactly `$AO_ACCEPTANCE_ROOT/home`, `AO_ROLE_PROFILES_DIR` is pinned
+to the current checkout's `profiles/`, and the data-dir-specific tmux wrapper
+is first on `PATH`. The isolated home prevents Claude's required workspace-trust
+prelaunch hook from updating the human's `~/.claude.json`; the explicit profile
+path keeps that isolation from hiding the repository's frozen role templates.
 `crash` additionally checks that the run-file PID's command names the
 root-scoped acceptance binary before sending `SIGKILL`.
+
+`sqlite3 -json` emits no bytes for a zero-row query. Snapshot collection
+normalizes only that representation to `[]`, so pre-attempt ledger snapshots
+and worker-only active-owner snapshots remain valid JSON evidence.
 
 ## Integration dependency
 
@@ -48,6 +54,7 @@ same generation.
 
 ```bash
 ACC="$PWD/test/mvp-acceptance/acceptance.sh"
+"$ACC" self-test
 ROOT="/tmp/ao-mvp-$(git rev-parse --short HEAD)-r01"
 "$ACC" init "$ROOT" 43181
 source "$ROOT/env.sh"

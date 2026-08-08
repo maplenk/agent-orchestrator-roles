@@ -15,6 +15,7 @@ Usage: acceptance.sh <command> [args]
 Environment lifecycle:
   init ABS_TMP_ROOT [PORT]       Create a new isolated root and env.sh
   check-env                      Refuse any unscoped/default AO paths
+  self-test                      Check harness JSON/profile prerequisites
   build                          Build the current checkout as ROOT/bin/ao
   start                          Start the isolated daemon and wait for readyz
   crash                          SIGKILL only the validated isolated daemon PID
@@ -87,6 +88,7 @@ export AO_RUN_FILE='$root/running.json'
 export AO_PORT='$port'
 export AO_ACCEPTANCE_BIN='$root/bin/ao'
 export AO_ACCEPTANCE_REAL_TMUX='$real_tmux'
+export AO_ROLE_PROFILES_DIR='$repo_root/profiles'
 export HOME='$root/home'
 export GOCACHE='$go_cache'
 export GOMODCACHE='$go_mod_cache'
@@ -111,12 +113,36 @@ guard() {
 	[[ "$run" == "$canonical_root/running.json" ]] || die "AO_RUN_FILE must equal $canonical_root/running.json"
 	[[ "${AO_ACCEPTANCE_BIN:-}" == "$canonical_root/bin/ao" ]] || die "AO_ACCEPTANCE_BIN is outside the root"
 	[[ "${HOME:-}" == "$canonical_root/home" ]] || die "HOME must equal $canonical_root/home to isolate provider config"
+	[[ "${AO_ROLE_PROFILES_DIR:-}" == "$repo_root/profiles" ]] || die "AO_ROLE_PROFILES_DIR must equal $repo_root/profiles"
+	[[ -d "$AO_ROLE_PROFILES_DIR" ]] || die "role profiles directory not found: $AO_ROLE_PROFILES_DIR"
 	[[ "${AO_PORT:-}" =~ ^[0-9]+$ ]] || die "AO_PORT must be numeric"
 	[[ -n "${AO_ACCEPTANCE_REAL_TMUX:-}" && -x "${AO_ACCEPTANCE_REAL_TMUX}" ]] || die "real tmux is not executable"
 	[[ "$(command -v tmux)" == "$script_dir/stubs/tmux" ]] || die "acceptance tmux wrapper is not first on PATH"
 }
 
 db_path() { guard; [[ -f "$AO_DATA_DIR/ao.db" ]] || die "database not created: $AO_DATA_DIR/ao.db"; printf '%s\n' "$AO_DATA_DIR/ao.db"; }
+
+# sqlite3 -json prints an empty string, rather than [], when a SELECT returns no
+# rows. Snapshot fields are passed through jq --argjson, so normalize that one
+# valid empty-result representation without rewriting non-empty JSON.
+sqlite_json() {
+	local db="${1:-}" sql="${2:-}" out
+	[[ -n "$db" && -n "$sql" ]] || die "sqlite_json requires DB and SQL"
+	out="$(sqlite3 -json "$db" "$sql")"
+	[[ -n "$out" ]] || out='[]'
+	printf '%s\n' "$out"
+}
+
+self_test() {
+	need sqlite3
+	[[ -f "$repo_root/profiles/orchestrator.md" && -f "$repo_root/profiles/implementor.md" ]] ||
+		die "required acceptance role profiles are missing"
+	[[ "$(sqlite_json :memory: 'SELECT 1 AS value WHERE 0;')" == '[]' ]] ||
+		die "zero-row sqlite JSON did not normalize to []"
+	[[ "$(sqlite_json :memory: 'SELECT 1 AS value;')" == '[{"value":1}]' ]] ||
+		die "non-empty sqlite JSON changed during normalization"
+	printf 'acceptance harness self-test passed\n'
+}
 
 daemon_pid() {
 	guard
@@ -310,12 +336,12 @@ snapshot() {
 	safe_atom "$label"; safe_atom "$sid"; safe_atom "$project"
 	local db; db="$(db_path)"
 	local session attempts ledger project_row owner runtime_names prompt_hash config_hash run_pid=0 run_port=0
-	session="$(sqlite3 -json "$db" "SELECT id,project_id,num,kind,harness,role_id,role_map_schema_version,role_map_sha256,role_config_revision,template_artifact_id,template_sha256,resolved_model,resolved_workspace_writes,resolved_can_spawn,spawn_capability_hash,activity_state,is_terminated,branch,workspace_path,workspace_repo_path,runtime_handle_id,runtime_launch_id,agent_session_id,switch_pending_json,pause_json,created_at,updated_at FROM sessions WHERE id='$sid';")"
+	session="$(sqlite_json "$db" "SELECT id,project_id,num,kind,harness,role_id,role_map_schema_version,role_map_sha256,role_config_revision,template_artifact_id,template_sha256,resolved_model,resolved_workspace_writes,resolved_can_spawn,spawn_capability_hash,activity_state,is_terminated,branch,workspace_path,workspace_repo_path,runtime_handle_id,runtime_launch_id,agent_session_id,switch_pending_json,pause_json,created_at,updated_at FROM sessions WHERE id='$sid';")"
 	[[ "$session" != '[]' ]] || die "session not found: $sid"
-	attempts="$(sqlite3 -json "$db" "SELECT id,incident_id,seq,role_id,from_harness,from_model,to_harness,to_model,rung_index,generation_id,state,created_at,updated_at FROM session_failover_attempts WHERE session_id='$sid' ORDER BY seq;")"
-	ledger="$(sqlite3 -json "$db" "SELECT rowid,id,kind,phase,generation_id,from_harness,to_harness,from_model,to_model,role_id,source_native_session_id,target_native_session_id,created_at FROM lifecycle_ledger WHERE session_id='$sid' ORDER BY rowid;")"
-	project_row="$(sqlite3 -json "$db" "SELECT id,path,kind,length(COALESCE(config,'')) AS config_bytes FROM projects WHERE id='$project';")"
-	owner="$(sqlite3 -json "$db" "SELECT id,harness,runtime_handle_id,runtime_launch_id FROM sessions WHERE project_id='$project' AND kind='orchestrator' AND is_terminated=0 ORDER BY num;")"
+	attempts="$(sqlite_json "$db" "SELECT id,incident_id,seq,role_id,from_harness,from_model,to_harness,to_model,rung_index,generation_id,state,created_at,updated_at FROM session_failover_attempts WHERE session_id='$sid' ORDER BY seq;")"
+	ledger="$(sqlite_json "$db" "SELECT rowid,id,kind,phase,generation_id,from_harness,to_harness,from_model,to_model,role_id,source_native_session_id,target_native_session_id,created_at FROM lifecycle_ledger WHERE session_id='$sid' ORDER BY rowid;")"
+	project_row="$(sqlite_json "$db" "SELECT id,path,kind,length(COALESCE(config,'')) AS config_bytes FROM projects WHERE id='$project';")"
+	owner="$(sqlite_json "$db" "SELECT id,harness,runtime_handle_id,runtime_launch_id FROM sessions WHERE project_id='$project' AND kind='orchestrator' AND is_terminated=0 ORDER BY num;")"
 	prompt_hash="$(sqlite3 "$db" "SELECT prompt FROM sessions WHERE id='$sid';" | shasum -a 256 | awk '{print $1}')"
 	config_hash="$(sqlite3 "$db" "SELECT COALESCE(config,'') FROM projects WHERE id='$project';" | shasum -a 256 | awk '{print $1}')"
 	local socket; socket="$(tmux_socket)"
@@ -450,6 +476,7 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
 init) init_root "$@" ;;
 check-env) guard; printf 'isolated environment accepted: %s\n' "$AO_ACCEPTANCE_ROOT" ;;
+self-test) self_test ;;
 build) build_binary ;;
 start) start_daemon ;;
 crash) crash_daemon ;;
