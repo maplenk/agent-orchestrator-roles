@@ -241,6 +241,7 @@
 	"inspector.pause.failoverLimitReached": "Dieser Vorfall hat alle Failover-Versuche aufgebraucht. Die Sitzung bleibt pausiert.",
 	"inspector.pause.failoverNotPaused": "Fortfahren wird nur angeboten, solange die Sitzung pausiert ist.",
 	"inspector.pause.failoverSwitchUnsupported": "Dieses Harness lässt sich nicht wechseln, daher kann die Sitzung nicht auf ein anderes Ziel wechseln.",
+	"inspector.pause.failoverPreviewUnavailable": "Failover-Optionen konnten für diese Sitzung nicht geladen werden. Die Pause bleibt davon unberührt; öffne die Sitzung erneut, um es noch einmal zu versuchen.",
 	"inspector.pause.errorIncidentRequired": "Mit der Anfrage wurde kein Vorfall gesendet.",
 	"inspector.pause.errorIncidentInvalid": "Der Daemon hat die Vorfall-ID abgelehnt.",
 	"inspector.pause.errorIncidentMismatch": "Diese Sitzung wird jetzt von einem anderen Vorfall gehalten. Lies die Pause oben erneut und handle nach dem, was sie tatsächlich hält.",

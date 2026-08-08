@@ -238,6 +238,7 @@
 	"inspector.pause.failoverLimitReached": "This incident has used all of its failover attempts. The session stays paused.",
 	"inspector.pause.failoverNotPaused": "Continue is only offered while the session is paused.",
 	"inspector.pause.failoverSwitchUnsupported": "This harness cannot be switched, so the session cannot move to another target.",
+	"inspector.pause.failoverPreviewUnavailable": "Failover options could not be loaded for this session. The pause is unaffected; re-open this session to try again.",
 	"inspector.pause.errorIncidentRequired": "No incident was sent with the request.",
 	"inspector.pause.errorIncidentInvalid": "The daemon rejected the incident id.",
 	"inspector.pause.errorIncidentMismatch": "A different incident holds this session now. Re-read the pause above and act on what actually holds it.",

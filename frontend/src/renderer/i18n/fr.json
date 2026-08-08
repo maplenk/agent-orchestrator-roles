@@ -243,6 +243,7 @@
 	"inspector.pause.failoverLimitReached": "Cet incident a épuisé ses tentatives de bascule. La session reste en pause.",
 	"inspector.pause.failoverNotPaused": "Continuer n'est proposé que tant que la session est en pause.",
 	"inspector.pause.failoverSwitchUnsupported": "Ce harness ne peut pas être changé, la session ne peut donc pas passer à une autre cible.",
+	"inspector.pause.failoverPreviewUnavailable": "Les options de bascule n'ont pas pu être chargées pour cette session. La pause n'est pas affectée ; rouvre la session pour réessayer.",
 	"inspector.pause.errorIncidentRequired": "Aucun incident n'a été envoyé avec la requête.",
 	"inspector.pause.errorIncidentInvalid": "Le démon a rejeté l'identifiant d'incident.",
 	"inspector.pause.errorIncidentMismatch": "Un autre incident retient désormais cette session. Relisez la pause ci-dessus et agissez sur ce qui la retient vraiment.",

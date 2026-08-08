@@ -243,6 +243,7 @@
 	"inspector.pause.failoverLimitReached": "Este incidente agotó sus intentos de conmutación. La sesión sigue en pausa.",
 	"inspector.pause.failoverNotPaused": "Continuar solo se ofrece mientras la sesión está en pausa.",
 	"inspector.pause.failoverSwitchUnsupported": "Este harness no admite el cambio, así que la sesión no puede pasar a otro destino.",
+	"inspector.pause.failoverPreviewUnavailable": "No se pudieron cargar las opciones de conmutación para esta sesión. La pausa no se ve afectada; vuelve a abrir la sesión para intentarlo de nuevo.",
 	"inspector.pause.errorIncidentRequired": "No se envió ningún incidente con la solicitud.",
 	"inspector.pause.errorIncidentInvalid": "El daemon rechazó el identificador del incidente.",
 	"inspector.pause.errorIncidentMismatch": "Ahora otro incidente retiene esta sesión. Vuelve a leer la pausa de arriba y actúa sobre lo que realmente la retiene.",

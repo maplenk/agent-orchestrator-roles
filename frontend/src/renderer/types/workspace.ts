@@ -175,6 +175,11 @@ const sessionFailoverReasons: Record<SessionFailoverReason, true> = {
 	limit_reached: true,
 	not_paused: true,
 	switch_unsupported: true,
+	// Not a ladder verdict: the daemon could not compute the preview for this
+	// session, so the row degrades instead of failing the whole read. It gets
+	// its own copy because "we could not find out" is worth re-reading later and
+	// "there is nothing" is not.
+	unavailable: true,
 };
 
 function toSessionFailoverTarget(raw: unknown): SessionFailoverTarget | null {

@@ -243,6 +243,7 @@
 	"inspector.pause.failoverLimitReached": "Este incidente esgotou suas tentativas de failover. A sessão continua pausada.",
 	"inspector.pause.failoverNotPaused": "Continuar só é oferecido enquanto a sessão está pausada.",
 	"inspector.pause.failoverSwitchUnsupported": "Este harness não pode ser trocado, então a sessão não pode ir para outro destino.",
+	"inspector.pause.failoverPreviewUnavailable": "Não foi possível carregar as opções de failover desta sessão. A pausa não é afetada; reabra a sessão para tentar de novo.",
 	"inspector.pause.errorIncidentRequired": "Nenhum incidente foi enviado com a solicitação.",
 	"inspector.pause.errorIncidentInvalid": "O daemon rejeitou o identificador do incidente.",
 	"inspector.pause.errorIncidentMismatch": "Outro incidente detém esta sessão agora. Releia a pausa acima e aja sobre o que realmente a detém.",

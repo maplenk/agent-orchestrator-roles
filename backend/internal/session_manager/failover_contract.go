@@ -63,6 +63,19 @@ const (
 	FailoverReasonLimitReached      FailoverPreviewReason = "limit_reached"
 	FailoverReasonNotPaused         FailoverPreviewReason = "not_paused"
 	FailoverReasonSwitchUnsupported FailoverPreviewReason = "switch_unsupported"
+	// FailoverReasonUnavailable means the preview could not be COMPUTED -- a
+	// store or project read failed -- as opposed to being any verdict about the
+	// ladder. The manager never returns it; the read surface substitutes it when
+	// the manager returns an error, so one unreadable row degrades that row
+	// rather than failing the whole response.
+	//
+	// It exists rather than reusing null because null already means "ordinary
+	// session, nothing to offer". Collapsing "we know there is nothing" into "we
+	// could not find out" is a silent degrade: a paused session would simply
+	// stop offering Continue and say nothing about why. Same rule this repo
+	// applies to runtime probes -- an unknown is reported as unknown, never as
+	// a fact.
+	FailoverReasonUnavailable FailoverPreviewReason = "unavailable"
 )
 
 // FailoverPreview is the read-model answer to "what would Continue do?".

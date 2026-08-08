@@ -179,7 +179,11 @@ type SessionFailoverView struct {
 	AttemptsUsed  int                           `json:"attemptsUsed"`
 	MaxAttempts   int                           `json:"maxAttempts"`
 	IncidentID    string                        `json:"incidentId"`
-	Reason        string                        `json:"reason" enum:",no_role_pin,no_ladder,ladder_exhausted,limit_reached,not_paused,switch_unsupported"`
+	// `unavailable` is not a verdict about the ladder: it means the preview
+	// could not be computed for this session, so the row degrades rather than
+	// failing the whole response. Distinct from a null block, which means the
+	// ordinary "not paused and no ladder" session.
+	Reason string `json:"reason" enum:",no_role_pin,no_ladder,ladder_exhausted,limit_reached,not_paused,switch_unsupported,unavailable"`
 }
 
 // SessionPauseView is the wire shape of a durable pause.

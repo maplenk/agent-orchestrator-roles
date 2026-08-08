@@ -6512,6 +6512,7 @@ components:
           - limit_reached
           - not_paused
           - switch_unsupported
+          - unavailable
           type: string
         roleId:
           type: string

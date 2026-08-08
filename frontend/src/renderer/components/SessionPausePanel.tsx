@@ -47,6 +47,11 @@ const failoverReasonKeys: Record<SessionFailoverReason, MessageKey> = {
 	limit_reached: "inspector.pause.failoverLimitReached",
 	not_paused: "inspector.pause.failoverNotPaused",
 	switch_unsupported: "inspector.pause.failoverSwitchUnsupported",
+	// Not a verdict about the ladder: the daemon could not COMPUTE the preview
+	// for this session. Worth its own copy rather than reusing "no targets",
+	// because "we could not find out" and "there is nothing" are different
+	// facts, and only one of them is worth re-reading later.
+	unavailable: "inspector.pause.failoverPreviewUnavailable",
 };
 
 /**

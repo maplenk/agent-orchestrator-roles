@@ -2258,7 +2258,7 @@ export interface components {
             nextRungIndex: number;
             nextTarget: components["schemas"]["SessionFailoverPreviewTarget"];
             /** @enum {string} */
-            reason: "" | "no_role_pin" | "no_ladder" | "ladder_exhausted" | "limit_reached" | "not_paused" | "switch_unsupported";
+            reason: "" | "no_role_pin" | "no_ladder" | "ladder_exhausted" | "limit_reached" | "not_paused" | "switch_unsupported" | "unavailable";
             roleId: string;
         } | null;
         SessionInterfaceTransition: {

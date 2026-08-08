@@ -243,11 +243,7 @@ func (c *SessionsController) list(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	views, err := c.sessionViews(r.Context(), sessions)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
+	views := c.sessionViews(r.Context(), sessions)
 	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: views})
 }
 
@@ -473,11 +469,7 @@ func (c *SessionsController) get(w http.ResponseWriter, r *http.Request) {
 		envelope.WriteError(w, r, err)
 		return
 	}
-	view, err := c.sessionView(r.Context(), sess)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
+	view := c.sessionView(r.Context(), sess)
 	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: view})
 }
 
@@ -1317,10 +1309,24 @@ func (c *SessionsController) continueSession(w http.ResponseWriter, r *http.Requ
 		envelope.WriteError(w, r, err)
 		return
 	}
-	preview, err := fs.FailoverPreview(r.Context(), sessionID(r))
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
+	// Best-effort, and deliberately AFTER the point of no return. ContinueFailover
+	// has already succeeded here: the attempt is acked, the rung is spent, the
+	// pin is cleared and the target runtime is live. Erroring the response on a
+	// failed follow-up read would report a completed, durable move as a failure,
+	// and the operator's natural retry then answers SESSION_NOT_PAUSED -- a
+	// confusing sequence layered on top of a successful one. The outcome the
+	// caller needs (target, generation, incident) comes from `out`, not from
+	// this read.
+	preview, previewErr := fs.FailoverPreview(r.Context(), sessionID(r))
+	if previewErr != nil {
+		slog.Warn("failover preview unavailable after a completed continue",
+			"sessionID", string(sessionID(r)), "error", previewErr)
+		preview = sessionmanager.FailoverPreview{
+			Available:     false,
+			NextRungIndex: -1,
+			MaxAttempts:   domain.MaxFailoversPerIncident,
+			Reason:        sessionmanager.FailoverReasonUnavailable,
+		}
 	}
 	envelope.WriteJSON(w, http.StatusOK, ContinueSessionResponse{
 		OK:           true,
@@ -1654,11 +1660,7 @@ func (c *SessionsController) listOrchestrators(w http.ResponseWriter, r *http.Re
 		envelope.WriteError(w, r, err)
 		return
 	}
-	views, err := c.sessionViews(r.Context(), sessions)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
+	views := c.sessionViews(r.Context(), sessions)
 	envelope.WriteJSON(w, http.StatusOK, ListSessionsResponse{Sessions: views})
 }
 
@@ -1676,11 +1678,7 @@ func (c *SessionsController) getOrchestrator(w http.ResponseWriter, r *http.Requ
 		envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "Unknown session", nil)
 		return
 	}
-	view, err := c.sessionView(r.Context(), sess)
-	if err != nil {
-		envelope.WriteError(w, r, err)
-		return
-	}
+	view := c.sessionView(r.Context(), sess)
 	envelope.WriteJSON(w, http.StatusOK, SessionResponse{Session: view})
 }
 
@@ -1838,7 +1836,7 @@ func previewFileURL(r *http.Request, id domain.SessionID, entry string) (string,
 func sessionView(s domain.Session, previews ...sessionmanager.FailoverPreview) SessionView {
 	var failover *SessionFailoverView
 	if len(previews) > 0 {
-		failover = failoverView(previews[0])
+		failover = failoverView(s.Metadata.Pause != nil, previews[0])
 	}
 	return SessionView{
 		Session:         s,
@@ -1851,25 +1849,57 @@ func sessionView(s domain.Session, previews ...sessionmanager.FailoverPreview) S
 	}
 }
 
-func (c *SessionsController) sessionView(ctx context.Context, s domain.Session) (SessionView, error) {
+// sessionView attaches the failover preview to a worker's read model.
+//
+// A preview failure DEGRADES this one session rather than failing the response.
+// The preview is an advisory block on a read model whose core facts are already
+// true without it, and this runs for every worker in a list -- so propagating
+// meant one temporarily unreadable project row turned GET /sessions into a 500
+// and empty-stated the whole fleet, an availability regression across the
+// endpoint the desktop polls most.
+//
+// Degrading is not the same as hiding: the row carries reason `unavailable`,
+// which is distinct from every ladder verdict and from null. The failure is
+// still logged. What it must never do is degrade toward `available` -- an
+// unreadable store can never produce an offer to continue.
+func (c *SessionsController) sessionView(ctx context.Context, s domain.Session) SessionView {
 	if s.Kind != domain.KindWorker {
-		return sessionView(s), nil
+		return sessionView(s)
 	}
 	fs, ok := c.Svc.(failoverSessionService)
 	if !ok {
 		// Existing controller test doubles predate the optional read model. The real
 		// service always takes the branch below.
-		return sessionView(s), nil
+		return sessionView(s)
 	}
 	preview, err := fs.FailoverPreview(ctx, s.ID)
 	if err != nil {
-		return SessionView{}, err
+		slog.Warn("failover preview unavailable for session read model",
+			"sessionID", string(s.ID), "error", err)
+		return sessionView(s, sessionmanager.FailoverPreview{
+			Available:     false,
+			NextRungIndex: -1,
+			MaxAttempts:   domain.MaxFailoversPerIncident,
+			Reason:        sessionmanager.FailoverReasonUnavailable,
+		})
 	}
-	return sessionView(s, preview), nil
+	return sessionView(s, preview)
 }
 
-func failoverView(preview sessionmanager.FailoverPreview) *SessionFailoverView {
-	if preview == (sessionmanager.FailoverPreview{}) {
+// failoverView maps the manager's preview to the wire block, or to null.
+//
+// Contract section 9 wants null for the ORDINARY session: not paused and with
+// no ladder. The manager cannot express null in a value type, so the derivation
+// lives here, on the pair it documents -- an unpaused session whose only verdict
+// is `no_ladder` has nothing to say about failover and should not say it.
+//
+// This previously tested `preview == FailoverPreview{}`, which was a dead
+// branch: the manager always builds the preview with NextRungIndex -1 and
+// MaxAttempts set, so the zero value is unreachable on any success path and
+// every ordinary worker shipped a `no_ladder` block the contract said would be
+// absent.
+func failoverView(paused bool, preview sessionmanager.FailoverPreview) *SessionFailoverView {
+	if !paused && preview.Reason == sessionmanager.FailoverReasonNoLadder {
 		return nil
 	}
 	var target *SessionFailoverPreviewTarget
@@ -1911,16 +1941,16 @@ func pauseView(p *domain.SessionPause) *SessionPauseView {
 	return out
 }
 
-func (c *SessionsController) sessionViews(ctx context.Context, sessions []domain.Session) ([]SessionView, error) {
+// sessionViews cannot fail, because building one view cannot. Keeping an error
+// return "just in case" is how the fail-closed list came back: the only way a
+// caller can be sure one bad row will not blank the fleet is for there to be no
+// error to propagate.
+func (c *SessionsController) sessionViews(ctx context.Context, sessions []domain.Session) []SessionView {
 	out := make([]SessionView, 0, len(sessions))
 	for _, s := range sessions {
-		view, err := c.sessionView(ctx, s)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, view)
+		out = append(out, c.sessionView(ctx, s))
 	}
-	return out, nil
+	return out
 }
 
 func sessionPRFacts(prs []domain.PRFacts) []SessionPRFacts {

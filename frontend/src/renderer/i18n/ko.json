@@ -241,6 +241,7 @@
 	"inspector.pause.failoverLimitReached": "이 인시던트는 장애 조치 시도를 모두 사용했습니다. 세션은 계속 일시 중지 상태입니다.",
 	"inspector.pause.failoverNotPaused": "계속은 세션이 일시 중지된 동안에만 제공됩니다.",
 	"inspector.pause.failoverSwitchUnsupported": "이 하네스는 전환할 수 없어 세션을 다른 대상으로 옮길 수 없습니다.",
+	"inspector.pause.failoverPreviewUnavailable": "이 세션의 페일오버 옵션을 불러오지 못했습니다. 일시 중지 상태에는 영향이 없으며, 세션을 다시 열면 재시도됩니다.",
 	"inspector.pause.errorIncidentRequired": "요청에 인시던트가 포함되지 않았습니다.",
 	"inspector.pause.errorIncidentInvalid": "데몬이 인시던트 ID를 거부했습니다.",
 	"inspector.pause.errorIncidentMismatch": "지금은 다른 인시던트가 이 세션을 보유하고 있습니다. 위의 일시 중지를 다시 읽고 실제로 보유한 것에 대해 조치하세요.",

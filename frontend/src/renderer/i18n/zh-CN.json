@@ -238,6 +238,7 @@
 	"inspector.pause.failoverLimitReached": "本次事件已用完全部故障转移次数。会话仍保持暂停。",
 	"inspector.pause.failoverNotPaused": "只有在会话暂停时才提供“继续”。",
 	"inspector.pause.failoverSwitchUnsupported": "此 harness 不支持切换，因此会话无法移到其他目标。",
+	"inspector.pause.failoverPreviewUnavailable": "无法加载此会话的故障转移选项。暂停状态不受影响；重新打开该会话即可重试。",
 	"inspector.pause.errorIncidentRequired": "请求中未附带事件。",
 	"inspector.pause.errorIncidentInvalid": "守护进程拒绝了该事件 ID。",
 	"inspector.pause.errorIncidentMismatch": "现在是另一个事件占用此会话。请重新阅读上方的暂停信息，并针对真正占用它的事件操作。",

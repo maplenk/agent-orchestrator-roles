@@ -241,6 +241,7 @@
 	"inspector.pause.failoverLimitReached": "このインシデントはフェイルオーバー試行を使い切りました。セッションは一時停止のままです。",
 	"inspector.pause.failoverNotPaused": "続行はセッションが一時停止している間だけ提供されます。",
 	"inspector.pause.failoverSwitchUnsupported": "このハーネスは切り替えできないため、セッションを別のターゲットへ移せません。",
+	"inspector.pause.failoverPreviewUnavailable": "このセッションのフェイルオーバー候補を読み込めませんでした。一時停止には影響しません。セッションを開き直すと再試行できます。",
 	"inspector.pause.errorIncidentRequired": "リクエストにインシデントが含まれていません。",
 	"inspector.pause.errorIncidentInvalid": "デーモンがインシデント ID を拒否しました。",
 	"inspector.pause.errorIncidentMismatch": "現在は別のインシデントがこのセッションを保持しています。上の一時停止を読み直し、実際に保持しているものに対して操作してください。",

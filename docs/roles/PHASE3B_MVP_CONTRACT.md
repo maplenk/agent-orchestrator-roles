@@ -346,13 +346,36 @@ failover: {
   attemptsUsed: number,
   maxAttempts: number,
   incidentId: string,
-  reason: "" | "no_role_pin" | "no_ladder" | "ladder_exhausted" | "limit_reached" | "not_paused" | "switch_unsupported"
+  reason: "" | "no_role_pin" | "no_ladder" | "ladder_exhausted" | "limit_reached" | "not_paused" | "switch_unsupported" | "unavailable"
 } | null
 ```
 
 `available: false` carries a machine-readable `reason` so the desktop can
 disable the control and say *why* without inventing prose. The block is `null`
 for sessions that are not paused **and** have no ladder — the ordinary case.
+
+**The null rule is a derivation the read surface must perform**, on the pair
+`(pause == nil && reason == no_ladder)`. The manager cannot express null in a
+value type, so a surface that omits this derivation ships a `no_ladder` block on
+every ordinary worker. Comparing the preview against its zero value is **not**
+the rule and does not work: the manager always sets `nextRungIndex` and
+`maxAttempts`, so the zero value is unreachable on any success path — a guard
+written that way is dead code that never fires.
+
+**`unavailable` means the preview could not be COMPUTED** — a store or project
+read failed — and is never a verdict about the ladder. The manager never returns
+it; the read surface substitutes it when the manager returns an error, so one
+unreadable row degrades that row rather than failing the whole response. This
+matters because the preview is computed for **every worker in a list**:
+propagating turned a single unreadable project into a 500 across the entire
+fleet, on the endpoint the desktop polls most.
+
+It is a distinct value rather than a reuse of `null` because `null` already
+means "ordinary session, nothing to offer". Collapsing "we know there is
+nothing" into "we could not find out" is a silent degrade — a paused session
+would simply stop offering Continue and say nothing about why. Degrading toward
+`available` is forbidden in every case: an unreadable store can never produce an
+offer to continue.
 
 The service obtains this from the manager via `FailoverPreview`; it does not
 re-derive the ladder itself, and React never resolves a harness.
