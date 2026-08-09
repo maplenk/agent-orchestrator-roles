@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -45,7 +45,10 @@ import { ProjectSettingsForm } from "./ProjectSettingsForm";
 import { workspaceQueryKey } from "../hooks/useWorkspaceQuery";
 import type { WorkspaceSummary } from "../types/workspace";
 
-function renderSettings(projectId = "proj-1", workspaces?: WorkspaceSummary[], section?: "general" | "agents" | "workflow" | "intake") {
+const defaultRoleMapSHA256 = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+const savedRoleMapSHA256 = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+function renderSettings(projectId = "proj-1", workspaces?: WorkspaceSummary[], section?: "general" | "agents" | "roles" | "workflow" | "intake") {
 	const queryClient = new QueryClient({
 		defaultOptions: {
 			queries: { retry: false },
@@ -115,7 +118,7 @@ function mockProject(project: Record<string, unknown>) {
 		return {
 			data: {
 				status: "ok",
-				project,
+				project: { roleMapSha256: defaultRoleMapSHA256, ...project },
 			},
 			error: undefined,
 		};
@@ -127,7 +130,14 @@ beforeEach(() => {
 	putMock.mockReset();
 	postMock.mockReset();
 	navigateMock.mockReset();
-	putMock.mockResolvedValue({ data: { project: {} }, error: undefined });
+	putMock.mockImplementation(async (path: string, request: { body?: { roleMap?: unknown } }) => ({
+		data: {
+			project: path === "/api/v1/projects/{id}/role-map"
+				? { roleMapSha256: savedRoleMapSHA256, config: { roleMap: request.body?.roleMap } }
+				: {},
+		},
+		error: undefined,
+	}));
 	postMock.mockResolvedValue({
 		data: { orchestrator: { id: "proj-1-orch-2" } },
 		error: undefined,
@@ -136,6 +146,182 @@ beforeEach(() => {
 });
 
 describe("ProjectSettingsForm", () => {
+	it("keeps the settings envelope isolated from TaskComposer's cached project shape", async () => {
+		const queryClient = new QueryClient({
+			defaultOptions: {
+				queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+				mutations: { retry: false },
+			},
+		});
+		const composerProject = {
+			id: "proj-1",
+			name: "Composer cache",
+			kind: "single_repo",
+			path: "/repo/composer-cache",
+			repo: "",
+			defaultBranch: "main",
+			config: { worker: { agent: "codex" } },
+		};
+		queryClient.setQueryData(["project", "proj-1"], composerProject);
+		mockProject({
+			id: "proj-1",
+			name: "Settings response",
+			kind: "single_repo",
+			path: "/repo/settings-response",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+			},
+		});
+
+		render(
+			<QueryClientProvider client={queryClient}>
+				<ProjectSettingsForm projectId="proj-1" />
+			</QueryClientProvider>,
+		);
+
+		expect(await screen.findByDisplayValue("Settings response")).toBeInTheDocument();
+		expect(queryClient.getQueryData(["project", "proj-1"])).toBe(composerProject);
+		expect(queryClient.getQueryData(["project-settings", "proj-1"])).toMatchObject({ status: "ok" });
+	});
+
+	it("refuses a healthy project response that omits the role-map revision", async () => {
+		getMock.mockImplementation(async (path: string) => {
+			if (path === "/api/v1/agents") return agentCatalogResponse;
+			return {
+				data: {
+					status: "ok",
+					project: {
+						id: "proj-1",
+						name: "Missing revision",
+						kind: "single_repo",
+						path: "/repo/project-one",
+						repo: "",
+						defaultBranch: "main",
+						config: {},
+					},
+				},
+				error: undefined,
+			};
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		expect(await screen.findByText("Could not load project.")).toBeInTheDocument();
+		expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+		expect(putMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps a dirty role draft and base revision when an explicit refetch fails", async () => {
+		const project = {
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			roleMapSha256: "1111111111111111111111111111111111111111111111111111111111111111",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+					},
+				},
+			},
+		};
+		let failProjectRead = false;
+		getMock.mockImplementation(async (path: string) => {
+			if (path === "/api/v1/agents") return agentCatalogResponse;
+			if (failProjectRead) return { data: undefined, error: { message: "refresh offline" } };
+			return { data: { status: "ok", project }, error: undefined };
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		const strict = await screen.findByRole("switch", { name: "Strict delegation" });
+		await userEvent.click(strict);
+		failProjectRead = true;
+		await userEvent.click(screen.getByRole("button", { name: "Reload latest role map" }));
+
+		expect(await screen.findByRole("alert")).toHaveTextContent("refresh offline");
+		expect(screen.getByRole("switch", { name: "Strict delegation" })).toBeChecked();
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
+			params: { path: { id: "proj-1" } },
+			body: expect.objectContaining({
+				expectedRoleMapSha256: project.roleMapSha256,
+				roleMap: expect.objectContaining({ strictDelegation: true }),
+			}),
+		});
+	});
+
+	it("keeps a dirty revision A draft across an unsolicited successful revision B refetch", async () => {
+		const project = {
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			roleMapSha256: "2222222222222222222222222222222222222222222222222222222222222222",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator-a",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+					},
+				},
+			},
+		};
+		mockProject(project);
+		putMock.mockResolvedValueOnce({
+			data: undefined,
+			error: { code: "PROJECT_ROLE_MAP_CONFLICT", message: "revision A is stale" },
+		});
+		const queryClient = renderSettings("proj-1", undefined, "roles");
+		await userEvent.click(await screen.findByRole("switch", { name: "Strict delegation" }));
+
+		project.roleMapSha256 = "3333333333333333333333333333333333333333333333333333333333333333";
+		project.config = {
+			roleMap: {
+				...project.config.roleMap,
+				roles: {
+					orchestrator: {
+						...project.config.roleMap.roles.orchestrator,
+						template: "orchestrator-b",
+					},
+				},
+			},
+		};
+		await act(async () => {
+			await queryClient.refetchQueries({ queryKey: ["project-settings", "proj-1"] });
+		});
+
+		expect(screen.getByRole("switch", { name: "Strict delegation" })).toBeChecked();
+		expect(screen.getByRole("textbox", { name: "Template profile ID for orchestrator" })).toHaveValue("orchestrator-a");
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
+			params: { path: { id: "proj-1" } },
+			body: expect.objectContaining({
+				expectedRoleMapSha256: "2222222222222222222222222222222222222222222222222222222222222222",
+				roleMap: expect.objectContaining({ strictDelegation: true }),
+			}),
+		});
+	});
+
 	it("does not have its own close button (dialog handles closing)", async () => {
 		mockProject({
 			id: "proj-1",
@@ -205,12 +391,26 @@ describe("ProjectSettingsForm", () => {
 		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
 		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}", {
 			params: { path: { id: "tg_content_factory_5863f66be3" } },
-			body: expect.objectContaining({ displayName: "TG Content Factory" }),
+			body: expect.objectContaining({
+				displayName: "TG Content Factory",
+				expectedRoleMapSha256: defaultRoleMapSHA256,
+			}),
 		});
 		expect(screen.getByText("tg_content_factory_5863f66be3")).toBeInTheDocument();
 	});
 
 	it("loads agents fields and saves without dropping hidden workflow config", async () => {
+		const roleMap = {
+			role_map_schema_version: 1,
+			orchestratorRole: "orchestrator",
+			roles: {
+				orchestrator: {
+					template: "orchestrator",
+					harness: "claude-code",
+					permissions: { workspaceWrites: true, canSpawn: true },
+				},
+			},
+		};
 		mockProject({
 			id: "proj-1",
 			name: "Project One",
@@ -234,6 +434,7 @@ describe("ProjectSettingsForm", () => {
 					permissions: "auto",
 				},
 				reviewers: [{ harness: "claude-code" }],
+				roleMap,
 			},
 		});
 
@@ -264,12 +465,14 @@ describe("ProjectSettingsForm", () => {
 			params: { path: { id: "proj-1" } },
 			body: {
 				displayName: "Project One",
+				expectedRoleMapSha256: defaultRoleMapSHA256,
 				config: expect.objectContaining({
 					// Hidden workflow config is preserved
 					defaultBranch: "develop",
 					sessionPrefix: "po",
 					env: { FOO: "bar" },
 					reviewers: [{ harness: "claude-code" }],
+					roleMap,
 					// Agents changes applied
 					worker: {
 						agent: "opencode",
@@ -340,6 +543,7 @@ describe("ProjectSettingsForm", () => {
 					status: "ok",
 					project: {
 						id: "proj-1",
+						roleMapSha256: defaultRoleMapSHA256,
 						name: "Project One",
 						kind: "single_repo",
 						path: "/repo/project-one",
@@ -404,6 +608,7 @@ describe("ProjectSettingsForm", () => {
 					status: "ok",
 					project: {
 						id: "proj-1",
+						roleMapSha256: defaultRoleMapSHA256,
 						name: "Project One",
 						kind: "single_repo",
 						path: "/repo/project-one",
@@ -447,6 +652,7 @@ describe("ProjectSettingsForm", () => {
 					status: "ok",
 					project: {
 						id: "proj-1",
+						roleMapSha256: defaultRoleMapSHA256,
 						name: "Project One",
 						kind: "single_repo",
 						path: "/repo/project-one",
@@ -506,6 +712,67 @@ describe("ProjectSettingsForm", () => {
 		expect(await screen.findByText("invalid permissions")).toBeInTheDocument();
 		expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
 		expect(postMock).not.toHaveBeenCalled();
+	});
+
+	it("preserves a CLI-authored automatic mode while reordering its ladder", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			roleMapSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			config: {
+				worker: { agent: "codex" },
+				orchestrator: { agent: "claude-code" },
+				roleMap: {
+					role_map_schema_version: 1,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+						implementor: {
+							template: "implementor",
+							harness: "codex",
+							permissions: { workspaceWrites: true, canSpawn: false },
+						},
+					},
+					failover: {
+						mode: "automatic",
+						roles: {
+							implementor: [{ harness: "claude-code" }, { harness: "codex", model: "gpt-5" }],
+						},
+					},
+				},
+			},
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		expect(await screen.findByText("Automatic mode is preserved but is not enabled by this editor yet.")).toBeInTheDocument();
+		const implementorCard = screen.getByRole("group", { name: "implementor" });
+		await userEvent.click(within(implementorCard).getByRole("button", { name: "Move rung down — implementor rung 1" }));
+		expect(within(implementorCard).getByRole("button", { name: "Move rung up — implementor rung 2" })).toHaveFocus();
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
+			params: { path: { id: "proj-1" } },
+			body: {
+				expectedRoleMapSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+				roleMap: expect.objectContaining({
+					failover: {
+						mode: "automatic",
+						roles: {
+							implementor: [{ harness: "codex", model: "gpt-5" }, { harness: "claude-code" }],
+						},
+					},
+				}),
+			},
+		});
 	});
 
 	it("rejects a blank project name before sending the settings update", async () => {
@@ -591,6 +858,7 @@ describe("ProjectSettingsForm", () => {
 					status: "ok",
 					project: {
 						id: "proj-1",
+						roleMapSha256: defaultRoleMapSHA256,
 						name: "Project One",
 						kind: "single_repo",
 						path: "/repo/project-one",
@@ -683,6 +951,7 @@ describe("ProjectSettingsForm", () => {
 			params: { path: { id: "scratch" } },
 			body: {
 				displayName: "Scratch",
+				expectedRoleMapSha256: defaultRoleMapSHA256,
 				config: {
 					env: { FOO: "bar" },
 					sessionPrefix: "ao",
@@ -706,6 +975,7 @@ describe("ProjectSettingsForm", () => {
 				status: "ok",
 				project: {
 					id: "proj-1",
+					roleMapSha256: defaultRoleMapSHA256,
 					name: "Project One",
 					kind: "single_repo",
 					path: "/repo/project-one",
@@ -749,6 +1019,7 @@ describe("ProjectSettingsForm", () => {
 				status: "ok",
 				project: {
 					id: "proj-1",
+					roleMapSha256: defaultRoleMapSHA256,
 					name: "Project One",
 					kind: "single_repo",
 					path: "/repo/project-one",
@@ -778,6 +1049,7 @@ describe("ProjectSettingsForm", () => {
 				status: "ok",
 				project: {
 					id: "proj-1",
+					roleMapSha256: defaultRoleMapSHA256,
 					name: "Project One",
 					kind: "single_repo",
 					path: "/repo/project-one",
@@ -834,6 +1106,7 @@ describe("ProjectSettingsForm", () => {
 				status: "ok",
 				project: {
 					id: "proj-1",
+					roleMapSha256: defaultRoleMapSHA256,
 					name: "Project One",
 					kind: "single_repo",
 					path: "/repo/project-one",
@@ -867,5 +1140,398 @@ describe("ProjectSettingsForm", () => {
 		expect(screen.queryByText("Save failed")).not.toBeInTheDocument();
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["project", "proj-1"] });
 		expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: workspaceQueryKey });
+	});
+
+	it("sends an exact role-map CAS payload with false permissions and ordered failover", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "git@github.com:acme/project-one.git",
+			defaultBranch: "main",
+			roleMapSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			config: {
+				defaultBranch: "develop",
+				env: { FOO: "bar" },
+				symlinks: [".env"],
+				postCreate: ["npm install"],
+				trackerIntake: { enabled: true, repo: "acme/project-one", assignee: "octocat" },
+				worker: { agent: "codex", agentConfig: { model: "worker-model" } },
+				orchestrator: { agent: "claude-code" },
+				roleMap: {
+					role_map_schema_version: 1,
+					strictDelegation: false,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+						implementor: {
+							template: "implementor",
+							harness: "codex",
+							permissions: { workspaceWrites: true, canSpawn: false },
+							when: ["backend"],
+						},
+						reviewer: {
+							template: "reviewer",
+							harness: "codex",
+							permissions: { workspaceWrites: true, canSpawn: false },
+						},
+					},
+					failover: {
+						mode: "manual",
+						roles: {
+							implementor: [
+								{ harness: "claude-code", model: "sonnet" },
+								{ harness: "codex", model: "gpt-5" },
+							],
+							reviewer: [{ harness: "claude-code" }],
+						},
+					},
+				},
+			},
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		expect(await screen.findByRole("button", { name: "Remove role orchestrator" })).toBeDisabled();
+		await userEvent.click(await screen.findByRole("switch", { name: "Strict delegation" }));
+
+		const implementorCard = screen.getByRole("group", { name: "implementor" });
+		expect(implementorCard).not.toBeNull();
+		const firstRungModel = within(implementorCard).getByRole("textbox", { name: "Model for implementor failover rung 1" });
+		await userEvent.clear(firstRungModel);
+		await userEvent.type(firstRungModel, "claude-sonnet");
+		expect(firstRungModel).toHaveValue("claude-sonnet");
+		expect(firstRungModel).toHaveFocus();
+		await userEvent.click(within(implementorCard).getByRole("button", { name: "Move rung down — implementor rung 1" }));
+
+		await userEvent.click(screen.getByRole("button", { name: "Remove role reviewer" }));
+		await userEvent.type(screen.getByRole("textbox", { name: "New role ID" }), "verifier");
+		await userEvent.click(screen.getByRole("button", { name: "Add role" }));
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
+		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
+			params: { path: { id: "proj-1" } },
+			body: {
+				expectedRoleMapSha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				roleMap: {
+						role_map_schema_version: 1,
+						strictDelegation: true,
+						orchestratorRole: "orchestrator",
+						roles: {
+							orchestrator: {
+								template: "orchestrator",
+								harness: "claude-code",
+								permissions: { workspaceWrites: true, canSpawn: true },
+							},
+							implementor: {
+								template: "implementor",
+								harness: "codex",
+								permissions: { workspaceWrites: true, canSpawn: false },
+								when: ["backend"],
+							},
+							verifier: {
+								template: "verifier",
+								harness: "codex",
+								permissions: { workspaceWrites: true, canSpawn: false },
+							},
+						},
+						failover: {
+							mode: "manual",
+							roles: {
+								implementor: [
+									{ harness: "codex", model: "gpt-5" },
+									{ harness: "claude-code", model: "claude-sonnet" },
+								],
+							},
+						},
+				},
+			},
+		});
+		expect(postMock).not.toHaveBeenCalled();
+	});
+
+	it("refuses an invalid strict role map before mutation", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: false },
+						},
+					},
+				},
+			},
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		await userEvent.click(await screen.findByRole("switch", { name: "Strict delegation" }));
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		expect(await screen.findByText("Strict delegation requires role “orchestrator” to have spawn permission.")).toBeInTheDocument();
+		expect(putMock).not.toHaveBeenCalled();
+	});
+
+	it("does not author a failover rung when no alternative harness is available", async () => {
+		const project = {
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			roleMapSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+					},
+				},
+			},
+		};
+		getMock.mockImplementation(async (path: string) => {
+			if (path === "/api/v1/agents") {
+				return {
+					data: {
+						supported: [{ id: "claude-code", label: "Claude Code" }],
+						installed: [{ id: "claude-code", label: "Claude Code", authStatus: "authorized" }],
+						authorized: [{ id: "claude-code", label: "Claude Code", authStatus: "authorized" }],
+					},
+					error: undefined,
+				};
+			}
+			return { data: { status: "ok", project }, error: undefined };
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		const addRung = await screen.findByRole("button", { name: "Add failover rung for orchestrator" });
+		expect(addRung).toBeDisabled();
+		expect(addRung).toHaveAttribute("aria-describedby", "no-alternative-harness-orchestrator");
+		expect(screen.getByText("No alternative harness is available for orchestrator.")).toBeVisible();
+		await userEvent.click(addRung);
+		expect(screen.queryByRole("textbox", { name: /orchestrator failover rung/i })).not.toBeInTheDocument();
+		expect(putMock).not.toHaveBeenCalled();
+	});
+
+	it("discards an unsaved role-map draft without mutation", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					strictDelegation: false,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+						implementor: {
+							template: "implementor",
+							harness: "codex",
+							permissions: { workspaceWrites: true, canSpawn: false },
+						},
+					},
+					failover: {
+						mode: "manual",
+						roles: {
+							implementor: [
+								{ harness: "claude-code", model: "sonnet" },
+								{ harness: "goose", model: "llama" },
+							],
+						},
+					},
+				},
+			},
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		const strict = await screen.findByRole("switch", { name: "Strict delegation" });
+		const oldSecondRung = screen.getByRole("textbox", { name: "Model for implementor failover rung 2" });
+		await userEvent.click(strict);
+		await userEvent.click(screen.getByRole("button", { name: "Remove rung — implementor rung 1" }));
+		expect(strict).toBeChecked();
+		await userEvent.click(screen.getByRole("button", { name: "Discard role-map changes" }));
+		expect(screen.getByRole("switch", { name: "Strict delegation" })).not.toBeChecked();
+		const restoredFirstRung = screen.getByRole("textbox", { name: "Model for implementor failover rung 1" });
+		expect(restoredFirstRung).toHaveValue("sonnet");
+		expect(screen.getByRole("textbox", { name: "Model for implementor failover rung 2" })).toHaveValue("llama");
+		expect(restoredFirstRung).not.toBe(oldSecondRung);
+		expect(putMock).not.toHaveBeenCalled();
+	});
+
+	it("renders an unreadable project as identity-only and exposes no mutations", async () => {
+		getMock.mockResolvedValue({
+			data: {
+				status: "degraded",
+				project: {
+					id: "broken-project",
+					name: "Broken Project",
+					kind: "single_repo",
+					path: "/repo/broken",
+					resolveError: "project config is unreadable: role_map_schema_version 99",
+				},
+			},
+			error: undefined,
+		});
+
+		renderSettings("broken-project", undefined, "roles");
+		expect(await screen.findByRole("alert")).toHaveTextContent("Broken Project");
+		expect(screen.getByRole("alert")).toHaveTextContent("project config is unreadable: role_map_schema_version 99");
+		expect(screen.queryByRole("button", { name: "Save changes" })).not.toBeInTheDocument();
+		expect(screen.queryByRole("switch", { name: "Strict delegation" })).not.toBeInTheDocument();
+		expect(putMock).not.toHaveBeenCalled();
+	});
+
+	it("keeps the draft and exact daemon validation error when capability validation rejects save", async () => {
+		mockProject({
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			roleMapSha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					strictDelegation: false,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+						implementor: {
+							template: "implementor",
+							harness: "codex",
+							permissions: { workspaceWrites: true, canSpawn: false },
+						},
+					},
+				},
+			},
+		});
+		putMock.mockResolvedValue({
+			data: undefined,
+			error: { message: "roles[orchestrator]: claude-code does not enforce read-only workspace access" },
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		const strict = await screen.findByRole("switch", { name: "Strict delegation" });
+		await userEvent.click(strict);
+		await userEvent.click(screen.getByRole("switch", { name: "Workspace writes for orchestrator" }));
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		expect(await screen.findByText("roles[orchestrator]: claude-code does not enforce read-only workspace access")).toBeInTheDocument();
+		expect(strict).toBeChecked();
+		expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+	});
+
+	it("keeps a stale draft on conflict, then reloads revision B for the next CAS", async () => {
+		const project = {
+			id: "proj-1",
+			name: "Project One",
+			kind: "single_repo",
+			path: "/repo/project-one",
+			repo: "",
+			defaultBranch: "main",
+			roleMapSha256: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+			config: {
+				roleMap: {
+					role_map_schema_version: 1,
+					strictDelegation: false,
+					orchestratorRole: "orchestrator",
+					roles: {
+						orchestrator: {
+							template: "orchestrator",
+							harness: "claude-code",
+							permissions: { workspaceWrites: true, canSpawn: true },
+						},
+						implementor: {
+							template: "implementor",
+							harness: "codex",
+							permissions: { workspaceWrites: true, canSpawn: false },
+						},
+					},
+				},
+			},
+		};
+		mockProject(project);
+		putMock.mockResolvedValueOnce({
+			data: undefined,
+			error: { code: "PROJECT_ROLE_MAP_CONFLICT", message: "Role map changed since it was loaded; reload before saving" },
+		});
+
+		renderSettings("proj-1", undefined, "roles");
+		const strict = await screen.findByRole("switch", { name: "Strict delegation" });
+		await userEvent.click(strict);
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+		expect(await screen.findByText("Role map changed since it was loaded; reload before saving")).toBeInTheDocument();
+		expect(strict).toBeChecked();
+		expect(screen.queryByText("Saved.")).not.toBeInTheDocument();
+
+		project.roleMapSha256 = "abababababababababababababababababababababababababababababababab";
+		project.config = {
+			...project.config,
+			roleMap: {
+				...project.config.roleMap,
+				strictDelegation: false,
+				roles: {
+					...project.config.roleMap.roles,
+					orchestrator: {
+						...project.config.roleMap.roles.orchestrator,
+						template: "orchestrator-v2",
+					},
+				},
+			},
+		};
+		await userEvent.click(screen.getByRole("button", { name: "Reload latest role map" }));
+		await waitFor(() => expect(screen.getByRole("switch", { name: "Strict delegation" })).not.toBeChecked());
+		expect(screen.getByRole("textbox", { name: "Template profile ID for orchestrator" })).toHaveValue("orchestrator-v2");
+		expect(screen.queryByText("Role map changed since it was loaded; reload before saving")).not.toBeInTheDocument();
+
+		await userEvent.click(screen.getByRole("switch", { name: "Strict delegation" }));
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(2));
+		expect(putMock).toHaveBeenNthCalledWith(2, "/api/v1/projects/{id}/role-map", {
+			params: { path: { id: "proj-1" } },
+			body: {
+				expectedRoleMapSha256: "abababababababababababababababababababababababababababababababab",
+				roleMap: expect.objectContaining({
+					strictDelegation: true,
+					roles: expect.objectContaining({
+						orchestrator: expect.objectContaining({ template: "orchestrator-v2" }),
+					}),
+				}),
+			},
+		});
 	});
 });

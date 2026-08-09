@@ -38,6 +38,11 @@ import { newestActiveOrchestrator } from "../types/workspace";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import { buildIntake, deriveGitHubRepo, IntakeFields, type IntakeForm, intakeNeedsRule } from "./IntakeFields";
 import { ReviewerSelect } from "./ReviewerSelect";
+import {
+	ProjectRoleMapEditor,
+	type RoleMap,
+	validateRoleMapDraft,
+} from "./ProjectRoleMapEditor";
 import { AgentModelCombobox } from "./settings/AgentModelCombobox";
 import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 import { SettingsRow } from "./settings/SettingsRow";
@@ -45,54 +50,84 @@ import { SettingsSection } from "./settings/SettingsSection";
 import { Button } from "./ui/button";
 
 type Project = components["schemas"]["Project"];
+type ProjectWithRoleMapRevision = Project & { roleMapSha256: string };
+type DegradedProject = components["schemas"]["DegradedProject"];
+type ProjectGetResponse = components["schemas"]["ProjectGetResponse"];
 type ProjectConfig = components["schemas"]["ProjectConfig"];
 type TrackerIntakeConfig = components["schemas"]["TrackerIntakeConfig"];
+type UpdateProjectSettingsInput = components["schemas"]["UpdateProjectSettingsInput"];
+type UpdateProjectSettingsInputWithRoleMapCAS = UpdateProjectSettingsInput & {
+	expectedRoleMapSha256: string;
+};
 
 const PERMISSION_MODE_VALUES = ["default", "accept-edits", "auto", "bypass-permissions"] as const;
 
+const projectSettingsQueryKey = (id: string) => ["project-settings", id] as const;
 
-const projectQueryKey = (id: string) => ["project", id] as const;
-
-export type ProjectSettingsSection = "general" | "agents" | "workflow" | "intake";
+export type ProjectSettingsSection = "general" | "agents" | "roles" | "workflow" | "intake";
 
 export function ProjectSettingsForm({ projectId, section = "general" }: { projectId: string; section?: ProjectSettingsSection }) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 
 	const query = useQuery({
-		queryKey: projectQueryKey(projectId),
-		queryFn: async () => {
+		queryKey: projectSettingsQueryKey(projectId),
+		queryFn: async (): Promise<ProjectGetResponse> => {
 			const { data, error } = await apiClient.GET("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
 			});
 			if (error) throw new Error(apiErrorMessage(error));
-			if (data?.status !== "ok") throw new Error(t("settings.project.degraded"));
-			return data.project as Project;
+			if (!data) throw new Error(t("settings.project.loadFailed"));
+			if (data.status === "ok" && !(data.project as Project).roleMapSha256) {
+				throw new Error(t("settings.project.loadFailed"));
+			}
+			return data;
 		},
 	});
+	const reloadRoleMap = async (): Promise<ProjectWithRoleMapRevision | null> => {
+		const result = await query.refetch();
+		if (result.isError || !result.data || result.data.status !== "ok") return null;
+		const project = result.data.project as Project;
+		return project.roleMapSha256 ? project as ProjectWithRoleMapRevision : null;
+	};
 
 	return (
 		<>
-			{query.isLoading ? (
+			{query.isLoading && !query.data ? (
 				<p className="text-sm text-settings-muted">{t("settings.project.loading")}</p>
-			) : query.isError || !query.data ? (
+			) : !query.data ? (
 				<p className="text-sm text-error">
 					{query.error instanceof Error ? query.error.message : t("settings.project.loadFailed")}
 				</p>
 			) : (
-				<SettingsBody
-					key={projectId}
-					project={query.data}
-					onSaved={() => queryClient.invalidateQueries({ queryKey: workspaceQueryKey })}
-					projectId={projectId}
-					section={section}
-				/>
+				<>
+					{query.isError && (
+						<p role="alert" className="mb-3 text-sm text-error">
+							{query.error instanceof Error ? query.error.message : t("settings.project.loadFailed")}
+						</p>
+					)}
+					{query.data.status === "degraded" ? (
+						<DegradedProjectSettings
+							project={query.data.project as DegradedProject}
+							onRetry={() => void query.refetch()}
+						/>
+					) : (
+						<SettingsBody
+							key={projectId}
+							project={query.data.project as ProjectWithRoleMapRevision}
+							onSaved={() => queryClient.invalidateQueries({ queryKey: workspaceQueryKey })}
+							onReloadRoleMap={reloadRoleMap}
+							projectId={projectId}
+							section={section}
+						/>
+					)}
+				</>
 			)}
 		</>
 	);
 }
 
-function SettingsBody({ project, projectId, onSaved, section = "general" }: { project: Project; projectId: string; onSaved: () => void; section?: ProjectSettingsSection }) {
+function SettingsBody({ project, projectId, onSaved, onReloadRoleMap, section = "general" }: { project: ProjectWithRoleMapRevision; projectId: string; onSaved: () => void; onReloadRoleMap: () => Promise<ProjectWithRoleMapRevision | null>; section?: ProjectSettingsSection }) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
 	const workspaceQuery = useWorkspaceQuery();
@@ -101,6 +136,10 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 	const workspace = workspaceQuery.data?.find((item) => item.id === projectId);
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
+	const [baseRoleMap, setBaseRoleMap] = useState<RoleMap | undefined>(config.roleMap);
+	const [baseRoleMapSHA256, setBaseRoleMapSHA256] = useState(project.roleMapSha256);
+	const [roleMap, setRoleMap] = useState<RoleMap | undefined>(config.roleMap);
+	const [roleEditorEpoch, setRoleEditorEpoch] = useState(0);
 	const [form, setForm] = useState({
 		displayName: project.name,
 		defaultBranch: config.defaultBranch ?? project.defaultBranch ?? "",
@@ -147,13 +186,18 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 	const mutation = useMutation({
 		mutationFn: async () => {
 			void captureRendererEvent("ao.renderer.settings_save_requested", { project_id: projectId });
-			const displayName = form.displayName.trim();
+			// Role edits are isolated from unsaved fields in the other settings
+			// sections. The settings dialog keeps this form mounted while navigating,
+			// so using form.displayName here could save an unrelated identity draft.
+			const displayName = section === "roles" ? project.name : form.displayName.trim();
 			const {
 				model: _legacyModel,
 				mode: _legacyMode,
 				...sharedAgentConfig
 			} = config.agentConfig ?? {};
-			const next: ProjectConfig = isScratchProject
+			const next: ProjectConfig | undefined = section === "roles"
+				? undefined
+				: isScratchProject
 				? {
 						...scratchSupportedConfig(config),
 						worker: {
@@ -200,14 +244,38 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 						reviewers: form.reviewerHarness ? [{ harness: form.reviewerHarness }] : undefined,
 						trackerIntake: buildIntake(intakeForm),
 					};
+			if (section === "roles") {
+				const { data, error } = await apiClient.PUT("/api/v1/projects/{id}/role-map", {
+						params: { path: { id: projectId } },
+						body: {
+							expectedRoleMapSha256: baseRoleMapSHA256,
+							roleMap: roleMap!,
+						},
+					});
+				if (error) throw new Error(apiErrorMessage(error));
+				if (!data?.project.roleMapSha256) throw new Error(t("settings.project.loadFailed"));
+				return {
+					replacementError: null,
+					savedRoleMap: data.project.config?.roleMap ?? roleMap!,
+					savedRoleMapSHA256: data.project.roleMapSha256,
+					savedProject: data.project,
+				};
+			}
+			const settingsBody: UpdateProjectSettingsInputWithRoleMapCAS = {
+				displayName,
+				config: next!,
+				expectedRoleMapSha256: project.roleMapSha256,
+			};
 			const { error } = await apiClient.PUT("/api/v1/projects/{id}", {
 				params: { path: { id: projectId } },
-				body: { displayName, config: next },
+				body: settingsBody,
 			});
 			if (error) throw new Error(apiErrorMessage(error));
 			if (
-				form.orchestratorAgent !== initialOrchestratorAgent ||
-				(activeOrchestrator && activeOrchestrator.provider !== form.orchestratorAgent)
+				(
+					form.orchestratorAgent !== initialOrchestratorAgent ||
+					(activeOrchestrator && activeOrchestrator.provider !== form.orchestratorAgent)
+				)
 			) {
 				try {
 					await spawnOrchestrator(projectId, "settings", true);
@@ -218,10 +286,30 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 					};
 				}
 			}
-			return { replacementError: null };
+			return { replacementError: null, savedRoleMap: undefined, savedRoleMapSHA256: undefined, savedProject: undefined };
 		},
 		onSuccess: (result) => {
 			void captureRendererEvent("ao.renderer.settings_save_succeeded", { project_id: projectId });
+			if (result.savedRoleMap && result.savedRoleMapSHA256 && result.savedProject) {
+				setBaseRoleMap(result.savedRoleMap);
+				setBaseRoleMapSHA256(result.savedRoleMapSHA256);
+				setRoleMap(result.savedRoleMap);
+				setRoleEditorEpoch((epoch) => epoch + 1);
+				queryClient.setQueryData<ProjectGetResponse>(projectSettingsQueryKey(projectId), (current) => {
+					if (!current || current.status !== "ok") return current;
+					const currentProject = current.project as Project;
+					return {
+						status: "ok",
+						project: {
+							...currentProject,
+							...result.savedProject,
+							workspaceRepos: currentProject.workspaceRepos,
+						},
+					};
+				});
+			} else {
+				void queryClient.invalidateQueries({ queryKey: projectSettingsQueryKey(projectId) });
+			}
 			setSavedAt(Date.now());
 			setReplacementError(result.replacementError);
 			setValidationError(null);
@@ -250,6 +338,16 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 				event.preventDefault();
 				setSavedAt(null);
 				setReplacementError(null);
+				if (section === "roles") {
+					const roleMapError = validateRoleMapDraft(roleMap, t);
+					if (roleMapError) {
+						setValidationError(roleMapError);
+						return;
+					}
+					setValidationError(null);
+					mutation.mutate();
+					return;
+				}
 				if (missingRequiredAgent) {
 					setValidationError(t("settings.project.agentsRequired"));
 					return;
@@ -389,6 +487,57 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 				</>
 			)}
 
+			{/* ── Roles: semantic bindings and ordered failover ladders ─── */}
+			{section === "roles" && (
+				<>
+					<ProjectRoleMapEditor
+						key={`${baseRoleMapSHA256}:${roleEditorEpoch}`}
+						value={roleMap}
+						onChange={(nextRoleMap) => {
+							setRoleMap(nextRoleMap);
+							setSavedAt(null);
+							setValidationError(null);
+						}}
+						harnesses={(agentCatalog?.supported ?? []).map((agent) => ({ id: agent.id, label: agent.label }))}
+						defaultWorkerHarness={form.workerAgent}
+						defaultOrchestratorHarness={form.orchestratorAgent}
+					/>
+					<Button
+						type="button"
+						variant="footer"
+						onClick={() => {
+							setRoleMap(baseRoleMap);
+							setRoleEditorEpoch((epoch) => epoch + 1);
+							setSavedAt(null);
+							setValidationError(null);
+							mutation.reset();
+						}}
+					>
+						{t("settings.roles.discard")}
+					</Button>
+					<Button
+						type="button"
+						variant="footer"
+						onClick={() => void (async () => {
+							setSavedAt(null);
+							setValidationError(null);
+							const latest = await onReloadRoleMap();
+							if (!latest) return;
+							const latestRoleMap = latest.config?.roleMap;
+							setBaseRoleMap(latestRoleMap);
+							setBaseRoleMapSHA256(latest.roleMapSha256);
+							setRoleMap(latestRoleMap);
+							setRoleEditorEpoch((epoch) => epoch + 1);
+							mutation.reset();
+						})()}
+					>
+						<RefreshCw aria-hidden="true" />
+						{t("settings.roles.reload")}
+					</Button>
+					{saveFooter}
+				</>
+			)}
+
 			{/* ── Workflow: branch, prefix, reviewer ────────────────────── */}
 			{section === "workflow" && (
 				<>
@@ -457,6 +606,27 @@ function SettingsBody({ project, projectId, onSaved, section = "general" }: { pr
 	);
 }
 
+function DegradedProjectSettings({ project, onRetry }: { project: DegradedProject; onRetry: () => void }) {
+	const { t } = useTranslation();
+	return (
+		<div role="alert" className="flex flex-col gap-3 rounded-lg border border-error/40 bg-error/5 p-4">
+			<div>
+				<p className="text-sm font-semibold text-error">{t("settings.project.degraded")}</p>
+				<p className="mt-1 text-xs text-settings-muted">{project.resolveError}</p>
+			</div>
+			<dl className="grid gap-1 text-xs text-settings-muted">
+				<div><dt className="inline font-semibold">{t("settings.project.name")}: </dt><dd className="inline">{project.name}</dd></div>
+				<div><dt className="inline font-semibold">{t("settings.project.id")}: </dt><dd className="inline">{project.id}</dd></div>
+				<div><dt className="inline font-semibold">{t("settings.project.path")}: </dt><dd className="inline">{project.path}</dd></div>
+			</dl>
+			<Button type="button" variant="outline" size="sm" className="self-start" onClick={onRetry}>
+				<RefreshCw aria-hidden="true" />
+				{t("settings.project.refresh")}
+			</Button>
+		</div>
+	);
+}
+
 function SaveChangesFooter({
 	isPending,
 	validationError,
@@ -477,13 +647,13 @@ function SaveChangesFooter({
 				{isPending ? t("settings.project.saving") : t("settings.project.saveChanges")}
 			</Button>
 			{validationError && (
-				<span className="inline-flex items-center gap-1.5 text-xs text-error">
+				<span role="alert" aria-live="polite" className="inline-flex items-center gap-1.5 text-xs text-error">
 					<TriangleAlert className="size-3 shrink-0 text-error" aria-hidden="true" />
 					{validationError}
 				</span>
 			)}
 			{mutationError != null && (
-				<span className="text-xs text-error">
+				<span role="alert" aria-live="polite" className="text-xs text-error">
 					{mutationError instanceof Error ? mutationError.message : t("settings.project.saveFailed")}
 				</span>
 			)}

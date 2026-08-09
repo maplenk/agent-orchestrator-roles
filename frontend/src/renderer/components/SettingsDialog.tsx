@@ -1,4 +1,4 @@
-import { Bot, CircleHelp, GitBranch, Inbox, MonitorCog, RefreshCw, Settings2, Wrench, X } from "lucide-react";
+import { Bot, CircleHelp, GitBranch, Inbox, MonitorCog, RefreshCw, Settings2, Waypoints, Wrench, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GlobalSettingsForm, type GlobalSettingsSection } from "./GlobalSettingsForm";
@@ -42,6 +42,7 @@ export function SettingsDialog() {
 	const projectSections: Array<{ id: ProjectSettingsSection; label: string; icon: typeof Settings2 }> = [
 		{ id: "general", label: t("settings.project.identity"), icon: MonitorCog },
 		{ id: "agents", label: t("settings.project.agents"), icon: Bot },
+		{ id: "roles", label: t("settings.roles.title"), icon: Waypoints },
 		{ id: "workflow", label: t("settings.project.workflow"), icon: GitBranch },
 		{ id: "intake", label: t("settings.project.intake"), icon: Inbox },
 	];
