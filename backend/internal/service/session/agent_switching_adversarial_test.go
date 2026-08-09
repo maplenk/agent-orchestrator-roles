@@ -14,10 +14,16 @@ import (
 type adversarialSwitchCommander struct {
 	*fakeCommander
 	canonicalSwitchCalls int
+	lastCanonicalConfig  sessionmanager.SwitchAgentConfig
+	canonicalResult      domain.AgentSwitch
 }
 
 func (m *adversarialSwitchCommander) SwitchAgent(_ context.Context, id domain.SessionID, cfg sessionmanager.SwitchAgentConfig) (domain.AgentSwitch, error) {
 	m.canonicalSwitchCalls++
+	m.lastCanonicalConfig = cfg
+	if m.canonicalResult.ID != "" {
+		return m.canonicalResult, nil
+	}
 	return domain.AgentSwitch{ID: "unauthorized-mutation", SessionID: id, TargetHarness: cfg.TargetHarness}, nil
 }
 
