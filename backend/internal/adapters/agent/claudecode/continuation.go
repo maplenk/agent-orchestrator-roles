@@ -116,7 +116,7 @@ func (p *Plugin) LocateTranscript(ctx context.Context, ref ports.NativeSessionRe
 			continue
 		case errors.Is(err, os.ErrNotExist):
 			continue
-		case err != nil:
+		default:
 			return "", false, fmt.Errorf("claude-code: stat transcript: %w", err)
 		}
 	}

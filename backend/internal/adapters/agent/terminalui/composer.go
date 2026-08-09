@@ -182,7 +182,7 @@ func styledTerminalLines(output string) ([][]styledRune, bool) {
 	return lines, true
 }
 
-func consumeEscape(output string, start int) (next int, params string, sgr bool, valid bool) {
+func consumeEscape(output string, start int) (next int, params string, sgr, valid bool) {
 	if start+1 >= len(output) {
 		return len(output), "", false, false
 	}

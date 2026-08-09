@@ -226,58 +226,6 @@ SELECT COALESCE((
 	return err
 }
 
-func prepareBurnedSchemaRepairs(db *sql.DB) error {
-	var gooseTable int
-	if err := db.QueryRow(
-		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'goose_db_version'`,
-	).Scan(&gooseTable); err != nil {
-		return err
-	}
-	if gooseTable == 0 {
-		return nil
-	}
-	for _, rc := range schemaRepairs {
-		var applied int
-		if err := db.QueryRow(`
-SELECT COALESCE((
-    SELECT is_applied FROM goose_db_version
-    WHERE version_id = ? ORDER BY id DESC LIMIT 1
-), 0)`, rc.version).Scan(&applied); err != nil {
-			return err
-		}
-		if applied == 0 {
-			continue
-		}
-		var tableCount int
-		if err := db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, rc.table,
-		).Scan(&tableCount); err != nil {
-			return err
-		}
-		if tableCount == 0 {
-			continue
-		}
-		var columnCount int
-		if err := db.QueryRow(
-			`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, rc.table, rc.column,
-		).Scan(&columnCount); err != nil {
-			return err
-		}
-		if columnCount > 0 {
-			continue
-		}
-		if _, err := db.Exec(rc.addDDL); err != nil {
-			return err
-		}
-		for _, stmt := range rc.postAdd {
-			if _, err := db.Exec(stmt); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
 // prepareReviewPerHarnessMigration makes the fresh 0080 rebuild executable on
 // field databases that already recorded 0048/0049 as applied without actually
 // running their SQL. Once 0080 has applied, it still repairs the physical review
