@@ -150,6 +150,7 @@ func TestPollSkipsIneligibleAndInvalidProjects(t *testing.T) {
 			{ID: "off", RepoOriginURL: "https://github.com/acme/off.git"},
 			{ID: "broad", RepoOriginURL: "https://github.com/acme/broad.git", Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true}}},
 			{ID: "missing-origin", Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}}},
+			{ID: "unreadable", RepoOriginURL: "https://github.com/acme/unreadable.git", Config: domain.ProjectConfig{TrackerIntake: domain.TrackerIntakeConfig{Enabled: true, Assignee: "alice"}}, ConfigReadError: "forward version"},
 		},
 	}
 	tracker := &fakeTracker{issues: []domain.Issue{{

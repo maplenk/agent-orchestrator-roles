@@ -480,6 +480,8 @@ export type WorkspaceSummary = {
 	workspaceRepos?: WorkspaceRepoSummary[];
 	type?: "main" | "worktree";
 	orchestratorAgent?: AgentProvider;
+	/** Safe daemon-supplied explanation when project config cannot be decoded. */
+	resolveError?: string;
 	accentColor?: string;
 	diff?: {
 		additions: number;

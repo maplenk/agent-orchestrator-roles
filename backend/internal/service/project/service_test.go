@@ -2,6 +2,7 @@ package project_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"os/exec"
@@ -686,6 +687,118 @@ func TestManager_ListIncludesOnlySummarySafeProjectConfig(t *testing.T) {
 	}
 	if list[0].OrchestratorAgent != domain.HarnessCodex {
 		t.Fatalf("summary orchestrator agent = %q, want codex", list[0].OrchestratorAgent)
+	}
+}
+
+func TestManager_ContainsUnreadableProjectConfigAndRefusesMutations(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := sqlitetest.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manager := project.NewWithDeps(project.Deps{Store: store, DefaultHarness: domain.HarnessCodex})
+	now := time.Now().UTC().Truncate(time.Second)
+	for _, row := range []domain.ProjectRecord{
+		{ID: "broken", Path: "/repo/broken", DisplayName: "Broken", RegisteredAt: now},
+		{ID: "healthy", Path: "/repo/healthy", DisplayName: "Healthy", RegisteredAt: now},
+	} {
+		if err := store.UpsertProject(ctx, row); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rawConfig := `{"roleMap":{"role_map_schema_version":2,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"codex","permissions":{"workspaceWrites":true,"canSpawn":true}}}},"futureConfig":"preserve"}`
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET config = ? WHERE id = ?`, rawConfig, "broken"); err != nil {
+		t.Fatal(err)
+	}
+
+	list, err := manager.List(ctx)
+	if err != nil || len(list) != 2 {
+		t.Fatalf("List = %#v, err=%v; want both rows", list, err)
+	}
+	if list[0].ID != "broken" || list[0].ResolveError != "Project configuration is unreadable" {
+		t.Fatalf("broken summary = %#v, want explicit unreadable state", list[0])
+	}
+	if list[1].ID != "healthy" || list[1].ResolveError != "" {
+		t.Fatalf("healthy summary = %#v, want readable", list[1])
+	}
+	got, err := manager.Get(ctx, "broken")
+	if err != nil || got.Status != "degraded" || got.Degraded == nil || got.Degraded.ResolveError != "Project configuration is unreadable" || got.Project != nil {
+		t.Fatalf("Get broken = %#v, err=%v; want degraded unreadable row", got, err)
+	}
+
+	updated, err := manager.EnsureDefaultRoleMaps(ctx)
+	if err != nil || updated != 1 {
+		t.Fatalf("EnsureDefaultRoleMaps updated=%d err=%v, want only healthy row", updated, err)
+	}
+	if healthy, ok, err := store.GetProject(ctx, "healthy"); err != nil || !ok || healthy.Config.RoleMap.IsZero() {
+		t.Fatalf("healthy role map = %#v ok=%v err=%v, want seeded", healthy.Config.RoleMap, ok, err)
+	}
+
+	valid := domain.ProjectConfig{DefaultBranch: "develop"}
+	_, err = manager.SetConfig(ctx, "broken", project.SetConfigInput{Config: valid})
+	wantCode(t, err, "PROJECT_CONFIG_UNREADABLE")
+	_, err = manager.UpdateSettings(ctx, "broken", project.UpdateSettingsInput{DisplayName: "Changed", Config: valid})
+	wantCode(t, err, "PROJECT_CONFIG_UNREADABLE")
+	_, err = manager.Remove(ctx, "broken")
+	wantCode(t, err, "PROJECT_CONFIG_UNREADABLE")
+
+	var persisted, displayName string
+	var archived sql.NullTime
+	if err := db.QueryRowContext(ctx, `SELECT config, display_name, archived_at FROM projects WHERE id = ?`, "broken").Scan(&persisted, &displayName, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != rawConfig || displayName != "Broken" || archived.Valid {
+		t.Fatalf("broken row mutated: config=%q displayName=%q archived=%v", persisted, displayName, archived)
+	}
+}
+
+func TestManager_UnreadableSoleProjectSuppressesScratchBootSeed(t *testing.T) {
+	ctx := context.Background()
+	dataDir := t.TempDir()
+	store, err := sqlitetest.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	manager := project.New(store)
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "broken", Path: "/repo/broken", DisplayName: "Broken", RegisteredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rawConfig := `{"futureConfig":"preserve"}`
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dataDir, "ao.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET config = ? WHERE id = ?`, rawConfig, "broken"); err != nil {
+		t.Fatal(err)
+	}
+
+	seeded, err := manager.EnsureDefaultScratchProject(ctx, t.TempDir())
+	if err != nil {
+		t.Fatalf("EnsureDefaultScratchProject: %v", err)
+	}
+	if seeded.ID != "" {
+		t.Fatalf("seeded = %#v, want no Scratch project", seeded)
+	}
+	if _, ok, err := store.GetProjectEntry(ctx, "scratch"); err != nil || ok {
+		t.Fatalf("scratch exists: ok=%v err=%v", ok, err)
+	}
+	var persisted string
+	if err := db.QueryRowContext(ctx, `SELECT config FROM projects WHERE id = ?`, "broken").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != rawConfig {
+		t.Fatalf("unreadable config changed: got %q want %q", persisted, rawConfig)
 	}
 }
 

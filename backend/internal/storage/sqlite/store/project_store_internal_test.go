@@ -13,6 +13,9 @@ func TestUnmarshalProjectConfigFailsClosed(t *testing.T) {
 	if got, err := unmarshalProjectConfig(sql.NullString{}); err != nil || !got.IsZero() {
 		t.Fatalf("NULL config = %#v, err=%v; want zero", got, err)
 	}
+	if got, err := unmarshalProjectConfig(sql.NullString{String: "", Valid: true}); err == nil || !got.IsZero() {
+		t.Fatalf("empty TEXT config = %#v, err=%v; want explicit error", got, err)
+	}
 
 	// Valid JSON decodes.
 	if got, err := unmarshalProjectConfig(sql.NullString{String: `{"defaultBranch":"develop"}`, Valid: true}); err != nil || got.DefaultBranch != "develop" {
@@ -44,6 +47,28 @@ func TestUnmarshalProjectConfigFailsClosed(t *testing.T) {
 
 	if got, err := unmarshalProjectConfig(sql.NullString{String: `{not json`, Valid: true}); err == nil || !got.IsZero() {
 		t.Fatalf("corrupt config = %#v, err=%v; want explicit error", got, err)
+	}
+	if got, err := unmarshalProjectConfig(sql.NullString{String: `null`, Valid: true}); err == nil || !got.IsZero() {
+		t.Fatalf("JSON null config = %#v, err=%v; want explicit error", got, err)
+	}
+
+	if got, err := unmarshalProjectConfig(sql.NullString{String: `{"defaultBranch":"develop","futureConfig":true}`, Valid: true}); err == nil || !got.IsZero() {
+		t.Fatalf("forward config field = %#v, err=%v; want explicit error", got, err)
+	}
+
+	forwardRoleMap := sql.NullString{String: `{
+		"roleMap":{
+			"role_map_schema_version":2,
+			"orchestratorRole":"orchestrator",
+			"roles":{"orchestrator":{
+				"template":"orchestrator",
+				"harness":"codex",
+				"permissions":{"workspaceWrites":true,"canSpawn":true}
+			}}
+		}
+	}`, Valid: true}
+	if got, err := unmarshalProjectConfig(forwardRoleMap); err == nil || !got.IsZero() {
+		t.Fatalf("forward role-map version = %#v, err=%v; want explicit error", got, err)
 	}
 }
 

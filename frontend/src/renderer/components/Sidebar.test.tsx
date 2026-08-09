@@ -299,6 +299,24 @@ describe("Sidebar", () => {
 		expect(spawnMock).not.toHaveBeenCalled();
 	});
 
+	it("keeps an unreadable project visible while fencing project mutations", async () => {
+		const user = userEvent.setup();
+		const onRemoveProject = vi.fn().mockResolvedValue(undefined) as RemoveProjectHandler;
+		renderSidebar({
+			onRemoveProject,
+			workspaces: [{ ...workspace, resolveError: "Project configuration is unreadable" }],
+		});
+
+		expect(screen.getByText("Project configuration is unreadable")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Spawn Project One orchestrator" })).toBeDisabled();
+
+		await user.click(screen.getByLabelText("Project actions for Project One"));
+		expect(await screen.findByRole("menuitem", { name: "New session" })).toHaveAttribute("data-disabled");
+		expect(screen.getByRole("menuitem", { name: "Remove project" })).toHaveAttribute("data-disabled");
+		expect(onRemoveProject).not.toHaveBeenCalled();
+		expect(spawnMock).not.toHaveBeenCalled();
+	});
+
 	it("shows a ConfirmDialog and calls onRemoveProject when confirmed", async () => {
 		const user = userEvent.setup();
 		const onRemoveProject = renderSidebar();

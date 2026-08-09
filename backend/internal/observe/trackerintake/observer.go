@@ -130,6 +130,10 @@ func (o *Observer) Poll(ctx context.Context) error {
 	}
 	enabledProjects := make([]domain.ProjectRecord, 0, len(projects))
 	for _, project := range projects {
+		if project.ConfigReadError != "" {
+			o.logger.Warn("tracker intake: skipping project with unreadable config", "project", project.ID)
+			continue
+		}
 		if project.Config.TrackerIntake.Enabled {
 			enabledProjects = append(enabledProjects, project)
 		}

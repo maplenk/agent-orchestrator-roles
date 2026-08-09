@@ -122,6 +122,9 @@ func (m *Service) EnsureDefaultRoleMaps(ctx context.Context) (int, error) {
 	}
 	updated := 0
 	for _, row := range projects {
+		if row.ConfigReadError != "" {
+			continue
+		}
 		if !row.ArchivedAt.IsZero() || !row.Config.RoleMap.IsZero() {
 			continue
 		}
@@ -145,6 +148,10 @@ func (m *Service) List(ctx context.Context) ([]Summary, error) {
 	}
 	out := make([]Summary, 0, len(projects))
 	for _, row := range projects {
+		if row.ConfigReadError != "" {
+			out = append(out, unreadableProjectSummary(row))
+			continue
+		}
 		out = append(out, Summary{
 			ID:                domain.ProjectID(row.ID),
 			Name:              displayName(row),
@@ -162,12 +169,16 @@ func (m *Service) Get(ctx context.Context, id domain.ProjectID) (GetResult, erro
 	if err := validateProjectID(id); err != nil {
 		return GetResult{}, err
 	}
-	row, ok, err := m.store.GetProject(ctx, string(id))
+	row, ok, err := m.store.GetProjectEntry(ctx, string(id))
 	if err != nil {
 		return GetResult{}, apierr.Internal("PROJECT_LOAD_FAILED", "Failed to load project")
 	}
 	if !ok || !row.ArchivedAt.IsZero() {
 		return GetResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	if row.ConfigReadError != "" {
+		degraded := unreadableProject(row)
+		return GetResult{Status: "degraded", Degraded: &degraded}, nil
 	}
 	p := m.projectFromRow(row)
 	if row.Kind.WithDefault() == domain.ProjectKindWorkspace {
@@ -555,12 +566,15 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	if err := validateProjectConfig(projectConfig); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
-	row, ok, err := m.store.GetProject(ctx, string(id))
+	row, ok, err := m.store.GetProjectEntry(ctx, string(id))
 	if err != nil {
 		return Project{}, apierr.Internal("PROJECT_LOAD_FAILED", "Failed to load project")
 	}
 	if !ok || !row.ArchivedAt.IsZero() {
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	if row.ConfigReadError != "" {
+		return Project{}, unreadableProjectMutationError(id)
 	}
 	if row.Kind.WithDefault() == domain.ProjectKindScratch {
 		if err := validateScratchProjectConfig(projectConfig); err != nil {
@@ -569,6 +583,9 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	}
 	updated, err := m.store.UpdateProjectSettings(ctx, string(id), displayName, projectConfig)
 	if err != nil {
+		if errors.Is(err, domain.ErrProjectConfigUnreadable) {
+			return Project{}, unreadableProjectMutationError(id)
+		}
 		return Project{}, apierr.Internal("PROJECT_SETTINGS_UPDATE_FAILED", "Failed to update project settings")
 	}
 	if !updated {
@@ -641,12 +658,15 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 	if err := validateProjectConfig(projectConfig); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
-	row, ok, err := m.store.GetProject(ctx, string(id))
+	row, ok, err := m.store.GetProjectEntry(ctx, string(id))
 	if err != nil {
 		return Project{}, apierr.Internal("PROJECT_LOAD_FAILED", "Failed to load project")
 	}
 	if !ok || !row.ArchivedAt.IsZero() {
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	if row.ConfigReadError != "" {
+		return Project{}, unreadableProjectMutationError(id)
 	}
 	if row.Kind.WithDefault() == domain.ProjectKindScratch {
 		if err := validateScratchProjectConfig(projectConfig); err != nil {
@@ -655,6 +675,9 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 	}
 	row.Config = projectConfig
 	if err := m.store.UpsertProject(ctx, row); err != nil {
+		if errors.Is(err, domain.ErrProjectConfigUnreadable) {
+			return Project{}, unreadableProjectMutationError(id)
+		}
 		return Project{}, apierr.Internal("PROJECT_CONFIG_UPDATE_FAILED", "Failed to update project config")
 	}
 	return m.projectFromRow(row), nil
@@ -757,12 +780,15 @@ func (m *Service) Remove(ctx context.Context, id domain.ProjectID) (RemoveResult
 	if err := validateProjectID(id); err != nil {
 		return RemoveResult{}, err
 	}
-	row, ok, err := m.store.GetProject(ctx, string(id))
+	row, ok, err := m.store.GetProjectEntry(ctx, string(id))
 	if err != nil {
 		return RemoveResult{}, apierr.Internal("PROJECT_REMOVE_FAILED", "Failed to remove project")
 	}
 	if !ok || !row.ArchivedAt.IsZero() {
 		return RemoveResult{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
+	}
+	if row.ConfigReadError != "" {
+		return RemoveResult{}, unreadableProjectMutationError(id)
 	}
 	if m.sessions != nil {
 		if err := m.sessions.TeardownProject(ctx, id); err != nil {
@@ -771,6 +797,9 @@ func (m *Service) Remove(ctx context.Context, id domain.ProjectID) (RemoveResult
 	}
 	ok, err = m.store.ArchiveProject(ctx, string(id), time.Now())
 	if err != nil {
+		if errors.Is(err, domain.ErrProjectConfigUnreadable) {
+			return RemoveResult{}, unreadableProjectMutationError(id)
+		}
 		return RemoveResult{}, apierr.Internal("PROJECT_REMOVE_FAILED", "Failed to remove project")
 	}
 	if !ok {
@@ -779,10 +808,40 @@ func (m *Service) Remove(ctx context.Context, id domain.ProjectID) (RemoveResult
 	return RemoveResult{ProjectID: id, RemovedStorageDir: false}, nil
 }
 
+const unreadableProjectConfigMessage = "Project configuration is unreadable"
+
+func unreadableProjectSummary(row domain.ProjectRecord) Summary {
+	return Summary{
+		ID:           domain.ProjectID(row.ID),
+		Name:         displayName(row),
+		Path:         row.Path,
+		Kind:         row.Kind.WithDefault(),
+		ResolveError: unreadableProjectConfigMessage,
+	}
+}
+
+func unreadableProject(row domain.ProjectRecord) Degraded {
+	return Degraded{
+		ID:           domain.ProjectID(row.ID),
+		Name:         displayName(row),
+		Kind:         row.Kind.WithDefault(),
+		Path:         row.Path,
+		ResolveError: unreadableProjectConfigMessage,
+	}
+}
+
+func unreadableProjectMutationError(id domain.ProjectID) error {
+	return apierr.Conflict(
+		"PROJECT_CONFIG_UNREADABLE",
+		"Project configuration is unreadable and cannot be modified by this AO version",
+		map[string]any{"projectId": id},
+	)
+}
+
 func (m *Service) suggestID(ctx context.Context, base domain.ProjectID) domain.ProjectID {
 	for i := 1; ; i++ {
 		candidate := domain.ProjectID(string(base) + strconv.Itoa(i))
-		if _, ok, _ := m.store.GetProject(ctx, string(candidate)); !ok {
+		if _, ok, _ := m.store.GetProjectEntry(ctx, string(candidate)); !ok {
 			return candidate
 		}
 	}

@@ -65,6 +65,24 @@ func Run(ctx context.Context, source, target Store, opts Options) (Report, error
 	if err != nil {
 		return rep, fmt.Errorf("list target projects: %w", err)
 	}
+	for _, src := range sourceProjects {
+		if src.ConfigReadError != "" {
+			return rep, fmt.Errorf("source project %s config: %w", src.ID, &domain.ProjectConfigUnreadableError{ProjectID: src.ID})
+		}
+	}
+	for _, dst := range targetProjects {
+		if dst.ConfigReadError != "" {
+			return rep, fmt.Errorf("target project %s config: %w", dst.ID, &domain.ProjectConfigUnreadableError{ProjectID: dst.ID})
+		}
+	}
+	// ListProjects excludes archived rows. Preflight every source id through the
+	// strict one-row path before the first import so an unreadable archived
+	// target cannot surface only after earlier source rows have already landed.
+	for _, src := range sourceProjects {
+		if _, _, err := target.GetProject(ctx, src.ID); err != nil {
+			return rep, fmt.Errorf("get target project %s: %w", src.ID, err)
+		}
+	}
 
 	sort.Slice(sourceProjects, func(i, j int) bool {
 		return sourceProjects[i].ID < sourceProjects[j].ID

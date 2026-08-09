@@ -3,6 +3,7 @@ package devimport
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -66,7 +67,7 @@ func TestRunRejectsMalformedSourceProjectConfigWithoutImporting(t *testing.T) {
 	}
 
 	rep, err := Run(ctx, source, target, Options{SourceDataDir: "src", TargetDataDir: "dst"})
-	if err == nil || !strings.Contains(err.Error(), "list source projects") {
+	if !errors.Is(err, domain.ErrProjectConfigUnreadable) || !strings.Contains(err.Error(), "source project alpha config") {
 		t.Fatalf("Run error = %v, want source project decode failure", err)
 	}
 	if rep.Inserted != 0 || rep.Updated != 0 || rep.Skipped != 0 {
@@ -81,6 +82,59 @@ func TestRunRejectsMalformedSourceProjectConfigWithoutImporting(t *testing.T) {
 	}
 	if persisted != rawConfig {
 		t.Fatalf("source config was rewritten: got %s want %s", persisted, rawConfig)
+	}
+}
+
+func TestRunRejectsUnreadableArchivedTargetBeforeAnyImport(t *testing.T) {
+	ctx := context.Background()
+	source := newStore(t)
+	for _, project := range []domain.ProjectRecord{
+		testProject("alpha", "/repos/alpha"),
+		testProject("omega", "/repos/omega"),
+	} {
+		if err := source.UpsertProject(ctx, project); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	targetDir := t.TempDir()
+	target, err := sqlitetest.Open(targetDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = target.Close() })
+	if err := target.UpsertProject(ctx, testProject("omega", "/repos/old-omega")); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := target.ArchiveProject(ctx, "omega", time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("archive omega: ok=%v err=%v", ok, err)
+	}
+	rawConfig := `{"futureConfig":"preserve"}`
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(targetDir, "ao.db")+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.ExecContext(ctx, `UPDATE projects SET config = ? WHERE id = ?`, rawConfig, "omega"); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := Run(ctx, source, target, Options{SourceDataDir: "src", TargetDataDir: "dst"})
+	if !errors.Is(err, domain.ErrProjectConfigUnreadable) || !strings.Contains(err.Error(), "get target project omega") {
+		t.Fatalf("Run error = %v, want archived target config refusal", err)
+	}
+	if rep.Inserted != 0 || rep.Updated != 0 || rep.Skipped != 0 {
+		t.Fatalf("report = %#v, want no attempted imports", rep)
+	}
+	if _, ok, err := target.GetProject(ctx, "alpha"); err != nil || ok {
+		t.Fatalf("alpha imported before refusal: ok=%v err=%v", ok, err)
+	}
+	var persisted string
+	if err := db.QueryRowContext(ctx, `SELECT config FROM projects WHERE id = ?`, "omega").Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != rawConfig {
+		t.Fatalf("archived target config changed: got %q want %q", persisted, rawConfig)
 	}
 }
 

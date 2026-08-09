@@ -420,6 +420,12 @@ func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.
 	}); err != nil {
 		t.Fatalf("seed project: %v", err)
 	}
+	if err := s.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "healthy", Path: "/tmp/healthy", RegisteredAt: now,
+		Config: domain.ProjectConfig{DefaultBranch: "develop"},
+	}); err != nil {
+		t.Fatalf("seed healthy project: %v", err)
+	}
 
 	// Simulate a durable row whose role binding is malformed for current ingress:
 	// workspaceWrites is missing and the binding carries an unknown field.
@@ -454,7 +460,7 @@ func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.
 	// Mirrors the SCM observer's origin-URL backfill: it changes an unrelated
 	// project field and writes the whole row back. The storage read must fail so
 	// the observer never receives a sanitized config it can persist.
-	if got, ok, err := s.GetProject(ctx, "legacy-role"); err == nil || ok || !got.Config.IsZero() {
+	if got, ok, err := s.GetProject(ctx, "legacy-role"); !errors.Is(err, domain.ErrProjectConfigUnreadable) || ok || !got.Config.IsZero() {
 		t.Fatalf("get malformed project: got=%#v ok=%v err=%v, want decode error", got, ok, err)
 	}
 
@@ -469,8 +475,54 @@ func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.
 		t.Fatalf("malformed config was rewritten:\n got: %s\nwant: %s", persisted.String, rawConfig)
 	}
 
-	if projects, err := s.ListProjects(ctx); err == nil || projects != nil {
-		t.Fatalf("list projects = %#v, err=%v; want decode error", projects, err)
+	projects, err := s.ListProjects(ctx)
+	if err != nil || len(projects) != 2 {
+		t.Fatalf("list projects = %#v, err=%v; want both rows", projects, err)
+	}
+	if projects[0].ID != "healthy" || projects[0].Config.DefaultBranch != "develop" || projects[0].ConfigReadError != "" {
+		t.Fatalf("healthy project = %#v, want readable develop config", projects[0])
+	}
+	if projects[1].ID != "legacy-role" || projects[1].ConfigReadError == "" || !projects[1].Config.IsZero() {
+		t.Fatalf("malformed project = %#v, want contained unreadable config", projects[1])
+	}
+	entry, ok, err := s.GetProjectEntry(ctx, "legacy-role")
+	if err != nil || !ok || entry.ConfigReadError == "" || !entry.Config.IsZero() {
+		t.Fatalf("get malformed entry: got=%#v ok=%v err=%v, want degraded row", entry, ok, err)
+	}
+
+	mutations := map[string]func() error{
+		"upsert": func() error {
+			return s.UpsertProject(ctx, domain.ProjectRecord{ID: "legacy-role", Path: "/changed", RegisteredAt: now})
+		},
+		"workspace upsert": func() error {
+			return s.UpsertWorkspaceProject(ctx, domain.ProjectRecord{ID: "legacy-role", Path: "/changed", RegisteredAt: now, Kind: domain.ProjectKindWorkspace}, nil)
+		},
+		"workspace import": func() error {
+			return s.ImportWorkspaceProject(ctx, domain.ProjectRecord{ID: "legacy-role", Path: "/tmp/legacy-role", RegisteredAt: now, Kind: domain.ProjectKindWorkspace}, nil)
+		},
+		"settings": func() error {
+			_, err := s.UpdateProjectSettings(ctx, "legacy-role", "changed", domain.ProjectConfig{})
+			return err
+		},
+		"archive": func() error {
+			_, err := s.ArchiveProject(ctx, "legacy-role", now.Add(time.Minute))
+			return err
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			if err := mutate(); !errors.Is(err, domain.ErrProjectConfigUnreadable) {
+				t.Fatalf("mutation error = %v, want ErrProjectConfigUnreadable", err)
+			}
+			var gotRaw, gotPath, gotName string
+			var gotArchived sql.NullTime
+			if err := db.QueryRowContext(ctx, `SELECT config, path, display_name, archived_at FROM projects WHERE id = ?`, "legacy-role").Scan(&gotRaw, &gotPath, &gotName, &gotArchived); err != nil {
+				t.Fatal(err)
+			}
+			if gotRaw != rawConfig || gotPath != "/tmp/legacy-role" || gotName != "" || gotArchived.Valid {
+				t.Fatalf("row mutated: config=%q path=%q name=%q archived=%v", gotRaw, gotPath, gotName, gotArchived)
+			}
+		})
 	}
 }
 

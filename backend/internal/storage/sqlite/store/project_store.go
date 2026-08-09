@@ -1,11 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
@@ -20,7 +22,12 @@ func (s *Store) UpsertProject(ctx context.Context, r domain.ProjectRecord) error
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	return upsertProject(ctx, s.qw, r, config)
+	return s.inTx(ctx, "upsert project", func(q *gen.Queries) error {
+		if err := ensureProjectConfigReadable(ctx, q, r.ID); err != nil {
+			return err
+		}
+		return upsertProject(ctx, q, r, config)
+	})
 }
 
 // UpsertWorkspaceProject inserts or replaces a workspace project and its child
@@ -51,6 +58,9 @@ func (s *Store) writeWorkspaceProject(ctx context.Context, label string, r domai
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	return s.inTx(ctx, label, func(q *gen.Queries) error {
+		if err := ensureProjectConfigReadable(ctx, q, r.ID); err != nil {
+			return err
+		}
 		if err := writeProject(q); err != nil {
 			return err
 		}
@@ -174,6 +184,20 @@ func (s *Store) GetProject(ctx context.Context, id string) (domain.ProjectRecord
 	return r, true, nil
 }
 
+// GetProjectEntry returns registry metadata even when this AO version cannot
+// decode the stored config. ConfigReadError distinguishes that degraded row;
+// Config must not be consumed in that state.
+func (s *Store) GetProjectEntry(ctx context.Context, id string) (domain.ProjectRecord, bool, error) {
+	p, err := s.qr.GetProject(ctx, domain.ProjectID(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return domain.ProjectRecord{}, false, nil
+	}
+	if err != nil {
+		return domain.ProjectRecord{}, false, fmt.Errorf("get project entry %s: %w", id, err)
+	}
+	return projectEntryFromGen(p), true, nil
+}
+
 // FindProjectByPath returns a project registered at path, active or archived.
 func (s *Store) FindProjectByPath(ctx context.Context, path string) (domain.ProjectRecord, bool, error) {
 	p, err := s.qr.FindProjectByPath(ctx, path)
@@ -190,7 +214,9 @@ func (s *Store) FindProjectByPath(ctx context.Context, path string) (domain.Proj
 	return r, true, nil
 }
 
-// ListProjects returns active projects ordered by id.
+// ListProjects returns active projects ordered by id. A config decode failure
+// is contained to that row via ConfigReadError so unrelated projects remain
+// listable. Consumers that need Config must explicitly reject or skip such rows.
 func (s *Store) ListProjects(ctx context.Context) ([]domain.ProjectRecord, error) {
 	rows, err := s.qr.ListProjects(ctx)
 	if err != nil {
@@ -198,11 +224,7 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.ProjectRecord, error
 	}
 	out := make([]domain.ProjectRecord, 0, len(rows))
 	for _, p := range rows {
-		r, err := projectRowFromGen(p)
-		if err != nil {
-			return nil, fmt.Errorf("list projects: %w", err)
-		}
-		out = append(out, r)
+		out = append(out, projectEntryFromGen(p))
 	}
 	return out, nil
 }
@@ -217,10 +239,18 @@ func (s *Store) UpdateProjectSettings(ctx context.Context, id, displayName strin
 	}
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	rows, err := s.qw.UpdateProjectSettings(ctx, gen.UpdateProjectSettingsParams{
-		ID:          domain.ProjectID(id),
-		DisplayName: displayName,
-		Config:      encodedConfig,
+	var rows int64
+	err = s.inTx(ctx, "update project settings", func(q *gen.Queries) error {
+		if err := ensureProjectConfigReadable(ctx, q, id); err != nil {
+			return err
+		}
+		var err error
+		rows, err = q.UpdateProjectSettings(ctx, gen.UpdateProjectSettingsParams{
+			ID:          domain.ProjectID(id),
+			DisplayName: displayName,
+			Config:      encodedConfig,
+		})
+		return err
 	})
 	if err != nil {
 		return false, fmt.Errorf("update project settings %s: %w", id, err)
@@ -243,9 +273,17 @@ func (s *Store) CountProjectsIncludingArchived(ctx context.Context) (int, error)
 func (s *Store) ArchiveProject(ctx context.Context, id string, at time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	n, err := s.qw.ArchiveProject(ctx, gen.ArchiveProjectParams{
-		ArchivedAt: nullTime(at),
-		ID:         domain.ProjectID(id),
+	var n int64
+	err := s.inTx(ctx, "archive project", func(q *gen.Queries) error {
+		if err := ensureProjectConfigReadable(ctx, q, id); err != nil {
+			return err
+		}
+		var err error
+		n, err = q.ArchiveProject(ctx, gen.ArchiveProjectParams{
+			ArchivedAt: nullTime(at),
+			ID:         domain.ProjectID(id),
+		})
+		return err
 	})
 	if err != nil {
 		return false, err
@@ -254,10 +292,18 @@ func (s *Store) ArchiveProject(ctx context.Context, id string, at time.Time) (bo
 }
 
 func projectRowFromGen(p gen.Project) (domain.ProjectRecord, error) {
-	config, err := unmarshalProjectConfig(p.Config)
-	if err != nil {
-		return domain.ProjectRecord{}, fmt.Errorf("decode project %s config: %w", p.ID, err)
+	r := projectEntryFromGen(p)
+	if r.ConfigReadError != "" {
+		return domain.ProjectRecord{}, &domain.ProjectConfigUnreadableError{
+			ProjectID: string(p.ID),
+			Cause:     errors.New(r.ConfigReadError),
+		}
 	}
+	return r, nil
+}
+
+func projectEntryFromGen(p gen.Project) domain.ProjectRecord {
+	config, configErr := unmarshalProjectConfig(p.Config)
 	r := domain.ProjectRecord{
 		ID:            string(p.ID),
 		Path:          p.Path,
@@ -267,10 +313,13 @@ func projectRowFromGen(p gen.Project) (domain.ProjectRecord, error) {
 		Kind:          domain.ProjectKind(p.Kind).WithDefault(),
 		Config:        config,
 	}
+	if configErr != nil {
+		r.ConfigReadError = configErr.Error()
+	}
 	if p.ArchivedAt.Valid {
 		r.ArchivedAt = p.ArchivedAt.Time
 	}
-	return r, nil
+	return r
 }
 
 // marshalProjectConfig encodes the typed per-project config into the nullable
@@ -292,14 +341,49 @@ func marshalProjectConfig(cfg domain.ProjectConfig) (sql.NullString, error) {
 // JSON is an explicit read error: returning a partial or zero config would let
 // an unrelated read-modify-write silently replace the authored value.
 func unmarshalProjectConfig(s sql.NullString) (domain.ProjectConfig, error) {
-	if !s.Valid || s.String == "" {
+	if !s.Valid {
 		return domain.ProjectConfig{}, nil
 	}
+	if bytes.Equal(bytes.TrimSpace([]byte(s.String)), []byte("null")) {
+		return domain.ProjectConfig{}, errors.New("unmarshal project config: JSON null is not a stored config")
+	}
 	var cfg domain.ProjectConfig
-	if err := json.Unmarshal([]byte(s.String), &cfg); err != nil {
+	dec := json.NewDecoder(bytes.NewReader([]byte(s.String)))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
 		return domain.ProjectConfig{}, fmt.Errorf("unmarshal project config: %w", err)
 	}
+	if err := ensureJSONEOF(dec); err != nil {
+		return domain.ProjectConfig{}, fmt.Errorf("unmarshal project config: %w", err)
+	}
+	if version := cfg.RoleMap.SchemaVersion; version != 0 && version != domain.RoleMapSchemaVersion {
+		return domain.ProjectConfig{}, fmt.Errorf("roleMap.role_map_schema_version: unsupported %d (want %d)", version, domain.RoleMapSchemaVersion)
+	}
 	return cfg, nil
+}
+
+func ensureJSONEOF(dec *json.Decoder) error {
+	var extra any
+	if err := dec.Decode(&extra); errors.Is(err, io.EOF) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	return errors.New("multiple JSON values")
+}
+
+func ensureProjectConfigReadable(ctx context.Context, q *gen.Queries, id string) error {
+	p, err := q.GetProject(ctx, domain.ProjectID(id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check project %s config before mutation: %w", id, err)
+	}
+	if _, err := unmarshalProjectConfig(p.Config); err != nil {
+		return &domain.ProjectConfigUnreadableError{ProjectID: id, Cause: err}
+	}
+	return nil
 }
 
 func nullTime(t time.Time) sql.NullTime {

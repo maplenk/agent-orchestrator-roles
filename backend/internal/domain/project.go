@@ -1,6 +1,10 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"fmt"
+	"time"
+)
 
 const (
 	// ProjectKindSingleRepo is the existing one-repository project shape.
@@ -34,8 +38,37 @@ type ProjectRecord struct {
 	ArchivedAt    time.Time
 	Kind          ProjectKind
 	// Config holds the typed per-project configuration AO resolves at spawn. An
-	// IsZero value means unset.
-	Config ProjectConfig
+	// IsZero value means unset. ConfigReadError is non-empty only when the raw
+	// durable JSON could not be decoded by this AO version. Callers may use the
+	// remaining registry metadata for display, but must never treat Config as a
+	// usable zero value or mutate the row while ConfigReadError is set.
+	Config          ProjectConfig
+	ConfigReadError string
+}
+
+// ErrProjectConfigUnreadable classifies a project-row mutation refused because
+// its existing durable config cannot be decoded without losing information.
+var ErrProjectConfigUnreadable = errors.New("project config unreadable")
+
+// ProjectConfigUnreadableError identifies the fenced project without exposing
+// its raw config bytes or decoder details through product surfaces.
+type ProjectConfigUnreadableError struct {
+	ProjectID string
+	Cause     error
+}
+
+func (e *ProjectConfigUnreadableError) Error() string {
+	if e == nil {
+		return ErrProjectConfigUnreadable.Error()
+	}
+	if e.Cause == nil {
+		return fmt.Sprintf("project %s: %s", e.ProjectID, ErrProjectConfigUnreadable)
+	}
+	return fmt.Sprintf("project %s: %s: %v", e.ProjectID, ErrProjectConfigUnreadable, e.Cause)
+}
+
+func (e *ProjectConfigUnreadableError) Unwrap() error {
+	return ErrProjectConfigUnreadable
 }
 
 // WorkspaceRepoRecord is a child repo registered under a workspace project.

@@ -555,6 +555,7 @@ function ProjectItem({
 	// The project's live orchestrator (if any) backs the hover Orchestrator
 	// button: navigate to it when present, otherwise spawn one first.
 	const orchestrator = newestActiveOrchestrator(workspace.sessions);
+	const configUnreadable = Boolean(workspace.resolveError);
 
 	// Mirrors ShellTopbar's launcher: attach to the running orchestrator, or
 	// spawn one via the daemon and follow it once the workspace refetches.
@@ -568,6 +569,7 @@ function ProjectItem({
 			selection.goSettings(workspace.id);
 			return;
 		}
+		if (configUnreadable) return;
 		setIsSpawning(true);
 		try {
 			const sessionId = await spawnOrchestrator(workspace.id, "sidebar");
@@ -723,7 +725,7 @@ function ProjectItem({
 								: t("shell.spawnProjectOrchestrator", { name: workspace.name })
 						}
 						className={cn(HOVER_ACTION_CLASS, orchestratorActive && "text-foreground")}
-						disabled={isSpawning || isProjectRestarting}
+						disabled={isSpawning || isProjectRestarting || (!orchestrator && configUnreadable)}
 						onClick={() => void openOrchestrator()}
 						type="button"
 					>
@@ -731,7 +733,9 @@ function ProjectItem({
 					</button>
 				</TooltipTrigger>
 				<TooltipContent>
-					{isProjectRestarting
+					{!orchestrator && workspace.resolveError
+						? workspace.resolveError
+						: isProjectRestarting
 						? t("shell.restarting")
 						: isSpawning
 							? t("shell.spawning")
@@ -747,7 +751,7 @@ function ProjectItem({
 					</button>
 				</DropdownMenuTrigger>
 				<DropdownMenuContent side="right" align="start" className="min-w-44">
-					<DropdownMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
+					<DropdownMenuItem disabled={isProjectRestarting || configUnreadable} onSelect={() => requestNewTask(workspace.id)}>
 						<Plus aria-hidden="true" />
 						{t("shell.newSession")}
 					</DropdownMenuItem>
@@ -759,7 +763,7 @@ function ProjectItem({
 					<DropdownMenuSeparator />
 					<DropdownMenuItem
 						className="text-destructive focus:text-destructive [&_svg]:text-destructive"
-						disabled={isRemoving}
+						disabled={isRemoving || configUnreadable}
 						onSelect={() => void removeProject()}
 					>
 						<Trash2 aria-hidden="true" />
@@ -769,7 +773,11 @@ function ProjectItem({
 			</DropdownMenu>
 		</div>
 		</div>{/* end outer relative */}
-		{isRemoving ? (
+		{workspace.resolveError ? (
+			<div className="sidebar-expanded-chrome px-5 py-1 text-2xs text-destructive" role="status">
+				{workspace.resolveError}
+			</div>
+		) : isRemoving ? (
 			<div className="sidebar-expanded-chrome px-5 py-1 text-2xs text-muted-foreground" role="status">
 				{t("shell.removingNamed", { name: workspace.name })}
 			</div>
@@ -830,7 +838,7 @@ function ProjectItem({
 		</SidebarMenuItem>
 		</ContextMenuTrigger>
 		<ContextMenuContent className="min-w-44">
-			<ContextMenuItem disabled={isProjectRestarting} onSelect={() => requestNewTask(workspace.id)}>
+			<ContextMenuItem disabled={isProjectRestarting || configUnreadable} onSelect={() => requestNewTask(workspace.id)}>
 				<Plus aria-hidden="true" />
 				{t("shell.newSession")}
 			</ContextMenuItem>
@@ -842,7 +850,7 @@ function ProjectItem({
 			<ContextMenuSeparator />
 			<ContextMenuItem
 				className="text-destructive focus:text-destructive [&_svg]:text-destructive"
-				disabled={isRemoving}
+				disabled={isRemoving || configUnreadable}
 				onSelect={() => void removeProject()}
 			>
 				<Trash2 aria-hidden="true" />
