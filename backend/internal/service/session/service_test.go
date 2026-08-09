@@ -1515,6 +1515,68 @@ func TestSpawnOrchestratorDelegatesOwnershipToManager(t *testing.T) {
 	}
 }
 
+func TestSpawnOrchestratorDelegatesRequestedModeToManager(t *testing.T) {
+	tests := []struct {
+		name          string
+		clean         bool
+		requestedMode domain.SessionMode
+		current       *domain.SessionRecord
+		wantMode      domain.SessionMode
+	}{
+		{
+			name:          "explicit replacement mode",
+			clean:         true,
+			requestedMode: domain.SessionModeChat,
+			current: &domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator,
+				Mode: domain.SessionModeTUI,
+			},
+			wantMode: domain.SessionModeChat,
+		},
+		{
+			name:  "persisted replacement mode",
+			clean: true,
+			current: &domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", Kind: domain.KindOrchestrator,
+				Mode: domain.SessionModeChat,
+			},
+			wantMode: domain.SessionModeChat,
+		},
+		{
+			name:          "explicit mode for new orchestrator",
+			requestedMode: domain.SessionModeChat,
+			wantMode:      domain.SessionModeChat,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+			fc := &fakeCommander{}
+			if tt.current != nil {
+				fc.projectOrchestrator = map[domain.ProjectID]domain.SessionRecord{
+					"mer": *tt.current,
+				}
+			}
+			svc := &Service{manager: fc, store: st}
+
+			if _, err := svc.SpawnOrchestrator(context.Background(), "mer", tt.clean, tt.requestedMode); err != nil {
+				t.Fatalf("SpawnOrchestrator: %v", err)
+			}
+			if fc.ensureCalls != 1 {
+				t.Fatalf("EnsureOrchestrator calls = %d, want 1", fc.ensureCalls)
+			}
+			if fc.ensureClean != tt.clean {
+				t.Fatalf("EnsureOrchestrator clean = %v, want %v", fc.ensureClean, tt.clean)
+			}
+			if fc.ensureCfg.RequestedMode != tt.wantMode {
+				t.Fatalf("EnsureOrchestrator requested mode = %q, want %q", fc.ensureCfg.RequestedMode, tt.wantMode)
+			}
+		})
+	}
+}
+
 // TestSpawnUnknownProjectReturns404 covers Bug 1: an HTTP spawn for an
 // unregistered projectId must surface PROJECT_NOT_FOUND (apierr.NotFound)
 // BEFORE any session row is created, so no orphan terminated row is left
