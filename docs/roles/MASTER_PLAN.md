@@ -71,11 +71,21 @@ It uses a role-map-only compare-and-swap mutation, sends the loaded role-map
 SHA with full-config mutations, preserves deterministic ordered failover
 targets, and rejects duplicate current or earlier effective targets. It added
 no migration and promoted no capability cell. The dormant automatic-failover
-host engine then landed at `1c97c55e`: it reuses the accepted Continue saga for
+host engine then landed at source commit `1c97c55e`, content-equivalent roles-
+trunk commit `29becc6d`: it reuses the accepted Continue saga for
 one capability-gated action, converges pause-before-attempt and
 requested/post-stop/acked crash windows on the same durable generation, keeps
 manual as the default, rejects unpromoted automatic configuration, and gives
-legacy desktop maps an explicit conversion to manual. See
+legacy desktop maps an explicit conversion to manual. Promotion-blocker
+correction `72bca3e4` now persists the detector-observed runtime generation in
+the internal structured pause and requires an exact current-generation match
+before the first automatic attempt. Legacy unbound pins remain manual-only,
+while requested/post-stop/acked recovery remains governed by durable attempt
+identity. The correction passes 4,835/4,835 full backend normal and race,
+2,060/2,060 full frontend, typecheck, build, vet, format, arm64 Forge package,
+and pinned lint with zero issues. Its isolated native Electron restart/boot
+regression preserves generation B and generation A's pause with zero automatic
+attempts, failover ledger rows, or runtime replacement. See
 [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
 This slice added no migration or public API, changed no host prompt contract,
 and promoted no capability cell; `limit_detection_supported` remains false for
@@ -465,13 +475,16 @@ Zai and Kimi validated **separately** on Pi.
 22. [~] Implement opt-in automatic failover; manual remains the default. The
     dormant one-shot host engine, exact-incident crash convergence, fail-closed
     automatic-config rejection, and explicit legacy-map conversion landed at
-    `1c97c55e`; see
+    source `1c97c55e` / roles-trunk `29becc6d`, with runtime-generation
+    binding correction `72bca3e4`; see
     [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
     Product completion still requires a real structured positive detector
     fixture with stable incident identity, production ingress, and a separate
     reviewed capability-promotion commit plus positive live acceptance. This
     implementation slice added no migration/API/prompt change or capability
-    promotion, and **9009+** remains the next fork migration
+    promotion; its native correction acceptance is negative/dormancy proof,
+    not positive automatic-switch acceptance, and **9009+** remains the next
+    fork migration
 
 ---
 

@@ -4,7 +4,11 @@ This record starts after the accepted roles MVP. It does not amend or replace
 the accepted switch, pause ownership, manual Continue, runtime-probe,
 starter-role, or live-acceptance records.
 
-**Implementation:** `1c97c55e` (`feat: add dormant automatic failover engine`)
+**Historical implementation:** `1c97c55e` (`feat: add dormant automatic
+failover engine`); the content-equivalent roles-trunk commit is `29becc6d`.
+**Historical dormant-product evidence:** `cbf47bf5`.
+**Promotion-blocker correction:** `72bca3e4` (`fix: bind automatic failover
+pauses to runtime generations`).
 
 ## Scope and result
 
@@ -210,3 +214,140 @@ same action safely across crashes, while preserving the accepted manual
 Continue path. Production capability truth remains unchanged, no production
 detector ingress exists, no schema or prompt boundary moved, and the accepted
 MVP remains stable.
+
+## Promotion-blocker closure — runtime-generation ownership
+
+The historical implementation and evidence above remain an accepted dormant
+engine record, but they were not sufficient for capability promotion. An
+independent review found that the Router's runtime-generation guard was used
+only while creating the durable pause and was not retained in `pause_json`.
+After an explicit **Restart agent** created generation B while preserving a
+structured pause observed on generation A, a later boot could reinterpret A's
+incident as authority to switch B. A delayed duplicate of A's event could also
+reach same-incident idempotence without that ownership being re-established.
+This was not production-reachable because all limit-
+detection capabilities were false, the detector registry was empty, and the
+Router had no production caller.
+
+Correction `72bca3e4` closes that promotion blocker without promoting the
+feature:
+
+- each newly authored structured usage-limit pause requires the complete
+  harness, runtime-launch, and no-switch-pending guard, and stores the exact
+  observed runtime launch ID in the existing internal JSON pause column;
+- legacy structured pins with no observed generation stay readable, visible,
+  explicitly resumable/restartable, and manually continuable, but they cannot
+  start a new automatic attempt and are never backfilled or upgraded by a
+  later same-incident delivery;
+- both the initial-read and lost-CAS same-incident paths converge only when the
+  current harness/generation, stored harness/generation, and switch exclusion
+  all match the original observation;
+- before the first automatic attempt, current runtime generation must equal
+  the pause's observed generation, and the switch saga repeats that check on
+  its authoritative read under switch ownership before runtime effects;
+- Restart agent and automatic continuation exclude one another across the
+  first-attempt check, durable append, and switch handoff; and
+- durable `requested`, `post_stop`, and acknowledged recovery remains governed
+  by the existing attempt target and switch generation. Manual Continue keeps
+  its accepted authority over legacy pins and later rungs.
+
+No migration was added: `pause_json` is additive JSON and **9009+ remains the
+next fork migration number**. The internal generation field is deliberately
+absent from the public pause DTO, so no API or frontend schema changed. No sqlc
+query, prompt, detector registry, Router ingress, capability cell, or Claude
+read-only value changed.
+
+### Generation-binding regression and review record
+
+Load-bearing tests cover exact JSON/store round-trip and generic-update
+preservation, raw legacy decode/list behavior, complete structured-guard
+requirements, stale duplicates before the first read and after a lost CAS,
+legacy explicit Resume/Restart/manual Continue, and the exact reported crash
+sequence: bind generation A, explicitly Restart to generation B while
+preserving the pin, construct a fresh manager, and prove boot reconciliation
+writes zero attempts and performs zero runtime create/destroy against B.
+Additional ownership and authoritative-read mutations prove Restart is refused
+while automatic continuation owns the first-attempt window, and requested and
+`post_stop` recovery still converges on its already-durable generation.
+
+Independent implementation review found and fixed two P2 gaps in the first
+correction draft. The lost-CAS same-incident path initially compared only the
+incident ID; it now uses the same exact ownership predicate as the ordinary
+idempotence path. The original Restart regression had also replaced the sole
+legacy case with a generation-bound fixture that omitted the required evidence
+envelope, while explicit legacy Resume was not pinned. The final table tests
+use valid generation-bound and legacy structured pins, preserve either binding
+exactly across Restart, and separately prove legacy Resume. Three final read-
+only implementation reviews reported no remaining P1, P2, or P3 finding.
+
+| Correction gate | Exact result |
+|-----------------|--------------|
+| Focused backend normal | domain/session-manager/SQLite store: **1,002/1,002 passed** |
+| Focused backend race | domain/session-manager/SQLite store: **1,002/1,002 passed** |
+| Full backend normal | `go test ./...`: **4,835/4,835 passed across 132 packages** |
+| Full backend race | `go test -race ./...`: **4,835/4,835 passed across 132 packages** |
+| Build / vet / format | `go build ./...`, `go vet ./...`, `gofmt -d`, and `git diff --check`: **pass/clean** |
+| Pinned lint | golangci-lint **v2.12.2**: **0 issues** |
+| Frontend focused | pause/restart/role-editor renderer coverage: **164/164 passed across 5 files** |
+| Frontend typecheck | `npm run typecheck`: **pass** |
+| Full frontend Vitest | **2,060/2,060 passed across 153 files** |
+| Electron package | `npm run package`: **pass**, including production Vite bundles and arm64 Forge packaging |
+| Generated contracts | API/sqlc regeneration: **not applicable; no contract or query changed** |
+
+The first frontend invocation in the isolated worktree failed before testing
+because dependencies were absent. A symlinked dependency tree then passed
+typecheck and all 164 focused tests, but the first full run also produced one
+Vite allowed-root failure. Replacing the links with temporary physical copies
+removed that setup error, but five landing-document tests still failed because
+the isolated checkout had no installed dependency tree for the separately
+locked `frontend/src/landing` package. (`cheerio` is correctly declared in that
+package's manifest and lockfile.) Installing that nested lockfile exactly with
+`npm ci --ignore-scripts` produced the green 2,060/2,060 result above. All
+temporary dependency trees were excluded from the slice and deleted after the
+native check.
+
+### Native Electron negative acceptance
+
+Only after the clean correction gates, the real native Forge Electron app was
+launched twice against an isolated acceptance root, `HOME`, `AO_DATA_DIR`,
+`AO_RUN_FILE`, tmux socket, and port 3002. The bundled daemon was built from
+exact correction commit `72bca3e42ec41ba450e17a8505a317311eadfb25`; the
+production Forge package command also completed successfully.
+
+The native daemon registered the deterministic acceptance project and spawned
+worker `mvpacc-1` on Claude generation
+`7a039b87-04bc-4f2b-9b00-2b33ed5e1906`. In the isolated database, the test
+converted the operator pause into a valid structured usage-limit pin bound to
+that exact generation and retained a legacy automatic role map. The tmux
+runtime was then terminated deliberately; because a paused session does not
+reinterpret an unavailable probe as exited, the isolated fixture's activity
+fact was explicitly marked `exited` before invoking the real bodyless
+`POST /api/v1/sessions/mvpacc-1/resume-agent` route. Restart succeeded and
+created generation `3186f46d-0dec-4303-9773-642a7e2a7bdb` while preserving the
+original A-bound pause and creating zero failover attempts.
+
+After stopping and relaunching the same native Electron app, startup logged
+that automatic action was skipped for the paused session. Before/after
+snapshots proved all of the following:
+
+- B's runtime launch ID was unchanged;
+- the A-bound `pause_json` was byte-for-byte unchanged;
+- failover attempts remained **0**;
+- failover ledger rows remained **0**; and
+- the same B runtime remained alive.
+
+The renderer loaded the isolated project/session through the native window and
+the daemon served the expected pause/failover view. macOS screen-capture
+permission prevented a screenshot, so this record claims native process,
+renderer-request, API, SQLite, and runtime evidence—not visual-control proof.
+Both native launches were stopped with scoped SIGINT (Forge's expected exit 1),
+port 3002 was verified closed, and the temporary roots were deleted. The real
+default `~/.ao` tree was never read or modified.
+
+This is negative blocker acceptance only. Positive automatic native acceptance
+still requires a real detector, production ingress, a separate capability-
+promotion commit, clean gates, independent review, and live proof.
+
+The correction closes the known runtime-generation ownership blocker. It does
+**not** approve promotion: checklist status remains partial and every dormant
+truth recorded above remains unchanged.
