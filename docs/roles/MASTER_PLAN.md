@@ -34,11 +34,15 @@ and behavior. Focused normal/race checks each pass 105/105 and the ordinary
 full backend run passes 4,724 tests across 132 packages. Target B vendor-fixture
 research at `11d12414` then captures two sanitized real Claude Code 2.1.224
 structured 429 refusal projections and two real Codex 0.146/0.147 quota-state
-frames in adapter-local testdata. Claude proves a positive provider refusal but
-not a stable quota-occurrence identity; Codex proves structured state but not a
-reached/refused event. No production detector or registry wiring was added,
-`limit_detection_supported` remains false everywhere, and the current ordinary
-full backend run passes 4,737 tests across 132 packages. On exact integration head
+frames in adapter-local testdata. A subsequent research-only, byte-complete
+public Claude Code 2.1.159 `rate_limit_event` fixture proves that the structured
+`rateLimitType` + `resetsAt` pair can supply a stable reset-cycle identity for a
+rejected limit. That print-stream-json surface is not AO's accepted interactive
+Claude surface: no interactive ingress carries the event together with its AO
+runtime generation, and no production Router caller or detector composition was
+added. Codex still proves structured state but not a reached/refused event.
+`limit_detection_supported` remains false everywhere, and the `11d12414`
+fixture-era ordinary full backend run passed 4,737 tests across 132 packages. On exact integration head
 `f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
 before the test fix, full Vitest was 2039/2040. Its sole `SessionFilesView`
 failure is deterministic (0/20 exact-test passes, full file 27/28) and
@@ -92,11 +96,13 @@ and promoted no capability cell; `limit_detection_supported` remains false for
 every harness, Claude `read_only_enforced` remains false, and **9009+** remains
 the next fork migration.
 
-**Next required action:** capture a real structured positive detector fixture
-that proves a stable incident identity, wire its reviewed production ingress,
-then land capability promotion in a separate final change only after review and
-positive live acceptance. Until all three gates close, the host engine remains
-dormant and checklist item 22 remains partial. Claude technical read-only,
+**Next required action:** establish a reviewed AO interactive Claude ingress
+that delivers the structured limit window together with the exact observing
+runtime generation, compose its production Router caller, then land capability
+promotion in a separate final change only after review and positive live
+acceptance. Until those gates close, the host engine remains dormant, every
+production `limit_detection_supported` cell remains false, and checklist item
+22 remains partial. Claude technical read-only,
 successor-orchestrator/live-worker rebinding, and Pi/Muse switching remain
 clearly optional later work; none gates the required Target B detector close-out.
 The estimates below are original planning estimates, not a claim
@@ -463,9 +469,13 @@ Zai and Kimi validated **separately** on Pi.
     cadence and pure classifier tests, leaving production timeouts unchanged
     (`66d65e4e`)
 20. [x] Capture adapter-local real vendor limit research fixtures without
-    production detector wiring or capability promotion. Claude has structured
-    positive refusal evidence but no stable occurrence key; Codex has structured
-    negative quota-state evidence but no reached/refused frame (`11d12414`)
+    production detector wiring or capability promotion. The original Claude
+    refusal projections and Codex negative quota-state frames landed at
+    `11d12414`; the later byte-complete public Claude `rate_limit_event` fixture
+    proves a stable `rateLimitType` + `resetsAt` reset-cycle candidate on the
+    print-stream-json surface. Codex still has no reached/refused frame, and the
+    Claude fixture does not prove an AO interactive ingress or runtime-generation
+    channel
 21. [x] Ship the desktop role-map editor with deterministic target validation,
     role-map-only CAS, stale-revision conflict/reload behavior, unreadable-row
     mutation fencing, and full-config role-map SHA protection (`54cdbdd8`,
@@ -478,13 +488,15 @@ Zai and Kimi validated **separately** on Pi.
     source `1c97c55e` / roles-trunk `29becc6d`, with runtime-generation
     binding correction `72bca3e4`; see
     [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
-    Product completion still requires a real structured positive detector
-    fixture with stable incident identity, production ingress, and a separate
-    reviewed capability-promotion commit plus positive live acceptance. This
-    implementation slice added no migration/API/prompt change or capability
-    promotion; its native correction acceptance is negative/dormancy proof,
-    not positive automatic-switch acceptance, and **9009+** remains the next
-    fork migration
+    The stable reset-cycle candidate is now proven by an exact positive research
+    fixture, but product completion still requires AO interactive ingress with
+    the exact observing runtime generation, a production Router caller, and a
+    separate reviewed capability-promotion commit plus positive live acceptance.
+    This implementation slice added no migration/API/prompt change or capability
+    promotion; every production `limit_detection_supported` cell remains false,
+    its native correction acceptance is negative/dormancy proof rather than
+    positive automatic-switch acceptance, and **9009+** remains the next fork
+    migration
 
 ---
 

@@ -6,9 +6,11 @@ are complete. The post-acceptance Grok fixes are integrated at `72f274a7`; the
 runtime replay passed on `3c3aef51`; and the installed Claude→Grok→Codex
 pipeline plus no-nudge verifier return passed on `f4b28012`. The
 existing-project starter-role and installed Switch close-out passed on
-`762ae160`. The repository-wide final gate is not fully green: the ordinary
-full backend run retains only three known untouched wall-clock failures. The verified
-MVP/static/API/frontend and installed-app gates are complete.
+`762ae160`. At the time of this accepted snapshot, the ordinary full backend
+run retained three untouched wall-clock failures. Target B test hygiene later
+removed those real-time dependencies at `66d65e4e`; current repository status
+is tracked in `REMAINING_PLAN.md`. The verified MVP/static/API/frontend and
+installed-app gates are complete.
 
 **Accepted implementation and runner SHA:** `166e9e63`
 
@@ -67,9 +69,9 @@ AO ships:
    never authored a role map; no desktop role-map editing is required for the
    ordinary Claude↔Codex orchestrator path.
 
-No MVP feature or live-acceptance work remains. Separate repository test
-hygiene remains because three untouched aggregate-load wall-clock tests still
-fail in the ordinary full backend run. The full worker/orchestrator matrix passed
+No MVP feature or live-acceptance work remains. At this accepted snapshot,
+three aggregate-load wall-clock tests still failed in the ordinary full backend
+run; Target B test hygiene later resolved them at `66d65e4e`. The full worker/orchestrator matrix passed
 on immutable code `166e9e63` and is recorded by evidence commit `322f9c18`;
 that dated result is not rewritten as evidence for `72f274a7`. The Chat rollback
 failure was classified as a test-only projector race and fixed by waiting for
@@ -415,7 +417,10 @@ targeted default-data-dir replay on `3c3aef51`.
 
 ## 8. Final gate
 
-**Current result:** open. Race validation found **zero data races**; the SQLite
+**Historical accepted-snapshot result:** open. **Current navigation:** the
+fake/Kilocode/OpenCode real-time dependencies named below were removed at
+`66d65e4e`; use `REMAINING_PLAN.md` for the latest repository gate. Race
+validation found **zero data races**; the SQLite
 race package passed in **622.846s**. The Chat rollback result was a test-only
 projection race, fixed by `b21490a1` / integration `f8883529`, whose helper now
 waits for the exact AO turn ID, provider turn ID, completed state, and completion

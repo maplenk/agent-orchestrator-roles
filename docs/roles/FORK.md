@@ -10,10 +10,10 @@ Local working tree: `/Users/tagtaste/Documents/QBApps/agent-orchestrator-roles`
 | Remote name | `upstream` |
 | Pinned SHA | See `AO_BASELINE_SHA.txt` |
 | Roles trunk | `roles/multi-sub-v1` |
-| Evidence integration | `codex/mvp-integration` @ `322f9c18`; merge to the roles trunk is not claimed here |
+| Evidence integration | `codex/mvp-integration` @ `322f9c18`; later Target B work is integrated on `roles/multi-sub-v1` through `a75c19aa` |
 | Accepted implementation/runner | `166e9e63` |
 | Promoted live evidence | `322f9c18` |
-| Active gate | Not fully green repository-wide: zero races, SQLite exact 5/5 and package race passed, Chat test race fixed at `f8883529`; static/typecheck/API drift and full frontend (151/151 files, 2040/2040 tests) pass at `6473b134`; ordinary full retains three known untouched wall-clock failures |
+| Active gate | The historical MVP wall-clock trio was removed at `66d65e4e`. The latest recorded Target B generation-binding gate passes 4,835/4,835 backend normal and race plus 2,060/2,060 frontend tests; operational automatic failover remains blocked on a reviewed production detector ingress and separate capability promotion. |
 
 Pin before feature work. Own migration numbers on this fork (do not collide with upstream 0042 races from #3548 / #3386).
 
@@ -39,12 +39,11 @@ Master plan (design): `MASTER_PLAN.md`
 - Phase 3B manual Continue and Phase 2B-3 in-place Codex↔Claude orchestrator
   switch are implemented with API/CLI/desktop surfaces.
 
-**Next:** record the verified MVP/static/API and full frontend gate as
-complete, and keep the full repository suite explicitly non-green while
-the known fake/kilocode/opencode wall-clock trio fails. Worker/orchestrator live
-acceptance is already complete on `166e9e63`. Vendor detection, automatic
-failover, and Claude read-only are post-MVP; no capability is promoted by this
-close-out.
+**Next:** preserve the accepted worker/orchestrator evidence on `166e9e63`.
+Target B's remaining required product boundary is a reviewed production vendor
+detector ingress, followed by separate capability promotion and positive live
+acceptance. The former fake/Kilocode/OpenCode wall-clock failures are historical
+and were fixed at `66d65e4e`; Claude read-only remains optional and unpromoted.
 
 ## Remotes
 

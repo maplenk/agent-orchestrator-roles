@@ -10,6 +10,8 @@
 **Target B migration-history hardening:** `586d1156`
 **Target B adapter test hygiene:** `66d65e4e`
 **Target B vendor-limit fixture research:** `11d12414`
+**Target B Claude positive full-frame fixture research:** `899c7bc`;
+evidence [`TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md`](TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md)
 **Target B atomic role-map CAS API:** `54cdbdd8`
 **Target B desktop role-map editor:** `c7c1f565`
 **Target B dormant automatic-failover engine:** source `1c97c55e`,
@@ -17,7 +19,7 @@ content-equivalent roles-trunk `29becc6d`; generation binding `72bca3e4`;
 correction evidence `4d8fddf`
 
 **Evidence integration branch:** `codex/mvp-integration`  
-**Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
+**Target roles trunk:** `roles/multi-sub-v1`, integrated and synchronized at `a75c19aa`
 **Baseline:** Untrivial-ai/agent-orchestrator @ `fa799a7a58e2f9ec13d174567aff436ba890ff6a` (see `AO_BASELINE_SHA.txt`)
 **Target:** B (~full wishlist)  
 **Current gate:** the promoted `166e9e63` live matrix and the post-evidence
@@ -28,6 +30,13 @@ production deadlines or classifier behavior. Vendor research at `11d12414`
 captures positive sanitized Claude refusal projections and negative Codex quota
 snapshots without adding a production detector or promoting a capability; the
 fixture-era ordinary full backend run passed 4,737 tests across 132 packages.
+A later Claude Code 2.1.159 full-frame `rate_limit_event` fixture at
+`899c7bc` proves a positive machine-structured refusal with a stable candidate
+quota-window identity from typed `rateLimitType` + `resetsAt`; see
+[`TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md`](TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md).
+That fixture remains test-only research from the print/Agent SDK stream, not a
+reviewed AO interactive-TUI ingress carrying the observation-time runtime
+generation.
 The latest generation-binding correction passes 4,835/4,835 in both full
 backend normal and race runs across 132 packages, focused frontend 164/164,
 typecheck, the authoritative full frontend gate 2,060/2,060 across 153 files,
@@ -44,8 +53,8 @@ manual-only and durable in-flight recovery remains attempt-owned. See
 [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
 This is dormant infrastructure, not an operational vendor feature: every
 production `limit_detection_supported` cell is false, the detector registry is
-empty, `limits.Router` has no production caller, and no real positive detector
-with a stable incident key has been accepted.
+empty, `limits.Router` has no production caller, and no generation-bound
+production interactive detector or positive live acceptance has been accepted.
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -66,7 +75,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 2B-3 | **Implemented and live-accepted on `166e9e63`.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets and same-generation recovery. Post-review, Chat orchestrators expose no switch/fresh target or desktop control; the service also rejects direct calls before authorization/manager dispatch with `SWITCH_CHAT_UNSUPPORTED`. |
 | Phase 3A pause core and operator surface | **Landed and accepted.** Durable pause, ledger-before-pin, zero automatic restart/send, pause/resume API+CLI, ownership CAS and pause-aware lifecycle are present. |
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. The desktop role-map editor is implemented, independently reviewed, fully gated, and accepted in the real native Forge Electron app at `c7c1f565`. |
-| Phase 3A-2b detector boundary | **Landed; fixture research captured; no harness promoted.** `internal/limits` remains the only production ingress and the detector registry is empty. Claude has real structured 429 refusal projections, but those records expose only a per-request ID—not a stable quota-window occurrence key—so no safe durable `SourceKey` is proven. Codex has real structured quota-state snapshots but no reached/refused frame. `limit_detection_supported=false` remains universal. |
+| Phase 3A-2b detector boundary | **Landed; positive stable-window fixture research captured; no production detector or harness promoted.** `internal/limits` remains the only production ingress and the detector registry is empty. The original Claude 429 refusal projections expose only a per-request ID; the later full-frame Claude Code 2.1.159 `rate_limit_event` proves a stable candidate quota-window identity from typed `rateLimitType` + `resetsAt`. It was observed on the print/Agent SDK stream, not an AO interactive-TUI channel carrying the observation-time runtime generation. Codex has real structured quota-state snapshots but no reached/refused frame. `limit_detection_supported=false` remains universal. |
 | Phase 3B | **Manual Continue remains implemented, reviewed, and live-accepted; dormant automatic engine implemented, generation-bound, and reviewed.** All 12 final manual records passed on `166e9e63`. Source `1c97c55e` / roles-trunk `29becc6d` reuses that exact transaction for one opt-in automatic attempt and same-generation recovery; `72bca3e4` persists and rechecks the detector-observed runtime generation before the first automatic attempt while leaving legacy pins manual-only and existing attempts recoverable. Full product automatic failover remains partial because no production detector/caller/capability exists. |
 | Installed strict role pipeline | **Accepted.** The replaced real app completed Claude orchestrator → Grok implementor → read-only Codex verifier, native Browser play, and final orchestration. `f4b28012` then proved terminal-only verifier retrieval with no host nudge. `762ae160` additionally upgraded an existing unconfigured repo in place and completed Claude→Codex→Claude from the native Switch menu. See `ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md` and `ROLE_PIPELINE_LIVE_TEST_20260809.md`. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
@@ -74,8 +83,9 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Target B durability hardening B | **Implemented, independently reviewed, gated, and isolated-daemon dogfooded at `586d1156`.** A complete on-entry ledger/schema snapshot retains a genuine lone Muse 53, still clears the complete stale 53–60 block, preserves already-repaired rows, refuses partial/incomplete ambiguity before writes, and rolls back mid-rewrite failures exactly. No migration was added or edited. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
 | Target B adapter test hygiene | **Implemented, independently reviewed, and gated at `66d65e4e`.** Fake lifecycle cadence is asserted structurally; Kilocode interactive-shell avoidance and CLI parsing are tested independently; OpenCode CLI classification is a pure, behavior-preserving helper with a load-bearing command-error case. Production three-second deadlines are unchanged. See `TARGET_B_TEST_HYGIENE_20260809.md`. |
 | Target B vendor-limit fixtures | **Captured, sanitized, independently reviewed, and gated at `11d12414`; research-only.** Two real Claude Code 2.1.224 structured 429 refusal projections and two real Codex 0.146/0.147 quota frames are adapter-local, byte-bound, and replayed by test-only classifiers/normalizers. Claude proves refusal but not stable incident identity; Codex proves structured state but not refusal. See `TARGET_B_VENDOR_LIMIT_FIXTURES_20260809.md`. |
+| Target B Claude positive full-frame fixture | **Captured and test-replayed at `899c7bc`; research-only.** One real Claude Code 2.1.159 `rate_limit_event` preserves the typed rejected status and quota-window fields while deterministic placeholders replace delivery/session identifiers. `rateLimitType` + `resetsAt` provide a stable candidate incident identity, but the source is the print/Agent SDK stream rather than the accepted AO interactive TUI. Production ingress, observation-time runtime-generation binding, a Router caller, capability promotion, and positive live acceptance remain open. See [`TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md`](TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md). |
 | Target B desktop role-map editor | **Implemented, independently reviewed, fully gated, and native-Electron accepted at `54cdbdd8` + `c7c1f565`.** Healthy project reads carry a required `roleMapSha256`. The role-only atomic patch compares that revision while preserving the latest unrelated config, and full-settings saves use the inverse CAS so a stale whole-config writer cannot restore an older role map. Degraded projects remain identity-only and read-only in the desktop. The editor covers strict mode, orchestrator role, role bindings/policy, and failover ladders without a migration or capability promotion. See `TARGET_B_ROLE_MAP_EDITOR_20260809.md`. |
-| Target B automatic failover | **Dormant engine implemented at source `1c97c55e` / roles-trunk `29becc6d`, generation-bound at `72bca3e4`, and independently reviewed; full product remains partial.** A structured limit is durably paused before the manager makes one exact-incident automatic decision, and that first action now requires the current runtime generation to match the generation persisted with the pause. Legacy unbound pins remain manual-only. The accepted Continue transaction still owns the attempt ledger, target selection, switch generation, failure accounting, pin clear, and boot convergence. Duplicate delivery cannot spend a second rung, and durable requested/post-stop recovery reuses its own generation only after the board-wide safety gate. Config save fails closed while limit detection is unpromoted; legacy automatic maps must be explicitly **Convert to manual** before desktop save. No migration, API, prompt, or capability cell changed, and manual Continue/ownership semantics remain intact. The registry is empty, every production `limit_detection_supported` cell is false, `limits.Router` has no production caller, and no real positive detector is accepted, so this is not operational vendor automatic failover. See [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md). |
+| Target B automatic failover | **Dormant engine implemented at source `1c97c55e` / roles-trunk `29becc6d`, generation-bound at `72bca3e4`, and independently reviewed; full product remains partial.** A structured limit is durably paused before the manager makes one exact-incident automatic decision, and that first action now requires the current runtime generation to match the generation persisted with the pause. Legacy unbound pins remain manual-only. The accepted Continue transaction still owns the attempt ledger, target selection, switch generation, failure accounting, pin clear, and boot convergence. Duplicate delivery cannot spend a second rung, and durable requested/post-stop recovery reuses its own generation only after the board-wide safety gate. Config save fails closed while limit detection is unpromoted; legacy automatic maps must be explicitly **Convert to manual** before desktop save. No migration, API, prompt, or capability cell changed, and manual Continue/ownership semantics remain intact. The registry is empty, every production `limit_detection_supported` cell is false, and `limits.Router` has no production caller. The positive Claude full-frame fixture is research-only and does not supply the accepted interactive generation-bound ingress, so this is not operational vendor automatic failover. See [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md). |
 | CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. Fixture-focused normal and race checks each passed 302/302 and the fixture-era full backend run passed 4,737 tests across 132 packages. The latest generation-binding correction passes 4,835/4,835 full backend normal and race, 2,060/2,060 full frontend, typecheck, build, vet, format, arm64 Forge package, and pinned golangci-lint v2.12.2 with zero issues. Its isolated native Electron restart/boot check preserves generation B and the generation-A pause with zero failover attempts or ledger rows. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
@@ -85,13 +95,16 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 
 **Next engineering actions:** none gate the MVP. Both Target B durability
 hardening slices and the isolated adapter test-hygiene slice are complete.
-Vendor fixture capture is complete as a non-promoting research slice, and the
+Vendor fixture capture now includes a positive Claude stable-window full frame
+as a non-promoting research slice, and the
 desktop role-map editor is implemented and native-Electron accepted. The
 dormant automatic engine is also implemented and reviewed, but the Master Plan's
-full automatic product trigger remains partial until a real positive detector,
-production Router caller, and separate capability promotion are accepted. The
-next optional engineering slice is Claude technical read-only; successor-
-orchestrator/live-worker rebinding and Pi/Muse switching remain later options.
+full automatic product trigger remains partial until a reviewed production
+interactive ingress binds the structured observation to its AO runtime
+generation, a production detector/Router caller is accepted, and a separate
+capability promotion plus positive live acceptance passes. Claude technical
+read-only, successor-orchestrator/live-worker rebinding, and Pi/Muse switching
+remain optional later slices.
 Do not rewrite or rerun the accepted MVP matrices merely to replace historical
 evidence.
 
@@ -241,7 +254,7 @@ roles but no longer blocks cross-harness orchestrator switch.
 
 | Task | Detail | Status |
 |------|--------|--------|
-| Structured/reviewed limit envelopes only | Never free-text “I hit a limit” | **Boundary done; research fixtures captured; vendor adapters still open.** Claude's structured positive refusal is proven, but its request ID cannot be treated as a stable incident key. Codex's structured state is proven, but not a reached/refused event. No production detector is registered. |
+| Structured/reviewed limit envelopes only | Never free-text “I hit a limit” | **Boundary done; positive stable-window research fixture captured; production vendor adapter still open.** The original Claude refusal projections carry only per-request identity. The later Claude Code 2.1.159 full frame proves typed rejected state and stable candidate quota-window identity from `rateLimitType` + `resetsAt`, but only on the print/Agent SDK stream. AO's interactive TUI still has no reviewed generation-bound ingress or production detector/Router caller. Codex's structured state is proven, but not a reached/refused event. |
 | Durable pause | Zero automatic send/restart | **Done** (3A-1): migration 9007 pin; TUI and Chat automatic sends plus boot relaunch are fenced. No scheduler/timer/auto-resume exists; `RetryAfter` is advisory only |
 | Ledger events | pause / resume | **Done** (3A-1): idempotent per incident, written *before* the pin |
 | Operator/service surface | pause + resume through service/API/CLI | **Done** (3A-2a): operator/LAN only; agent principals explicitly refused; expected incident required |
@@ -289,7 +302,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 | Manual continue on next ladder rung | **Implemented, reviewed, and live-accepted.** Default mode is manual; all 12 final records passed on `166e9e63` |
 | Failover preserves `role_id` | **Implemented.** Only harness/model/generation and rotated credential change |
 | `maxFailoversPerIncident` | **Implemented** as the frozen host bound; exhaustion stays paused |
-| `failover.mode=automatic` | **Dormant engine implemented at source `1c97c55e` / roles-trunk `29becc6d`, generation-bound at `72bca3e4`, and reviewed; full product partial.** It performs at most one immediate, exact-incident handoff through the accepted Continue transaction. A first attempt requires the current generation to match the structured pause; legacy unbound pins are manual-only, while durable in-flight attempts recover from their own target/generation. It adds no scheduler, retry loop, timer, or automatic resume. Config save refuses automatic mode while production limit detection is unpromoted; legacy stored automatic maps require an explicit desktop **Convert to manual** before save. With every production capability false, an empty detector registry, no production `limits.Router` caller, and no accepted real positive detector, no vendor can trigger it in production. See [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md). |
+| `failover.mode=automatic` | **Dormant engine implemented at source `1c97c55e` / roles-trunk `29becc6d`, generation-bound at `72bca3e4`, and reviewed; full product partial.** It performs at most one immediate, exact-incident handoff through the accepted Continue transaction. A first attempt requires the current generation to match the structured pause; legacy unbound pins are manual-only, while durable in-flight attempts recover from their own target/generation. It adds no scheduler, retry loop, timer, or automatic resume. Config save refuses automatic mode while production limit detection is unpromoted; legacy stored automatic maps require an explicit desktop **Convert to manual** before save. With every production capability false, an empty detector registry, and no production `limits.Router` caller, no vendor can trigger it in production. The positive Claude stable-window frame remains test-only print/Agent SDK research, not the accepted AO interactive ingress. See [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md). |
 
 ---
 
@@ -341,12 +354,15 @@ API drift ──► PASS (two identical regenerations; clean diff)
 Frontend classification ──► deterministic pre-MVP failure (0/20 isolated; full file 27/28)
 Frontend fix @ 6473b134 ──► 20/20 exact + 28/28 file PASS; negative mutation retained
 Vendor fixture research ──► DONE, Claude positive / Codex negative, no promotion
+Claude stable-window full frame ──► CAPTURED; INTERACTIVE INGRESS + CALLER OPEN
 Desktop role-map editor ──► IMPLEMENTED + REVIEWED + NATIVE-ELECTRON ACCEPTED
 Dormant automatic @ 29becc6d + generation bind 72bca3e4 ──► REVIEWED; PRODUCT TRIGGER PARTIAL
-Now ──► Claude technical RO / Phase 1-F (optional, explicit read-only roles only)
+Now ──► production interactive limit ingress/caller under false capability
+     ║   then separate promotion review + positive live acceptance
      ║
-     ╠═ later: successor-orchestrator / live-worker rebinding
-     ╚═ later: Pi / Muse switching
+     ╠═ optional later: Claude technical RO / Phase 1-F
+     ╠═ optional later: successor-orchestrator / live-worker rebinding
+     ╚═ optional later: Pi / Muse switching
 ```
 
 ---
@@ -383,7 +399,8 @@ Still open or partial:
 8. **Satisfied for the final MVP:** failover preserves `role_id`, respects the
    incident bound, and passed the promoted live matrix. **Partial for the full
    Master Plan:** dormant automatic execution is implemented, but the accepted
-   positive detector/product trigger and capability promotion do not exist
+   production interactive detector/product trigger, Router caller, capability
+   promotion, and positive live acceptance do not exist
 
 ---
 
@@ -408,14 +425,15 @@ Still open or partial:
     Codex↔Claude switch, gated same-generation recovery, and durable replacement
     recovery are implemented and live-accepted.
     Successor-session handoff and live-worker rebind remain deferred
-17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Real Claude/Codex research fixtures are captured at `11d12414`, but neither proves all inputs for a stable production incident key, so capabilities remain false. The desktop now authors and atomically saves the project role map at `54cdbdd8` + `c7c1f565`; installed-app evidence is in `TARGET_B_ROLE_MAP_EDITOR_20260809.md`
+17. [~] Limit pause — **backend/API and the desktop surface landed; no production harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). The historical Claude/Codex research fixtures at `11d12414` did not prove all inputs for a stable production incident key. The later Claude Code 2.1.159 full-frame fixture at `899c7bc` proves a stable candidate quota-window identity from typed `rateLimitType` + `resetsAt`, but only on the print/Agent SDK stream; AO interactive generation-bound ingress, a production detector/Router caller, promotion, and positive live acceptance remain open, so capabilities remain false. The desktop now authors and atomically saves the project role map at `54cdbdd8` + `c7c1f565`; installed-app evidence is in `TARGET_B_ROLE_MAP_EDITOR_20260809.md`
 18. [~] Manual Continue is implemented and live-accepted. The dormant opt-in
     automatic engine, fail-closed config/runtime gates, one-attempt incident
     accounting, and boot convergence are implemented and reviewed at source
     `1c97c55e` / roles-trunk `29becc6d`; `72bca3e4` closes the runtime-generation
     ownership blocker with no migration/API/prompt/capability promotion. Operational
-    automatic failover remains partial until a real positive detector,
-    production Router caller, and separate capability promotion are accepted
+    automatic failover remains partial until a reviewed production interactive
+    detector and Router caller bind the observation-time runtime generation,
+    followed by separate capability promotion and positive live acceptance
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
 
 ---
@@ -438,7 +456,11 @@ the distinct evidence sets (`166e9e63`/`322f9c18`, `3c3aef51`, and installed
 role-pipeline `f4b28012`) and promote no capability. Per-project config
 containment is complete at `8bb1e3af`, mixed-history migration repair at
 `586d1156`, adapter wall-clock hygiene at `66d65e4e`, and non-promoting vendor
-fixture research at `11d12414`. The atomic role-map CAS API at `54cdbdd8` and
+fixture research at `11d12414`. The later positive Claude Code 2.1.159
+full-frame fixture is captured at `899c7bc` with evidence in
+[`TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md`](TARGET_B_CLAUDE_LIMIT_FIXTURE_20260809.md);
+its stable candidate quota-window identity remains test-only print/Agent SDK
+research. The atomic role-map CAS API at `54cdbdd8` and
 desktop editor at `c7c1f565` are implemented, independently reviewed, fully
 gated, and accepted in the installed native Electron app without a migration or
 capability promotion. The dormant automatic engine at source `1c97c55e` /
@@ -448,11 +470,15 @@ preserves ownership, and adds no migration, API, prompt, or capability
 promotion. It does
 not complete the Master Plan's product trigger while the detector registry is
 empty, every production `limit_detection_supported` cell is false,
-`limits.Router` has no production caller, and no real positive detector is
-accepted. See
+`limits.Router` has no production caller, and AO's interactive Claude TUI has
+no reviewed structured ingress carrying the observation-time runtime
+generation. See
 [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
 
-The next optional engineering slice is Claude technical read-only for explicit
-read-only roles. Successor-orchestrator/live-worker rebinding and Pi/Muse
-switching remain later optional slices. No fork migration is needed for the
-automatic engine; **9009+ remains the next available fork migration number**.
+The next required Master Plan slice is the production interactive limit
+ingress/detector and Router caller under the still-false capability. Capability
+promotion must remain a separate reviewed change and requires positive live
+acceptance. Claude technical read-only, successor-orchestrator/live-worker
+rebinding, and Pi/Muse switching remain later optional slices. No fork migration
+is needed for the automatic engine or fixture research; **9009+ remains the next
+available fork migration number**.
