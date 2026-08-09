@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "vendor": "Anthropic",
+  "product": "Claude Code",
+  "cliVersion": "2.1.159",
+  "surface": "print-stream-json",
+  "transport": "JSONL over stdout",
+  "direction": "vendor-to-client",
+  "observedAt": "2026-06-01T15:09:21.346Z",
+  "retrievedAt": "2026-08-09T17:20:53Z",
+  "source": {
+    "kind": "public-third-party-execution-log",
+    "url": "https://gist.githubusercontent.com/konard/218091cfcd951e88bb6f1b91a001e26c/raw/694141dfd582be191bcd1d5d391b6eb3ca5de013/solution-draft-log-pr-1780356981419.txt",
+    "sha256": "c2014b6fc8be662bb5e852d04d29bfeb9936e493f821ec50caab08345ddbfffb",
+    "eventLines": "692-704"
+  },
+  "fixture": {
+    "file": "claude-code-2.1.159-rate-limit-event-rejected.json",
+    "sha256": "1663ef80778318ffe6a4eea8f6fb5531cec205a8e557f8a50ed625a959877d0b",
+    "selectedFields": [
+      "type",
+      "rate_limit_info.status",
+      "rate_limit_info.resetsAt",
+      "rate_limit_info.rateLimitType",
+      "rate_limit_info.overageStatus",
+      "rate_limit_info.overageDisabledReason",
+      "rate_limit_info.isUsingOverage",
+      "uuid",
+      "session_id"
+    ],
+    "redactedFields": {
+      "uuid": "Replaced with a deterministic UUID placeholder.",
+      "session_id": "Replaced with a distinct deterministic UUID placeholder."
+    }
+  },
+  "classification": {
+    "observedLimit": true,
+    "stableOccurrenceKeyObserved": true,
+    "sourceKeyFields": [
+      "rate_limit_info.rateLimitType",
+      "rate_limit_info.resetsAt"
+    ],
+    "duplicateDeliveryEmpiricallyObserved": false,
+    "promotionEligible": false,
+    "blocker": "The captured event is emitted on Claude Code's print/Agent SDK stream. AO's accepted interactive Claude TUI harness has no reviewed supported channel for this event with the observation-time AO runtime generation; StopFailure hooks do not include rateLimitType or resetsAt."
+  },
+  "schemaCorroboration": {
+    "installedCliVersion": "2.1.226",
+    "surface": "local installed binary type schema",
+    "statusValues": [
+      "allowed",
+      "allowed_warning",
+      "rejected"
+    ],
+    "rateLimitTypes": [
+      "five_hour",
+      "seven_day",
+      "seven_day_opus",
+      "seven_day_sonnet",
+      "seven_day_overage_included",
+      "overage"
+    ],
+    "wireCapture": false
+  },
+  "privacy": {
+    "accountIdentifyingFieldsRetained": false,
+    "credentialsRetained": false,
+    "promptsOrToolContentRetained": false,
+    "pathsRetained": false,
+    "nonIdentifyingLimitTelemetryRetained": true
+  }
+}
