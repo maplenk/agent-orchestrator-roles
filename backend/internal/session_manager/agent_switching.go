@@ -212,6 +212,10 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 		// the target generation is always a real AO_RUNTIME_LAUNCH_ID.
 		sourceGeneration = domain.AgentGenerationID("legacy-" + uuid.NewString())
 	}
+	targetGeneration := domain.AgentGenerationID(strings.TrimSpace(m.newLaunchID()))
+	if targetGeneration == "" {
+		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: allocate target generation: empty generation", id)
+	}
 	sourceEnv := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, "")
 	m.augmentAgentRuntimeEnv(sourceAgent, sourceEnv)
 	sourceNative, err := m.preserveCurrentNativeSession(ctx, store, rec, sourceAgent, sourceEnv, sourceGeneration)
@@ -219,10 +223,6 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: preserve source session: %w", id, err)
 	}
 
-	targetGeneration := domain.AgentGenerationID(strings.TrimSpace(m.newLaunchID()))
-	if targetGeneration == "" {
-		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: allocate target generation: empty generation", id)
-	}
 	now := m.clock()
 	switchRec := domain.AgentSwitch{
 		ID:                     domain.AgentSwitchID("switch-" + uuid.NewString()),
@@ -274,7 +274,8 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 
 	// Resolve credentials, native-resume evidence, and launch commands before
 	// asking the source to spend a model turn. This preflight does not install
-	// target workspace files or reserve a target generation in durable storage.
+	// target workspace files; the exact target generation was already reserved
+	// by the saga's first durable write above.
 	target, err = m.prepareTargetActivation(ctx, store, rec, project, targetAgent, targetCapabilities, result, targetGeneration)
 	if err != nil {
 		return result, fmt.Errorf("switch agent %s: target preflight: %w", id, err)

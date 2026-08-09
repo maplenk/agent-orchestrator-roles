@@ -1102,6 +1102,12 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 	if sw.State != domain.AgentSwitchCompleted || sw.TargetStartMode != domain.AgentSwitchTargetStartFresh {
 		t.Fatalf("switch = state %q mode %q", sw.State, sw.TargetStartMode)
 	}
+	if sw.TargetGenerationID != "target-generation" || sw.TargetAcknowledgedAt == nil {
+		t.Fatalf("switch target generation/ack = %q/%v, want target-generation/acknowledged", sw.TargetGenerationID, sw.TargetAcknowledgedAt)
+	}
+	if got := runtime.lastCfg.Env["AO_RUNTIME_LAUNCH_ID"]; got != string(sw.TargetGenerationID) {
+		t.Fatalf("runtime launch generation = %q, want durable saga generation %q", got, sw.TargetGenerationID)
+	}
 	if sw.SourceTranscriptStatus != domain.AgentSwitchSourceTranscriptAvailable {
 		t.Fatalf("source transcript status = %q, want available", sw.SourceTranscriptStatus)
 	}
@@ -1114,6 +1120,12 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 	rec := store.sessions["proj-1"]
 	if rec.Harness != domain.HarnessCodex || rec.ID != "proj-1" || rec.Metadata.WorkspacePath == "" || rec.Metadata.Branch != "codex/feature" {
 		t.Fatalf("session identity not preserved: %+v", rec)
+	}
+	if rec.Metadata.RuntimeLaunchID != string(sw.TargetGenerationID) {
+		t.Fatalf("promoted runtime generation = %q, want saga generation %q", rec.Metadata.RuntimeLaunchID, sw.TargetGenerationID)
+	}
+	if stored := store.switches[sw.ID]; stored.TargetGenerationID != sw.TargetGenerationID || stored.TargetAcknowledgedAt == nil {
+		t.Fatalf("stored switch generation/ack drifted: %+v", stored)
 	}
 	if rec.Metadata.LatestUserPrompt != "please keep the API small" {
 		t.Fatalf("internal continuation replaced latest user prompt: %q", rec.Metadata.LatestUserPrompt)
@@ -1170,6 +1182,68 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 	}
 	if len(store.native) != 2 {
 		t.Fatalf("native sessions = %d, want source and target", len(store.native))
+	}
+}
+
+func TestSwitchAgentEmptyTargetGenerationRefusesBeforeSourceInteraction(t *testing.T) {
+	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
+	manager, store, _ := newSwitchTestManager(t, runtime)
+	manager.newLaunchID = func() string { return "" }
+
+	_, err := manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
+		TargetHarness: domain.HarnessCodex, IdempotencyKey: "empty-generation",
+	})
+	if err == nil || !strings.Contains(err.Error(), "allocate target generation: empty generation") {
+		t.Fatalf("SwitchAgent error = %v, want empty target generation refusal", err)
+	}
+	if len(store.native) != 0 || len(store.switches) != 0 {
+		t.Fatalf("empty generation mutated durable source/saga state: native=%d switches=%d", len(store.native), len(store.switches))
+	}
+	if runtime.created != 0 || runtime.destroyed != 0 {
+		t.Fatalf("empty generation touched source runtime: created=%d destroyed=%d", runtime.created, runtime.destroyed)
+	}
+	if manager.SessionMutationInProgress("proj-1") {
+		t.Fatal("empty generation refusal retained the transient input gate")
+	}
+}
+
+func TestSwitchAgentRestartIdempotencyKeepsPersistedTargetGeneration(t *testing.T) {
+	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
+	manager, store, _ := newSwitchTestManager(t, runtime)
+	now := time.Now().UTC()
+	existing := domain.AgentSwitch{
+		ID:                 "switch-before-restart",
+		SessionID:          "proj-1",
+		IdempotencyKey:     "request-before-restart",
+		RequestFingerprint: domain.ComputeAgentSwitchRequestFingerprint("proj-1", domain.HarnessCodex, "continue"),
+		FromHarness:        domain.HarnessClaudeCode,
+		TargetHarness:      domain.HarnessCodex,
+		State:              domain.AgentSwitchSourceStopped,
+		SourceGenerationID: "source-generation",
+		TargetGenerationID: "persisted-target-generation",
+		RequestedAt:        now,
+		UpdatedAt:          now,
+	}
+	store.switches[existing.ID] = existing
+	allocations := 0
+	manager.newLaunchID = func() string {
+		allocations++
+		return "replacement-generation"
+	}
+
+	got, err := manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
+		TargetHarness:  domain.HarnessCodex,
+		IdempotencyKey: existing.IdempotencyKey,
+		Note:           "continue",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != existing.ID || got.TargetGenerationID != existing.TargetGenerationID {
+		t.Fatalf("idempotent restart returned %+v, want switch %s generation %s", got, existing.ID, existing.TargetGenerationID)
+	}
+	if allocations != 0 || runtime.created != 0 || runtime.destroyed != 0 {
+		t.Fatalf("idempotent restart allocated/touched runtime: allocations=%d created=%d destroyed=%d", allocations, runtime.created, runtime.destroyed)
 	}
 }
 

@@ -36,8 +36,11 @@ func TestPolicyCharacterization_LegacySwitchPendingOwnsRecovery(t *testing.T) {
 	_, err := manager.SwitchWorker(context.Background(), SwitchRequest{
 		SessionID: id, TargetHarness: domain.HarnessCodex,
 	})
-	if !errors.Is(err, ErrSwitchInProgress) {
+	if !errors.Is(err, ErrSwitchRecoveryRequired) {
 		t.Fatalf("error = %v, want legacy recovery-required switch conflict", err)
+	}
+	if errors.Is(err, ErrSwitchOperationInProgress) {
+		t.Fatalf("legacy durable ownership was classified as transient: %v", err)
 	}
 	after := store.sessions[id]
 	if after.Metadata.SwitchPending == nil || after.Metadata.SwitchPending.GenerationID != "legacy-target-generation" {
