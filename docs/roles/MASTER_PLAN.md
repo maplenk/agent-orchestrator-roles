@@ -47,9 +47,12 @@ Target B durability hardening A is complete at `8bb1e3af`: unreadable or
 forward-versioned stored project config is contained per project, remains
 byte-preserved and visible as degraded, and is mutation-fenced without taking
 healthy projects offline. Focused normal/race gates and native Electron
-dogfood are recorded in `TARGET_B_DURABILITY_HARDENING_20260809.md`. The next
-durability slice is the mixed original 42–49 plus lone Muse 53 ledger repair;
-no capability cell was promoted.
+dogfood are recorded in `TARGET_B_DURABILITY_HARDENING_20260809.md`. Hardening
+B is complete at `586d1156`: a pre-write block classifier preserves a genuine
+lone Muse 53, retains complete stale 53–60 cleanup, refuses ambiguous histories
+loudly, and proves transactional rollback. Neither slice added a migration or
+promoted a capability cell. The next Target B slice removes the known
+fake/Kilocode/OpenCode wall-clock test dependencies.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -407,9 +410,10 @@ Zai and Kimi validated **separately** on Pi.
 17. [x] Contain unreadable stored project config per project; preserve raw
     bytes, keep healthy projects listable, surface the broken row as degraded,
     and reject every mutation/import targeting it (`8bb1e3af`)
-18. [ ] Repair mixed migration histories with a block-level on-entry
+18. [x] Repair mixed migration histories with a block-level on-entry
     discriminator that retains a genuine lone Muse 53, preserves complete
     stale 53–60 cleanup, and refuses ambiguous upstream schema loudly
+    (`586d1156`)
 
 ---
 
