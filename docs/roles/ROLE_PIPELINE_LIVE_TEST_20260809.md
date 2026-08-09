@@ -2,14 +2,15 @@
 
 ## Status
 
-**PASS for the Claude native-session collision fix and installed-app replay.**
+**PASS for the Claude native-session collision fix, default starter roles, and
+the installed-app Claude→Codex→Claude Switch replay.**
 
 The real packaged Electron app was rebuilt with fix commit `15a4e6f0`, ad-hoc deep-signed,
 installed at `/Applications/Agent Orchestrator.app`, and run against the default
 `~/.ao/data` / port `3001` path. This is the same local app shape the user runs;
 it is not a published or notarized release. The installed bundle reports version
-`0.10.3`; its embedded daemon SHA-256 is
-`6c20701411820ee8a70b032ac327018f9610d6da8279ded914461b2e13ae5df6`.
+`0.10.3`. The final default-role build from `762ae160` has embedded daemon
+SHA-256 `058cc4a82805fb7b96fef0e553620395065584b78f7c56f35dac9833ffe966f1`.
 
 ## AO issue found
 
@@ -48,11 +49,13 @@ Verification:
 
 - Focused identity regressions: 5 passed.
 - Full affected normal and race suites: 642 passed each.
-- Full backend: 4,695 passed; only the two known untouched three-second auth
-  timing failures in Kilocode and OpenCode occurred, and both passed 20/20 in
-  isolation.
+- Full backend on the default-role close-out: 4,702 passed; only the known
+  untouched aggregate-load timing trio in fake/Kilocode/OpenCode failed, and
+  each passed 20/20 in isolation.
+- Affected race gate: 1,514 passed across 14 packages.
 - `go build ./...`, `go vet ./...`, `gofmt -l .`, cold-cache
   `golangci-lint` v2.12.2, frontend typecheck, and `git diff --check`: clean.
+- Full frontend Vitest: 151/151 files and 2,042/2,042 tests passed.
 - Packaged Electron build completed under Node 22.14.0; the installed bundle
   passes `codesign --verify --deep --strict` after local ad-hoc signing.
 
@@ -65,16 +68,50 @@ daemon and real default data directory. AO reserved native Claude id
 tmux pane, and native Electron terminal all agreed on the new identity; Claude
 reached its input composer without a collision.
 
-The native UI also rendered Switch and Fresh Conversation. Switch was disabled
-with the explicit reason `This orchestrator has no pinned role.` This was an
-accurate setup result: the rebuilt `qbapi` project has no authored role bindings
-after the database cleanup, so there is no authorized target to advertise. It is
-not a switch-surface regression; a switchable installed-app replay must create
-the orchestrator through a configured semantic role.
+That first replay also exposed a product gap: the native UI rendered Switch but
+disabled it with `This orchestrator has no pinned role.` The rebuilt `qbapi`
+project had no authored role map after database cleanup, so the MVP switch
+surface existed but an ordinary existing repository could not use it without
+manual API/CLI configuration.
 
 The failed `qbapi-1` and diagnostic `qbapi-2` sessions were then killed and
 cleaned through AO. Their tmux runtimes are gone; the durable terminated history
 rows remain as expected.
+
+## Default starter-role fix and final native replay
+
+Commit `762ae160` adds a persisted non-strict starter role map for every new or
+active existing project whose role map is zero. The map contains orchestrator,
+implementor, UI, reviewer, and verifier roles; preserves configured project
+harness/model preferences; and gives a Claude or Codex orchestrator the other
+harness as its manual switch target. Non-strict preserves legacy worker CLI
+behavior.
+
+On launch of the newly packaged `/Applications` app, the real `qbapi` row was
+upgraded from schema version 0/no roles to schema version 1 with
+`orchestratorRole=orchestrator`. Its existing Pi worker preference remained Pi;
+the orchestrator primary remained Claude Code and gained Codex as the exact
+alternate. The already-running `qbapi-3` row was intentionally still unpinned,
+but its read model immediately changed from `no_role_pin` to
+`available:true`, role `orchestrator`, target Codex.
+
+The native Electron window showed an enabled Switch menu with
+`Codex · Provider default`. Selecting it completed in place on the same AO
+session id. The saga adopted a complete durable role pin (schema version, map
+SHA, template artifact/SHA, writable permission, and spawn permission) and
+wrote exactly `requested → pre_stop → post_stop → target_ack`. The return menu
+then showed `Claude Code · Provider default`; selecting it completed a second
+four-phase generation. Final facts:
+
+- harness returned to Claude Code;
+- role id remained `orchestrator` with the same template artifact and map SHA;
+- the pending fence was empty;
+- exactly one `qbapi-3` tmux runtime remained; and
+- Switch remained enabled with Codex as the target.
+
+This verifies both compatibility paths: fresh desktop-created orchestrators
+auto-bind the starter orchestrator role, while an already-live provider-default
+legacy orchestrator adopts it only during an explicit, authorized Switch.
 
 ## Non-issues
 

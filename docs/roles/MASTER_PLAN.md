@@ -37,6 +37,12 @@ passes 20/20 exact and 28/28 full-file runs while retaining the negative
 timeout. API drift passes two identical regenerations with a clean diff. The
 authoritative unsandboxed full Vitest run on exact `6473b134` passes 151/151
 files and 2040/2040 tests in 312.49s.
+The installed-app compatibility close-out at `762ae160` persists a non-strict
+starter role catalog for new and existing unconfigured projects. It preserves
+legacy worker behavior while making desktop-created orchestrators role-pinned
+and allowing an exact provider-default legacy orchestrator to adopt the role at
+an explicit Switch boundary; the real app completed Claude→Codex→Claude on the
+existing `qbapi` session.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 

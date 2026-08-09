@@ -5,8 +5,9 @@ post-review default-data-dir replay, and the final installed-app role pipeline
 are complete. The post-acceptance Grok fixes are integrated at `72f274a7`; the
 runtime replay passed on `3c3aef51`; and the installed Claude→Grok→Codex
 pipeline plus no-nudge verifier return passed on `f4b28012`. The
-repository-wide final gate is not fully green: the ordinary full backend run
-retains only three known untouched wall-clock failures. The verified
+existing-project starter-role and installed Switch close-out passed on
+`762ae160`. The repository-wide final gate is not fully green: the ordinary
+full backend run retains only three known untouched wall-clock failures. The verified
 MVP/static/API/frontend and installed-app gates are complete.
 
 **Accepted implementation and runner SHA:** `166e9e63`
@@ -27,6 +28,15 @@ Claude orchestrator → Grok implementor → read-only Codex verifier path passe
 in the replaced `/Applications` app, and a fresh follow-up proved the
 orchestrator retrieved a terminal-only verifier report without a manual wake.
 See [`ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md`](ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md).
+
+**Existing-project starter-role close-out:** `762ae160` — active projects with
+no authored role map receive a persisted, non-strict five-role starter map at
+boot. New projects receive the same map at registration. A desktop-created
+orchestrator auto-binds its orchestrator role; an already-running, unpinned
+provider-default orchestrator may adopt that exact role only through an
+explicit, fenced Switch. The real installed app upgraded `qbapi` and completed
+Claude→Codex→Claude in place. See
+[`ROLE_PIPELINE_LIVE_TEST_20260809.md`](ROLE_PIPELINE_LIVE_TEST_20260809.md).
 
 **Detailed worker-Continue contract:**
 [`PHASE3B_MVP_CONTRACT.md`](PHASE3B_MVP_CONTRACT.md)
@@ -53,6 +63,9 @@ AO ships:
    role map.
 5. Manual operator pause as the failover trigger. No vendor limit detector is
    required for this MVP.
+6. A switchable starter role catalog for new and existing projects that have
+   never authored a role map; no desktop role-map editing is required for the
+   ordinary Claude↔Codex orchestrator path.
 
 No MVP feature or live-acceptance work remains. Separate repository test
 hygiene remains because three untouched aggregate-load wall-clock tests still
@@ -269,6 +282,27 @@ authorization, or a manager call, using the existing typed
 boundary.
 
 A desktop role-map editor is not part of the MVP.
+
+### Starter roles for unconfigured projects
+
+Projects with no authored role map receive a persisted, non-strict starter
+catalog containing `orchestrator`, `implementor`, `ui`, `reviewer`, and
+`verifier`. It preserves the project's configured orchestrator and worker
+harness/model preferences. Reviewer and verifier use Codex read-only; the
+orchestrator receives an exact manual Claude↔Codex alternate when its configured
+primary is one of those two harnesses.
+
+Non-strict is load-bearing compatibility: existing free-form worker commands
+remain legal. It does not allow the desktop-created project orchestrator to
+skip its durable role—an orchestrator spawned without a legacy harness override
+auto-binds `orchestratorRole`. A pre-existing unpinned orchestrator is not
+rewritten merely because the daemon booted. If its current harness exactly
+matches a provider-default orchestrator primary, Switch may advertise the
+authorized alternate and the explicit switch saga adopts the full role/template
+pin under the project gate before stopping the source. A confirmed-alive
+pre-stop rollback restores the original empty pin. Model-specific legacy rows
+are not adopted because they do not retain enough durable identity to prove the
+source model without guessing.
 
 ### Current model-selection limitation
 
