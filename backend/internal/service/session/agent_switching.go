@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"
 	sessionmanager "github.com/aoagents/agent-orchestrator/backend/internal/session_manager"
@@ -27,13 +29,18 @@ type SwitchAgentInput struct {
 
 // SwitchAgent starts or resumes a durable agent-switch saga for a session.
 func (s *Service) SwitchAgent(ctx context.Context, id domain.SessionID, in SwitchAgentInput) (domain.AgentSwitch, error) {
-	if err := s.authorizeAgentSwitch(ctx, id, in.TargetHarness); err != nil {
+	intent, err := s.authorizeAgentSwitch(ctx, id, in)
+	if err != nil {
 		return domain.AgentSwitch{}, err
 	}
 	switchRecord, err := s.manager.SwitchAgent(ctx, id, sessionmanager.SwitchAgentConfig{
-		TargetHarness:  in.TargetHarness,
-		Note:           in.Note,
-		IdempotencyKey: in.IdempotencyKey,
+		TargetHarness:              intent.TargetHarness,
+		TargetModel:                intent.TargetModel,
+		Note:                       in.Note,
+		IdempotencyKey:             in.IdempotencyKey,
+		AllocateTargetGeneration:   func() domain.AgentGenerationID { return domain.AgentGenerationID(uuid.NewString()) },
+		ExpectedSourceGenerationID: intent.ExpectedSourceGenerationID,
+		RoleSnapshot:               intent.RoleSnapshot,
 	})
 	return switchRecord, toAPIError(err)
 }
