@@ -1222,8 +1222,8 @@ func TestEveryInterfaceTransitionGuardReportsTheInterfaceFence(t *testing.T) {
 	for _, at := range callers {
 		// The sentinel the guard returns is within the few lines that follow.
 		window := strings.Join(lines[at:min(at+6, len(lines))], "\n")
-		if strings.Contains(window, "ErrSwitchInProgress") {
-			t.Errorf("line %d: an interface-transition guard returns ErrSwitchInProgress, "+
+		if strings.Contains(window, "ErrSwitchInProgress") || strings.Contains(window, "ErrSwitchOperationInProgress") {
+			t.Errorf("line %d: an interface-transition guard returns a switch-operation error, "+
 				"so its caller reports SWITCH_IN_PROGRESS for a transition:\n%s", at+1, window)
 		}
 		if !strings.Contains(window, "ErrInterfaceTransitionInProgress") {
@@ -1254,8 +1254,8 @@ func TestSwitchAndInterfaceTransitionCannotBothRun(t *testing.T) {
 
 		_, err := manager.StartInterfaceTransition(context.Background(), "session-1",
 			domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
-		if !errors.Is(err, ErrSwitchInProgress) {
-			t.Fatalf("StartInterfaceTransition = %v, want ErrSwitchInProgress", err)
+		if !errors.Is(err, ErrSwitchOperationInProgress) {
+			t.Fatalf("StartInterfaceTransition = %v, want ErrSwitchOperationInProgress", err)
 		}
 		if strings.Contains(fmt.Sprint(*log), "stop:") {
 			t.Errorf("the refused transition still stopped a controller: %v", *log)
@@ -1273,8 +1273,12 @@ func TestSwitchAndInterfaceTransitionCannotBothRun(t *testing.T) {
 		// a restart, where no goroutine holds anything.
 		_, err := manager.StartInterfaceTransition(context.Background(), "session-1",
 			domain.SessionModeChat, domain.SessionInterfaceTransitionDrain)
-		if !errors.Is(err, ErrSwitchInProgress) {
-			t.Fatalf("StartInterfaceTransition = %v, want ErrSwitchInProgress", err)
+		if !errors.Is(err, ErrSwitchRecoveryRequired) {
+			t.Fatalf("StartInterfaceTransition = %v, want ErrSwitchRecoveryRequired", err)
+		}
+		var recovery *LegacySwitchRecoveryError
+		if !errors.As(err, &recovery) || recovery.GenerationID != "gen-pending" {
+			t.Fatalf("StartInterfaceTransition = %v, want typed legacy recovery", err)
 		}
 		if strings.Contains(fmt.Sprint(*log), "stop:") {
 			t.Errorf("the refused transition still stopped a controller: %v", *log)

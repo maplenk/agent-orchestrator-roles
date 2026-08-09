@@ -98,7 +98,7 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 // running the saga with an inverted lock order.
 func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, ownershipHeld bool) (SwitchResult, error) {
 	if !m.beginSwitch(req.SessionID) {
-		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchInProgress)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchOperationInProgress)
 	}
 	defer m.endSwitch(req.SessionID)
 
@@ -173,7 +173,8 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	}
 	if rec.Metadata.SwitchPending != nil {
 		// In-flight saga: only recovery may continue (do not start a nested switch).
-		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchInProgress)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID,
+			legacySwitchRecoveryError(req.SessionID, rec.Metadata.SwitchPending.GenerationID))
 	}
 	meta := rec.Metadata
 	if meta.WorkspacePath == "" || meta.RuntimeHandleID == "" {
@@ -422,7 +423,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	}
 
 	if !m.beginSwitch(sessionID) {
-		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchInProgress)
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchOperationInProgress)
 	}
 	defer m.endSwitch(sessionID)
 

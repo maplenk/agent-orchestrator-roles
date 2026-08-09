@@ -453,15 +453,15 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		m := dogfoodManager(st, &fakeRuntime{})
 		for _, key := range []string{string(id), handle} {
 			err := m.AllowTerminalInput(ctx, key)
-			if !errors.Is(err, ErrSwitchInProgress) {
-				t.Fatalf("key=%s err=%v want ErrSwitchInProgress", key, err)
+			if !errors.Is(err, ErrSwitchRecoveryRequired) {
+				t.Fatalf("key=%s err=%v want ErrSwitchRecoveryRequired", key, err)
 			}
 		}
 		// After handle clear, pending source handle still fences.
 		rec := st.sessions[id]
 		rec.Metadata.RuntimeHandleID = ""
 		st.sessions[id] = rec
-		if err := m.AllowTerminalInput(ctx, handle); !errors.Is(err, ErrSwitchInProgress) {
+		if err := m.AllowTerminalInput(ctx, handle); !errors.Is(err, ErrSwitchRecoveryRequired) {
 			t.Fatalf("pending-source-handle fence: %v", err)
 		}
 		if err := m.AllowTerminalInput(ctx, "shell-unrelated"); err != nil {

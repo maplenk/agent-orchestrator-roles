@@ -104,7 +104,7 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 	}
 
 	if err := m.beginAgentSwitch(ctx, id); err != nil {
-		if !errors.Is(err, ErrSwitchInProgress) || !m.agentSwitchRetained(id) {
+		if !errors.Is(err, ErrSwitchOperationInProgress) || !m.agentSwitchRetained(id) {
 			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, err)
 		}
 		// A new explicit switch request doubles as the recovery affordance for a
@@ -115,7 +115,8 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: recover previous switch: %w", id, recoverErr)
 		}
 		if !resolved {
-			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, ErrSwitchInProgress)
+			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id,
+				agentSwitchRecoveryError(domain.AgentSwitch{SessionID: id}))
 		}
 		if err := m.beginAgentSwitch(ctx, id); err != nil {
 			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, err)
@@ -259,7 +260,8 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 				return result, fmt.Errorf("switch agent %s: create saga outcome is ambiguous: %w", id, errors.Join(err, reloadErr))
 			}
 			if errors.Is(err, domain.ErrAgentSwitchInProgress) {
-				return requestedSwitch, fmt.Errorf("switch agent %s: %w", id, ErrSwitchInProgress)
+				return switchRec, fmt.Errorf("switch agent %s: %w", id,
+					errors.Join(err, agentSwitchRecoveryError(switchRec)))
 			}
 			return requestedSwitch, fmt.Errorf("switch agent %s: create saga: %w", id, err)
 		}

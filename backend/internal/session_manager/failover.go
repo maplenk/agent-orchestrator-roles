@@ -301,7 +301,7 @@ func (m *Manager) continueFailover(
 		// the switch ownership fence between our append and SwitchWorker. That
 		// caller owns the shared attempt now. Marking it failed here can race its
 		// target ack and leave a live target behind a terminal-failed row.
-		if errors.Is(switchErr, ErrSwitchInProgress) {
+		if errors.Is(switchErr, ErrSwitchOperationInProgress) {
 			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, switchErr)
 		}
 		return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
@@ -332,7 +332,7 @@ func failoverEligible(rec domain.SessionRecord) error {
 // Continue never starts a new attempt, and an incomplete post_stop belonging to
 // an abandoned attempt is COMPLETED on the same generation instead of being
 // redone on a fresh rung. A live owner is different: it returns
-// ErrSwitchInProgress without mutating the attempt because fence occupancy does
+// ErrSwitchOperationInProgress without mutating the attempt because fence occupancy does
 // not prove that owner's switch will eventually acknowledge the target.
 //
 // No path advances the ladder. An abandoned attempt is finished on its stored
@@ -364,7 +364,7 @@ func (m *Manager) adoptFailoverAttempt(
 		//
 		// beginSwitch is the discriminator, and it is exactly the right one
 		// because it is in-memory: a live saga holds it and refuses with
-		// ErrSwitchInProgress, while after a crash it is free and the re-drive
+		// ErrSwitchOperationInProgress, while after a crash it is free and the re-drive
 		// proceeds. Nothing durable can tell these apart, which is why the old
 		// code could not.
 		//
@@ -383,7 +383,7 @@ func (m *Manager) adoptFailoverAttempt(
 				NativeSessionID:  rec.Metadata.AgentSessionID,
 			},
 		})
-		if errors.Is(switchErr, ErrSwitchInProgress) {
+		if errors.Is(switchErr, ErrSwitchOperationInProgress) {
 			// A live fence distinguishes an abandoned requested attempt from a
 			// transition running right now, but it does not prove the owner is
 			// this attempt or that it will eventually succeed. Preserve the
@@ -407,7 +407,7 @@ func (m *Manager) adoptFailoverAttempt(
 	}
 
 	res, err := m.RecoverSwitchFromPostStop(ctx, rec.ID)
-	if errors.Is(err, ErrSwitchInProgress) {
+	if errors.Is(err, ErrSwitchOperationInProgress) {
 		// The matching generation belongs to the live saga that still owns the
 		// switch fence. A duplicate Continue observes its durable pending pin,
 		// but must not promote the OUTER attempt while the first caller is still
@@ -687,7 +687,7 @@ func (m *Manager) recordFailoverFailure(
 			}
 			return ContinueFailoverResult{}, errors.Join(
 				fmt.Errorf("continue %s: %w", rec.ID, switchErr),
-				fmt.Errorf("continue %s: %w", rec.ID, ErrSwitchInProgress),
+				fmt.Errorf("continue %s: %w", rec.ID, ErrSwitchOperationInProgress),
 			)
 		}
 		return ContinueFailoverResult{}, errors.Join(

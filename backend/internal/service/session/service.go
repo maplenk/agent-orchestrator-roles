@@ -154,14 +154,14 @@ type scmProvider interface {
 // session operations to the internal sessionmanager.Manager and owns read-model
 // assembly, including user-facing display status derivation.
 type Service struct {
-	manager   commander
-	store     Store
-	prClaimer ports.PRClaimer
-	scm       scmProvider
-	tracker   ports.Tracker
-	clock     func() time.Time
-	dataDir   string
-	telemetry ports.EventSink
+	manager           commander
+	store             Store
+	prClaimer         ports.PRClaimer
+	scm               scmProvider
+	tracker           ports.Tracker
+	clock             func() time.Time
+	dataDir           string
+	telemetry         ports.EventSink
 	logger            *slog.Logger
 	backgroundContext context.Context
 	runBackground     func(func())
@@ -902,7 +902,13 @@ func toAPIError(err error) error {
 			"Terminal output is available only for terminal-mode sessions; use the conversation view for Chat sessions", nil)
 	case errors.Is(err, sessionmanager.ErrSessionOutputLinesInvalid):
 		return apierr.Invalid("INVALID_OUTPUT_LINES", "lines must be between 1 and 1000", nil)
-	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
+	case errors.Is(err, domain.ErrAgentSwitchInProgress):
+		return apierr.Conflict("AGENT_SWITCH_RECOVERY_REQUIRED",
+			"This session has a durable agent switch that must be recovered before starting another", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchRecoveryRequired):
+		return apierr.Conflict("SWITCH_RECOVERY_REQUIRED",
+			"This session has a durable switch that must be recovered before starting another", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchOperationInProgress):
 		return apierr.Conflict("SWITCH_IN_PROGRESS",
 			"A switch or fresh conversation is already in progress for this session", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchPostStop) &&
@@ -1062,15 +1068,9 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrSwitchDeliveryUnconfirmed):
 		return apierr.Conflict("AGENT_SWITCH_DELIVERY_UNCONFIRMED",
 			"The target agent started, but AO could not confirm that it accepted the continuation", nil)
-	case errors.Is(err, sessionmanager.ErrSwitchInProgress):
-		return apierr.Conflict("AGENT_SWITCH_IN_PROGRESS",
-			"This session already has an agent switch in progress", nil)
 	case errors.Is(err, domain.ErrAgentSwitchIdempotencyConflict):
 		return apierr.Conflict("AGENT_SWITCH_IDEMPOTENCY_CONFLICT",
 			"The idempotency key is already associated with a different agent switch", nil)
-	case errors.Is(err, domain.ErrAgentSwitchInProgress):
-		return apierr.Conflict("AGENT_SWITCH_IN_PROGRESS",
-			"This session already has an agent switch in progress", nil)
 	case errors.Is(err, sessionmanager.ErrScratchBranchUnsupported):
 		return apierr.Invalid("SCRATCH_BRANCH_UNSUPPORTED", err.Error(), nil)
 	case errors.Is(err, ports.ErrWorkspaceBranchCheckedOutElsewhere):

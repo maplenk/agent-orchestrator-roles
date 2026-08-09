@@ -1024,8 +1024,12 @@ func TestAllowTerminalInput_BlocksByPendingSourceHandleAfterClear(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected block by pending source handle after runtime handle clear")
 	}
-	if !errors.Is(err, ErrSwitchInProgress) {
-		t.Fatalf("err = %v, want ErrSwitchInProgress", err)
+	if !errors.Is(err, ErrSwitchRecoveryRequired) {
+		t.Fatalf("err = %v, want ErrSwitchRecoveryRequired", err)
+	}
+	var recovery *LegacySwitchRecoveryError
+	if !errors.As(err, &recovery) || recovery.GenerationID != "g-post" {
+		t.Fatalf("err = %v, want typed legacy recovery for g-post", err)
 	}
 }
 

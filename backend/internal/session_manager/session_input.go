@@ -162,7 +162,7 @@ func (m *Manager) closeAgentSwitchDecisionInput(ctx context.Context, id domain.S
 func (m *Manager) beginAgentSwitch(ctx context.Context, id domain.SessionID) error {
 	if err := m.beginAgentOperation(ctx, id, agentOperationSwitch); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
-			return ErrSwitchInProgress
+			return ErrSwitchOperationInProgress
 		}
 		return err
 	}
@@ -215,7 +215,7 @@ func (m *Manager) beginAgentSwitchRecovery(ctx context.Context, id domain.Sessio
 			}
 		}
 		m.agentOpMu.Unlock()
-		return ErrSwitchInProgress
+		return ErrSwitchOperationInProgress
 	}
 	if m.agentOperations == nil {
 		m.agentOperations = make(map[domain.SessionID]agentOperationKind)

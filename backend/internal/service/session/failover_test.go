@@ -124,7 +124,7 @@ func TestContinueFailover_ManagerSentinelsSurfaceMapped(t *testing.T) {
 		{name: "role required", err: domain.ErrFailoverRoleRequired, code: "FAILOVER_ROLE_REQUIRED"},
 		{name: "limit reached", err: domain.ErrFailoverLimitReached, code: "FAILOVER_LIMIT_REACHED"},
 		{name: "recovery required", err: sessionmanager.ErrFailoverRecoveryRequired, code: "FAILOVER_RECOVERY_REQUIRED"},
-		{name: "switch in progress", err: sessionmanager.ErrSwitchInProgress, code: "SWITCH_IN_PROGRESS"},
+		{name: "switch in progress", err: sessionmanager.ErrSwitchOperationInProgress, code: "SWITCH_IN_PROGRESS"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := &recordingFailoverManager{continueErr: fmt.Errorf("continue mer-1: %w", tc.err)}

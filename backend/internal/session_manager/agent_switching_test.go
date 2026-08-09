@@ -1759,8 +1759,8 @@ func TestSwitchAgentGatesSendDuringReplacement(t *testing.T) {
 	if !manager.SessionMutationInProgress("proj-1") {
 		t.Fatal("terminal input gate opened during replacement")
 	}
-	if err := manager.Send(context.Background(), "proj-1", "do not race", nil); !errors.Is(err, ErrSwitchInProgress) {
-		t.Fatalf("Send error = %v, want ErrSwitchInProgress", err)
+	if err := manager.Send(context.Background(), "proj-1", "do not race", nil); !errors.Is(err, ErrSwitchOperationInProgress) {
+		t.Fatalf("Send error = %v, want ErrSwitchOperationInProgress", err)
 	}
 	close(runtime.release)
 	if err := <-done; err != nil {

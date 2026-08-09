@@ -160,7 +160,7 @@ func TestToAPIError_SwitchAndInterfaceFencesKeepSeparateCodes(t *testing.T) {
 		err  error
 		code string
 	}{
-		{"switch saga fence", sessionmanager.ErrSwitchInProgress, "SWITCH_IN_PROGRESS"},
+		{"switch saga fence", sessionmanager.ErrSwitchOperationInProgress, "SWITCH_IN_PROGRESS"},
 		{"durable pause fence", sessionmanager.ErrSwitchPaused, "SWITCH_PAUSED"},
 		{"interface transition fence", sessionmanager.ErrInterfaceTransitionInProgress, "INTERFACE_TRANSITION_IN_PROGRESS"},
 	} {
@@ -235,8 +235,8 @@ func TestToAPIError_PostStopLaunchCommandTooLongKeepsRecoveryAndSizeRemedy(t *te
 // And the sentinels must stay distinct values: making one an alias of the other
 // would restore the shadowing while both cases still appear in the switch.
 func TestSwitchAndInterfaceFenceSentinelsAreDistinct(t *testing.T) {
-	if errors.Is(sessionmanager.ErrSwitchInProgress, sessionmanager.ErrInterfaceTransitionInProgress) ||
-		errors.Is(sessionmanager.ErrInterfaceTransitionInProgress, sessionmanager.ErrSwitchInProgress) {
+	if errors.Is(sessionmanager.ErrSwitchOperationInProgress, sessionmanager.ErrInterfaceTransitionInProgress) ||
+		errors.Is(sessionmanager.ErrInterfaceTransitionInProgress, sessionmanager.ErrSwitchOperationInProgress) {
 		t.Fatal("the two fences share an identity; whichever toAPIError case comes first will answer for both")
 	}
 }

@@ -138,7 +138,7 @@ func (m *Manager) StartInterfaceTransition(
 	// saga's own check keys on for the asynchronous part that follows.
 	if !m.beginSwitch(id) {
 		return domain.SessionInterfaceTransition{}, fmt.Errorf(
-			"interface transition %s: %w", id, ErrSwitchInProgress)
+			"interface transition %s: %w", id, ErrSwitchOperationInProgress)
 	}
 	defer m.endSwitch(id)
 
@@ -156,8 +156,8 @@ func (m *Manager) StartInterfaceTransition(
 	// unfinished as far as the session is concerned.
 	if rec.Metadata.SwitchPending != nil {
 		return domain.SessionInterfaceTransition{}, fmt.Errorf(
-			"interface transition %s: %w: switch pending gen %s",
-			id, ErrSwitchInProgress, rec.Metadata.SwitchPending.GenerationID)
+			"interface transition %s: %w",
+			id, legacySwitchRecoveryError(id, rec.Metadata.SwitchPending.GenerationID))
 	}
 	if rec.IsTerminated {
 		return domain.SessionInterfaceTransition{}, ErrTerminated

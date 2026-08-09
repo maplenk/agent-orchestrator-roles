@@ -57,10 +57,6 @@ var (
 	// with the system prompt only). Workers without a task and without a native
 	// session id have nothing meaningful to restore.
 	ErrNotResumable = errors.New("session: nothing to resume from")
-	// ErrSwitchInProgress means an agent switch is already running for this
-	// session. The API maps it to a 409 so a double-submit does not race two
-	// teardown/relaunch cycles over one worktree.
-	ErrSwitchInProgress = errors.New("session: switch already in progress")
 	// ErrSwitchChatUnsupported refuses the switch/fresh saga for a chat session.
 	// The saga stops a terminal runtime, probes it for liveness, and treats an
 	// empty runtime handle as confirmed death — none of which describes a chat
@@ -1665,7 +1661,7 @@ func (m *Manager) RollbackSpawn(ctx context.Context, id domain.SessionID) (delet
 func (m *Manager) Kill(ctx context.Context, id domain.SessionID) (bool, error) {
 	if err := m.beginAgentOperation(ctx, id, agentOperationKill); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
-			err = ErrSwitchInProgress
+			err = ErrSwitchOperationInProgress
 		}
 		return false, fmt.Errorf("kill %s: %w", id, err)
 	}
@@ -1870,7 +1866,7 @@ func (m *Manager) RetireForReplacement(ctx context.Context, id domain.SessionID)
 func (m *Manager) retireForReplacementUnderOwnership(ctx context.Context, id domain.SessionID) error {
 	if err := m.beginAgentOperation(ctx, id, agentOperationRetire); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
-			err = ErrSwitchInProgress
+			err = ErrSwitchOperationInProgress
 		}
 		return fmt.Errorf("retire replacement %s: %w", id, err)
 	}
@@ -2092,7 +2088,7 @@ func (m *Manager) retireWorkspaceProjectForReplacement(ctx context.Context, rec 
 func (m *Manager) RestoreWithMode(ctx context.Context, id domain.SessionID) (RestoreResult, error) {
 	if err := m.beginAgentOperation(ctx, id, agentOperationRestore); err != nil {
 		if errors.Is(err, errAgentOperationInProgress) {
-			err = ErrSwitchInProgress
+			err = ErrSwitchOperationInProgress
 		}
 		return RestoreResult{}, fmt.Errorf("restore %s: %w", id, err)
 	}
@@ -2949,7 +2945,7 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 			continue
 		}
 		if _, err := m.RecoverSwitchFromPostStop(ctx, rec.ID); err != nil {
-			if errors.Is(err, ErrSwitchNothingToRecover) || errors.Is(err, ErrSwitchInProgress) {
+			if errors.Is(err, ErrSwitchNothingToRecover) || errors.Is(err, ErrSwitchOperationInProgress) {
 				continue
 			}
 			if errors.Is(err, ErrLaunchCleanupUnresolved) {
@@ -3852,11 +3848,11 @@ func (m *Manager) send(ctx context.Context, id domain.SessionID, message, client
 	case sessionguard.SuppressedAwaitingUser:
 		return fmt.Errorf("send %s: %w", id, ErrAwaitingDecision)
 	case sessionguard.SuppressedSwitchPending:
-		return fmt.Errorf("send %s: %w", id, ErrSwitchInProgress)
+		return fmt.Errorf("send %s: %w", id, legacySwitchRecoveryError(id, ""))
 	case sessionguard.SuppressedUnknown:
 		return fmt.Errorf("send %s: pre-write session read failed", id)
 	case sessionguard.SuppressedInputGated:
-		return fmt.Errorf("send %s: %w", id, ErrSwitchInProgress)
+		return fmt.Errorf("send %s: %w", id, ErrSwitchOperationInProgress)
 	}
 	// confirmActive only helps — and is only SAFE — when the harness reports
 	// both a prompt-submit signal (so the loop can observe active) and a
@@ -5048,8 +5044,10 @@ func (m *Manager) deliverAfterStartPrompt(ctx context.Context, agent ports.Agent
 		return fmt.Errorf("send %s: %w", id, ErrAgentExited)
 	case sessionguard.SuppressedAwaitingUser:
 		return fmt.Errorf("send %s: %w", id, ErrAwaitingDecision)
-	case sessionguard.SuppressedSwitchPending, sessionguard.SuppressedInputGated:
-		return fmt.Errorf("send %s: %w", id, ErrSwitchInProgress)
+	case sessionguard.SuppressedSwitchPending:
+		return fmt.Errorf("send %s: %w", id, legacySwitchRecoveryError(id, ""))
+	case sessionguard.SuppressedInputGated:
+		return fmt.Errorf("send %s: %w", id, ErrSwitchOperationInProgress)
 	case sessionguard.SuppressedUnknown:
 		return fmt.Errorf("send %s: pre-write session read failed", id)
 	case sessionguard.Sent:
@@ -5175,7 +5173,7 @@ func (m *Manager) AllowTerminalInput(ctx context.Context, terminalID string) err
 
 func gateTerminalPending(rec domain.SessionRecord) error {
 	if rec.Metadata.SwitchPending != nil && strings.TrimSpace(rec.Metadata.SwitchPending.GenerationID) != "" {
-		return fmt.Errorf("%w: switch pending gen %s", ErrSwitchInProgress, rec.Metadata.SwitchPending.GenerationID)
+		return legacySwitchRecoveryError(rec.ID, rec.Metadata.SwitchPending.GenerationID)
 	}
 	return nil
 }

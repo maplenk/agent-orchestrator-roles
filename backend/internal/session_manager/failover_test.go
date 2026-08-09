@@ -861,9 +861,9 @@ func TestContinueAutomaticFailover_RacingManualAdopterOwnsSharedAttempt(t *testi
 		t.Fatal("manual adopter did not acquire switch ownership")
 	}
 	close(releaseAppend)
-	if err := <-autoDone; !errors.Is(err, ErrSwitchInProgress) {
+	if err := <-autoDone; !errors.Is(err, ErrSwitchOperationInProgress) {
 		close(blocking.release)
-		t.Fatalf("losing automatic owner error = %v, want ErrSwitchInProgress", err)
+		t.Fatalf("losing automatic owner error = %v, want ErrSwitchOperationInProgress", err)
 	}
 	if state := st.only(t).State; state != domain.FailoverAttemptRequested {
 		close(blocking.release)
@@ -1784,8 +1784,8 @@ func TestContinueFailover_UnrelatedSwitchFenceReturnsConflictWithoutMutation(t *
 	defer m.endSwitch(id)
 
 	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
-	if !errors.Is(err, ErrSwitchInProgress) {
-		t.Fatalf("continue with unrelated switch fence error = %v, want ErrSwitchInProgress", err)
+	if !errors.Is(err, ErrSwitchOperationInProgress) {
+		t.Fatalf("continue with unrelated switch fence error = %v, want ErrSwitchOperationInProgress", err)
 	}
 	if res != (ContinueFailoverResult{}) {
 		t.Fatalf("conflicted Continue returned false success: %+v", res)
@@ -1806,7 +1806,7 @@ func TestContinueFailover_UnrelatedSwitchFenceReturnsConflictWithoutMutation(t *
 
 // A product-real duplicate: the first Continue has persisted switch_pending
 // and pre_stop, holds beginSwitch, and is blocked destroying the source. The
-// duplicate must report ErrSwitchInProgress without promoting the OUTER
+// duplicate must report ErrSwitchOperationInProgress without promoting the OUTER
 // failover attempt to post_stop. That phase belongs to the switch ledger;
 // moving the attempt while the first saga still owns it makes the first
 // requested->acked CAS lose after a completely successful target_ack. Returning
@@ -1861,8 +1861,8 @@ func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *
 		t.Fatal("first Continue did not finish after Destroy was released")
 	}
 
-	if !errors.Is(duplicateErr, ErrSwitchInProgress) {
-		t.Fatalf("duplicate Continue error = %v, want ErrSwitchInProgress", duplicateErr)
+	if !errors.Is(duplicateErr, ErrSwitchOperationInProgress) {
+		t.Fatalf("duplicate Continue error = %v, want ErrSwitchOperationInProgress", duplicateErr)
 	}
 	if duplicate != (ContinueFailoverResult{}) {
 		t.Fatalf("duplicate returned false success while first saga was pre-ack: %+v", duplicate)
@@ -1961,9 +1961,9 @@ func TestContinueFailover_DuplicateDuringDestroyFirstLaterFailsTruthfully(t *tes
 		context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"},
 	)
 	duringDestroy := st.only(t)
-	if !errors.Is(duplicateErr, ErrSwitchInProgress) {
+	if !errors.Is(duplicateErr, ErrSwitchOperationInProgress) {
 		close(blocking.release)
-		t.Fatalf("duplicate Continue error = %v, want ErrSwitchInProgress", duplicateErr)
+		t.Fatalf("duplicate Continue error = %v, want ErrSwitchOperationInProgress", duplicateErr)
 	}
 	if duplicate != (ContinueFailoverResult{}) {
 		close(blocking.release)
