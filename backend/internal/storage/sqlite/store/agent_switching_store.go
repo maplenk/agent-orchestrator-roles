@@ -453,7 +453,40 @@ func (s *Store) AcknowledgeAgentSwitchTarget(ctx context.Context, id domain.Agen
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
-	n, err := s.qw.AcknowledgeAgentSwitchTarget(ctx, gen.AcknowledgeAgentSwitchTargetParams{
+	tx, err := s.writeDB.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin acknowledge agent switch target %s: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	q := s.qw.WithTx(tx)
+
+	switchRow, err := q.GetAgentSwitch(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("acknowledge agent switch target %s: read switch: %w", id, err)
+	}
+	sw := agentSwitchFromGen(switchRow)
+	if sw.SessionID != sessionID || sw.State != domain.AgentSwitchDelivering ||
+		sw.TargetGenerationID != targetGenerationID || sw.TargetAcknowledgedAt != nil ||
+		sw.TargetNativeSessionRef == nil || acknowledgedAt.Before(sw.UpdatedAt) {
+		return false, nil
+	}
+	nativeRow, err := q.GetAgentNativeSession(ctx, *sw.TargetNativeSessionRef)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("acknowledge agent switch target %s: read target native session: %w", id, err)
+	}
+	targetNative := agentNativeSessionFromGen(nativeRow)
+	if targetNative.AOSessionID != sessionID || targetNative.Harness != sw.TargetHarness ||
+		targetNative.LastGenerationID != targetGenerationID || strings.TrimSpace(targetNative.NativeSessionID) == "" {
+		return false, nil
+	}
+
+	n, err := q.AcknowledgeAgentSwitchTarget(ctx, gen.AcknowledgeAgentSwitchTargetParams{
 		TargetAcknowledgedAt: sql.NullTime{Time: acknowledgedAt, Valid: true},
 		UpdatedAt:            acknowledgedAt, ID: id, SessionID: sessionID,
 		TargetGenerationID: targetGenerationID,
@@ -461,7 +494,28 @@ func (s *Store) AcknowledgeAgentSwitchTarget(ctx context.Context, id domain.Agen
 	if err != nil {
 		return false, fmt.Errorf("acknowledge agent switch target %s: %w", id, err)
 	}
-	return n > 0, nil
+	if n != 1 {
+		return false, nil
+	}
+	n, err = q.PromoteAcknowledgedAgentSwitchNativeSession(ctx, gen.PromoteAcknowledgedAgentSwitchNativeSessionParams{
+		TargetNativeSessionID:      targetNative.NativeSessionID,
+		TargetNativeTranscriptPath: targetNative.TranscriptPath,
+		AcknowledgedAt:             acknowledgedAt,
+		SessionID:                  sessionID,
+		TargetHarness:              sw.TargetHarness,
+		TargetGenerationID:         string(targetGenerationID),
+		SwitchID:                   id,
+	})
+	if err != nil {
+		return false, fmt.Errorf("acknowledge agent switch target %s: promote target native session: %w", id, err)
+	}
+	if n != 1 {
+		return false, nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("acknowledge agent switch target %s: commit: %w", id, err)
+	}
+	return true, nil
 }
 
 // ActivateAgentSwitchTarget atomically transfers the sessions row to a
@@ -524,11 +578,9 @@ func (s *Store) ActivateAgentSwitchTarget(ctx context.Context, activation domain
 
 	n, err := q.ActivateSessionAgentSwitchTarget(ctx, gen.ActivateSessionAgentSwitchTargetParams{
 		TargetHarness: activation.TargetHarness, ActivatedAt: activation.ActivatedAt,
-		RuntimeHandleID:            activation.RuntimeHandleID,
-		TargetGenerationID:         string(activation.TargetGenerationID),
-		TargetNativeSessionID:      targetNative.NativeSessionID,
-		TargetNativeTranscriptPath: targetNative.TranscriptPath,
-		SessionID:                  activation.SessionID, ExpectedSourceHarness: activation.SourceHarness,
+		RuntimeHandleID:    activation.RuntimeHandleID,
+		TargetGenerationID: string(activation.TargetGenerationID),
+		SessionID:          activation.SessionID, ExpectedSourceHarness: activation.SourceHarness,
 		ExpectedSourceRuntimeLaunchID: activation.ExpectedSourceRuntimeLaunchID,
 	})
 	if err != nil {

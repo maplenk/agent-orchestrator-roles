@@ -2333,7 +2333,7 @@ func (m *Manager) relaunchSession(ctx context.Context, operation string, rec dom
 	if !ok {
 		return RestoreResult{}, fmt.Errorf("%s %s: no agent adapter for harness %q", operation, rec.ID, launchHarness)
 	}
-	if o.ForceFresh && strings.TrimSpace(rec.Metadata.AgentSessionID) == "" {
+	if o.ForceFresh {
 		nativeID, nativeErr := freshAgentSessionID(agent)
 		if nativeErr != nil {
 			return RestoreResult{}, fmt.Errorf("%s %s: native session id: %w", operation, rec.ID, nativeErr)

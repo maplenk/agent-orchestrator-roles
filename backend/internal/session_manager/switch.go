@@ -347,8 +347,9 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
 	}
 
-	// Source dead: clear live handle/ids (pending still carries intent + payload).
-	rec.Metadata.AgentSessionID = ""
+	// Source dead: clear only runtime ownership. The scalar native-session id
+	// mirrors the last acknowledged provider conversation until the exact target
+	// acknowledgement promotes it.
 	rec.Metadata.RuntimeHandleID = ""
 	rec.Metadata.RuntimeLaunchID = ""
 	rec.UpdatedAt = m.clock()
@@ -683,7 +684,8 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		pending.PayloadJSON = payloadRaw
 	}
 	rec.Metadata.SwitchPending = pending
-	rec.Metadata.AgentSessionID = ""
+	// Keep the last acknowledged provider conversation while target ownership is
+	// unresolved. Runtime/saga facts, not scalar emptiness, drive recovery.
 	// Prefer existing composed prompt when it already contains the handoff;
 	// only recompose when we have compiled text and the prompt is missing it.
 	if compiledText != "" {

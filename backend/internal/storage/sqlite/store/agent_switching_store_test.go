@@ -1037,7 +1037,8 @@ func TestAgentSwitchSourceStopAndTargetActivationAreAtomicAndNarrow(t *testing.T
 	}
 	if activated.Harness != domain.HarnessCodex || activated.Activity.State != domain.ActivityIdle ||
 		activated.Metadata.RuntimeHandleID != "target-handle" || activated.Metadata.RuntimeLaunchID != "target-generation" ||
-		activated.Metadata.AgentSessionID != target.NativeSessionID || activated.Metadata.NativeTranscriptPath != target.TranscriptPath {
+		activated.Metadata.AgentSessionID != rec.Metadata.AgentSessionID ||
+		activated.Metadata.NativeTranscriptPath != rec.Metadata.NativeTranscriptPath {
 		t.Fatalf("target owner projection = %+v", activated)
 	}
 	if !activated.FirstSignalAt.IsZero() {
@@ -1074,13 +1075,30 @@ func TestAgentSwitchSourceStopAndTargetActivationAreAtomicAndNarrow(t *testing.T
 	targetSignal := activated
 	targetSignal.Activity = domain.Activity{State: domain.ActivityActive, LastActivityAt: now.Add(7 * time.Second)}
 	targetSignal.FirstSignalAt = now.Add(7 * time.Second)
+	targetSignal.Metadata.AgentSessionID = target.NativeSessionID
+	targetSignal.Metadata.NativeTranscriptPath = target.TranscriptPath
 	targetSignal.UpdatedAt = now.Add(7 * time.Second)
 	if applied, err := s.UpdateSessionFromActivitySignal(ctx, targetSignal); err != nil || !applied {
 		t.Fatalf("target activity during delivery: applied=%v err=%v", applied, err)
 	}
+	beforeAck, ok, err := s.GetSession(ctx, session.ID)
+	if err != nil || !ok {
+		t.Fatalf("read target before acknowledgement: ok=%v err=%v", ok, err)
+	}
+	if beforeAck.Metadata.AgentSessionID != rec.Metadata.AgentSessionID ||
+		beforeAck.Metadata.NativeTranscriptPath != rec.Metadata.NativeTranscriptPath {
+		t.Fatalf("target activity promoted native identity before acknowledgement: %+v", beforeAck.Metadata)
+	}
 	acknowledgedAt := now.Add(8 * time.Second)
 	if acknowledged, err := s.AcknowledgeAgentSwitchTarget(ctx, sw.ID, session.ID, "target-generation", acknowledgedAt); err != nil || !acknowledged {
 		t.Fatalf("target acknowledgement after guarded activity: acknowledged=%v err=%v", acknowledged, err)
+	}
+	afterAck, ok, err := s.GetSession(ctx, session.ID)
+	if err != nil || !ok {
+		t.Fatalf("read target after acknowledgement: ok=%v err=%v", ok, err)
+	}
+	if afterAck.Metadata.AgentSessionID != target.NativeSessionID || afterAck.Metadata.NativeTranscriptPath != target.TranscriptPath {
+		t.Fatalf("acknowledgement did not atomically promote target native identity: %+v", afterAck.Metadata)
 	}
 }
 

@@ -233,10 +233,24 @@ UPDATE sessions SET
     activity_state = sqlc.arg(activity_state),
     activity_last_at = sqlc.arg(activity_last_at),
     first_signal_at = sqlc.arg(first_signal_at),
-    agent_session_id = sqlc.arg(agent_session_id),
+    agent_session_id = CASE WHEN EXISTS (
+        SELECT 1 FROM agent_switches AS delivering_switch
+        WHERE delivering_switch.session_id = sessions.id
+          AND delivering_switch.state = 'delivering_context'
+          AND delivering_switch.target_harness = sessions.harness
+          AND delivering_switch.target_generation_id = sessions.runtime_launch_id
+          AND delivering_switch.target_acknowledged_at IS NULL
+    ) THEN sessions.agent_session_id ELSE sqlc.arg(agent_session_id) END,
     latest_user_prompt = sqlc.arg(latest_user_prompt),
     latest_assistant_update = sqlc.arg(latest_assistant_update),
-    native_transcript_path = sqlc.arg(native_transcript_path),
+    native_transcript_path = CASE WHEN EXISTS (
+        SELECT 1 FROM agent_switches AS delivering_switch
+        WHERE delivering_switch.session_id = sessions.id
+          AND delivering_switch.state = 'delivering_context'
+          AND delivering_switch.target_harness = sessions.harness
+          AND delivering_switch.target_generation_id = sessions.runtime_launch_id
+          AND delivering_switch.target_acknowledged_at IS NULL
+    ) THEN sessions.native_transcript_path ELSE sqlc.arg(native_transcript_path) END,
     updated_at = sqlc.arg(updated_at)
 WHERE sessions.id = sqlc.arg(id)
   AND sessions.is_terminated = 0
@@ -295,8 +309,6 @@ UPDATE sessions SET
     first_signal_at = NULL,
     runtime_handle_id = sqlc.arg(runtime_handle_id),
     runtime_launch_id = sqlc.arg(target_generation_id),
-    agent_session_id = sqlc.arg(target_native_session_id),
-    native_transcript_path = sqlc.arg(target_native_transcript_path),
     updated_at = sqlc.arg(activated_at)
 WHERE id = sqlc.arg(session_id)
   AND is_terminated = 0
@@ -304,6 +316,26 @@ WHERE id = sqlc.arg(session_id)
   AND harness = sqlc.arg(expected_source_harness)
   AND runtime_launch_id = sqlc.arg(expected_source_runtime_launch_id)
   AND activity_last_at <= sqlc.arg(activated_at);
+
+-- name: PromoteAcknowledgedAgentSwitchNativeSession :execrows
+UPDATE sessions SET
+    agent_session_id = sqlc.arg(target_native_session_id),
+    native_transcript_path = sqlc.arg(target_native_transcript_path),
+    updated_at = sqlc.arg(acknowledged_at)
+WHERE sessions.id = sqlc.arg(session_id)
+  AND sessions.is_terminated = 0
+  AND sessions.harness = sqlc.arg(target_harness)
+  AND sessions.runtime_launch_id = sqlc.arg(target_generation_id)
+  AND EXISTS (
+      SELECT 1
+      FROM agent_switches AS acknowledged_switch
+      WHERE acknowledged_switch.id = sqlc.arg(switch_id)
+        AND acknowledged_switch.session_id = sessions.id
+        AND acknowledged_switch.state = 'delivering_context'
+        AND acknowledged_switch.target_harness = sessions.harness
+        AND acknowledged_switch.target_generation_id = sessions.runtime_launch_id
+        AND acknowledged_switch.target_acknowledged_at = sqlc.arg(acknowledged_at)
+  );
 
 -- name: MarkAgentSwitchTargetReady :execrows
 UPDATE agent_switches SET

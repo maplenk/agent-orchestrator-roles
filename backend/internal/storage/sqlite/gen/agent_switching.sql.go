@@ -56,14 +56,12 @@ UPDATE sessions SET
     first_signal_at = NULL,
     runtime_handle_id = ?3,
     runtime_launch_id = ?4,
-    agent_session_id = ?5,
-    native_transcript_path = ?6,
     updated_at = ?2
-WHERE id = ?7
+WHERE id = ?5
   AND is_terminated = 0
   AND activity_state = 'exited'
-  AND harness = ?8
-  AND runtime_launch_id = ?9
+  AND harness = ?6
+  AND runtime_launch_id = ?7
   AND activity_last_at <= ?2
 `
 
@@ -72,8 +70,6 @@ type ActivateSessionAgentSwitchTargetParams struct {
 	ActivatedAt                   time.Time
 	RuntimeHandleID               string
 	TargetGenerationID            string
-	TargetNativeSessionID         string
-	TargetNativeTranscriptPath    string
 	SessionID                     domain.SessionID
 	ExpectedSourceHarness         domain.AgentHarness
 	ExpectedSourceRuntimeLaunchID string
@@ -85,8 +81,6 @@ func (q *Queries) ActivateSessionAgentSwitchTarget(ctx context.Context, arg Acti
 		arg.ActivatedAt,
 		arg.RuntimeHandleID,
 		arg.TargetGenerationID,
-		arg.TargetNativeSessionID,
-		arg.TargetNativeTranscriptPath,
 		arg.SessionID,
 		arg.ExpectedSourceHarness,
 		arg.ExpectedSourceRuntimeLaunchID,
@@ -770,6 +764,53 @@ func (q *Queries) MarkSessionAgentSwitchSourceStopped(ctx context.Context, arg M
 	return result.RowsAffected()
 }
 
+const promoteAcknowledgedAgentSwitchNativeSession = `-- name: PromoteAcknowledgedAgentSwitchNativeSession :execrows
+UPDATE sessions SET
+    agent_session_id = ?1,
+    native_transcript_path = ?2,
+    updated_at = ?3
+WHERE sessions.id = ?4
+  AND sessions.is_terminated = 0
+  AND sessions.harness = ?5
+  AND sessions.runtime_launch_id = ?6
+  AND EXISTS (
+      SELECT 1
+      FROM agent_switches AS acknowledged_switch
+      WHERE acknowledged_switch.id = ?7
+        AND acknowledged_switch.session_id = sessions.id
+        AND acknowledged_switch.state = 'delivering_context'
+        AND acknowledged_switch.target_harness = sessions.harness
+        AND acknowledged_switch.target_generation_id = sessions.runtime_launch_id
+        AND acknowledged_switch.target_acknowledged_at = ?3
+  )
+`
+
+type PromoteAcknowledgedAgentSwitchNativeSessionParams struct {
+	TargetNativeSessionID      string
+	TargetNativeTranscriptPath string
+	AcknowledgedAt             time.Time
+	SessionID                  domain.SessionID
+	TargetHarness              domain.AgentHarness
+	TargetGenerationID         string
+	SwitchID                   domain.AgentSwitchID
+}
+
+func (q *Queries) PromoteAcknowledgedAgentSwitchNativeSession(ctx context.Context, arg PromoteAcknowledgedAgentSwitchNativeSessionParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, promoteAcknowledgedAgentSwitchNativeSession,
+		arg.TargetNativeSessionID,
+		arg.TargetNativeTranscriptPath,
+		arg.AcknowledgedAt,
+		arg.SessionID,
+		arg.TargetHarness,
+		arg.TargetGenerationID,
+		arg.SwitchID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const requestAgentHandoff = `-- name: RequestAgentHandoff :execrows
 UPDATE agent_switches SET
     agent_handoff_status = 'requested',
@@ -934,10 +975,24 @@ UPDATE sessions SET
     activity_state = ?1,
     activity_last_at = ?2,
     first_signal_at = ?3,
-    agent_session_id = ?4,
+    agent_session_id = CASE WHEN EXISTS (
+        SELECT 1 FROM agent_switches AS delivering_switch
+        WHERE delivering_switch.session_id = sessions.id
+          AND delivering_switch.state = 'delivering_context'
+          AND delivering_switch.target_harness = sessions.harness
+          AND delivering_switch.target_generation_id = sessions.runtime_launch_id
+          AND delivering_switch.target_acknowledged_at IS NULL
+    ) THEN sessions.agent_session_id ELSE ?4 END,
     latest_user_prompt = ?5,
     latest_assistant_update = ?6,
-    native_transcript_path = ?7,
+    native_transcript_path = CASE WHEN EXISTS (
+        SELECT 1 FROM agent_switches AS delivering_switch
+        WHERE delivering_switch.session_id = sessions.id
+          AND delivering_switch.state = 'delivering_context'
+          AND delivering_switch.target_harness = sessions.harness
+          AND delivering_switch.target_generation_id = sessions.runtime_launch_id
+          AND delivering_switch.target_acknowledged_at IS NULL
+    ) THEN sessions.native_transcript_path ELSE ?7 END,
     updated_at = ?8
 WHERE sessions.id = ?9
   AND sessions.is_terminated = 0
