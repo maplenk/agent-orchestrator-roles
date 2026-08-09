@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"database/sql"
+	"errors"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -42,7 +44,19 @@ func seedGooseLedger(t *testing.T, db *sql.DB, versions ...int64) {
 // the first n fork migrations to match.
 func seedForkSchema(t *testing.T, db *sql.DB, n int) {
 	t.Helper()
-	if _, err := db.Exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY)`); err != nil {
+	seedForkSchemaWithMuse(t, db, n, false)
+}
+
+func seedForkSchemaWithMuse(t *testing.T, db *sql.DB, n int, muse bool) {
+	t.Helper()
+	sessionsSQL := `CREATE TABLE sessions (id TEXT PRIMARY KEY)`
+	if muse {
+		sessionsSQL = `CREATE TABLE sessions (
+			id TEXT PRIMARY KEY,
+			harness TEXT NOT NULL DEFAULT '' CHECK (harness IN ('', 'muse'))
+		)`
+	}
+	if _, err := db.Exec(sessionsSQL); err != nil {
 		t.Fatal(err)
 	}
 	steps := []string{
@@ -76,6 +90,48 @@ func seedForkSchema(t *testing.T, db *sql.DB, n int) {
 	}
 }
 
+type gooseLedgerRow struct {
+	ID        int64
+	Version   int64
+	Applied   bool
+	Timestamp string
+}
+
+func exactLedgerRows(t *testing.T, db *sql.DB) []gooseLedgerRow {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT id, version_id, is_applied, COALESCE(CAST(tstamp AS TEXT), '')
+		FROM goose_db_version
+		ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []gooseLedgerRow
+	for rows.Next() {
+		var row gooseLedgerRow
+		if err := rows.Scan(&row.ID, &row.Version, &row.Applied, &row.Timestamp); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func exactVersionRows(t *testing.T, db *sql.DB, version int64) []gooseLedgerRow {
+	t.Helper()
+	var out []gooseLedgerRow
+	for _, row := range exactLedgerRows(t, db) {
+		if row.Version == version {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
 func ledger(t *testing.T, db *sql.DB) map[int64]bool {
 	t.Helper()
 	rows, err := db.Query(`SELECT version_id, is_applied FROM goose_db_version ORDER BY id`)
@@ -104,7 +160,10 @@ func ledger(t *testing.T, db *sql.DB) map[int64]bool {
 func TestForkRepairFullHistory(t *testing.T) {
 	db := openRaw(t)
 	seedGooseLedger(t, db, 52, 53, 54, 55, 56, 57, 58, 59, 60)
-	seedForkSchema(t, db, 8)
+	// The complete stale 53-60 block wins even when the table also contains
+	// Muse text; otherwise the old fork identities would remain in upstream's
+	// range and cause silent skips.
+	seedForkSchemaWithMuse(t, db, 8, true)
 
 	if err := repairForkMigrationVersions(db); err != nil {
 		t.Fatalf("repair: %v", err)
@@ -190,7 +249,9 @@ func TestForkRepairMixedOriginalAndRenumberedHistory(t *testing.T) {
 		42, 43, 44, 45, 46, 47, 48, 49,
 		52, 53, 54, 55, 56, 57, 58, 59, 60,
 	)
-	seedForkSchema(t, db, 8)
+	// A complete stale second block is still authoritative when Muse text is
+	// physically present; all 53-60 identities must be freed together.
+	seedForkSchemaWithMuse(t, db, 8, true)
 
 	if err := repairForkMigrationVersions(db); err != nil {
 		t.Fatalf("repair: %v", err)
@@ -221,6 +282,153 @@ func TestForkRepairMixedOriginalAndRenumberedHistory(t *testing.T) {
 		if count != 1 {
 			t.Errorf("version %d recorded %d times, want exactly once", v, count)
 		}
+	}
+
+	firstRepair := exactLedgerRows(t, db)
+	if err := repairForkMigrationVersions(db); err != nil {
+		t.Fatalf("second repair: %v", err)
+	}
+	if got := exactLedgerRows(t, db); !reflect.DeepEqual(got, firstRepair) {
+		t.Fatalf("complete stale-block repair changed on second pass:\nfirst: %#v\nsecond: %#v", firstRepair, got)
+	}
+}
+
+// The complete original fork range can coexist with upstream's genuine Muse
+// migration at 53. Classification must happen from the full on-entry block:
+// inserting 9000 from 42 must not turn the later Muse row into stale fork 53.
+func TestForkRepairOriginal42HistoryRetainsLoneMuseRow(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db, 42, 43, 44, 45, 46, 47, 48, 49, 53)
+	seedForkSchemaWithMuse(t, db, 8, true)
+	originalMuse := exactVersionRows(t, db, 53)
+	if len(originalMuse) != 1 {
+		t.Fatalf("seeded Muse rows = %#v, want exactly one", originalMuse)
+	}
+
+	for pass := 1; pass <= 3; pass++ {
+		if err := repairForkMigrationVersions(db); err != nil {
+			t.Fatalf("repair pass %d: %v", pass, err)
+		}
+		if got := exactVersionRows(t, db, 53); !reflect.DeepEqual(got, originalMuse) {
+			t.Fatalf("repair pass %d replaced genuine Muse row:\noriginal: %#v\ngot: %#v", pass, originalMuse, got)
+		}
+	}
+
+	got := ledger(t, db)
+	for v := int64(42); v <= 49; v++ {
+		if !got[v] {
+			t.Errorf("upstream-reclaimed version %d was removed", v)
+		}
+	}
+	for v := int64(54); v <= 60; v++ {
+		if got[v] {
+			t.Errorf("unexpected legacy version %d was invented", v)
+		}
+	}
+	for v := int64(9000); v <= 9007; v++ {
+		if !got[v] {
+			t.Errorf("role migration %d was not repaired", v)
+		}
+		if rows := exactVersionRows(t, db, v); len(rows) != 1 {
+			t.Errorf("role migration %d rows = %#v, want exactly one", v, rows)
+		}
+	}
+}
+
+func TestForkRepairRefusesAmbiguousPartialSecondBlockBeforeMutation(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db, 42, 43, 44, 45, 46, 47, 48, 49, 53, 54)
+	seedForkSchemaWithMuse(t, db, 8, true)
+	before := exactLedgerRows(t, db)
+
+	err := repairForkMigrationVersions(db)
+	if !errors.Is(err, errForkMigrationHistoryAmbiguous) {
+		t.Fatalf("repair error = %v, want %v", err, errForkMigrationHistoryAmbiguous)
+	}
+	if got := exactLedgerRows(t, db); !reflect.DeepEqual(got, before) {
+		t.Fatalf("ambiguous repair mutated ledger:\nbefore: %#v\nafter: %#v", before, got)
+	}
+	for v := int64(9000); v <= 9007; v++ {
+		if rows := exactVersionRows(t, db, v); len(rows) != 0 {
+			t.Errorf("ambiguous repair leaked version %d rows: %#v", v, rows)
+		}
+	}
+}
+
+func TestForkRepairRefusesLone53WithoutMuseEffectBeforeMutation(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db, 42, 43, 44, 45, 46, 47, 48, 49, 53)
+	seedForkSchema(t, db, 8)
+	before := exactLedgerRows(t, db)
+
+	err := repairForkMigrationVersions(db)
+	if !errors.Is(err, errForkMigrationHistoryAmbiguous) {
+		t.Fatalf("repair error = %v, want %v", err, errForkMigrationHistoryAmbiguous)
+	}
+	if got := exactLedgerRows(t, db); !reflect.DeepEqual(got, before) {
+		t.Fatalf("ambiguous repair mutated ledger:\nbefore: %#v\nafter: %#v", before, got)
+	}
+}
+
+func TestForkRepairRefusesLoneMuseWhenForkSchemaIsIncomplete(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db, 42, 43, 44, 45, 46, 47, 48, 49, 53)
+	// Seven physical effects are present, but pause_json is missing. Falling
+	// back to pairwise repair would still map 42 and delete genuine Muse 53.
+	seedForkSchemaWithMuse(t, db, 7, true)
+	before := exactLedgerRows(t, db)
+
+	err := repairForkMigrationVersions(db)
+	if !errors.Is(err, errForkMigrationHistoryAmbiguous) {
+		t.Fatalf("repair error = %v, want %v", err, errForkMigrationHistoryAmbiguous)
+	}
+	if got := exactLedgerRows(t, db); !reflect.DeepEqual(got, before) {
+		t.Fatalf("incomplete-schema ambiguity mutated ledger:\nbefore: %#v\nafter: %#v", before, got)
+	}
+}
+
+func TestForkRepairRefusesPartialNewMaskBeforeMutation(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db,
+		42, 43, 44, 45, 46, 47, 48, 49,
+		53, 54, 55, 56, 57, 58, 59, 60,
+		9000,
+	)
+	seedForkSchemaWithMuse(t, db, 8, true)
+	before := exactLedgerRows(t, db)
+
+	err := repairForkMigrationVersions(db)
+	if !errors.Is(err, errForkMigrationHistoryAmbiguous) {
+		t.Fatalf("repair error = %v, want %v", err, errForkMigrationHistoryAmbiguous)
+	}
+	if got := exactLedgerRows(t, db); !reflect.DeepEqual(got, before) {
+		t.Fatalf("partial-new-mask ambiguity mutated ledger:\nbefore: %#v\nafter: %#v", before, got)
+	}
+}
+
+func TestForkRepairRollsBackInsertWhenDeleteFails(t *testing.T) {
+	db := openRaw(t)
+	seedGooseLedger(t, db, 53, 54, 55, 56, 57, 58, 59, 60)
+	seedForkSchema(t, db, 8)
+	if _, err := db.Exec(`
+		CREATE TRIGGER refuse_fork_53_delete
+		BEFORE DELETE ON goose_db_version
+		WHEN OLD.version_id = 53
+		BEGIN
+			SELECT RAISE(ABORT, 'forced fork-ledger delete failure');
+		END`); err != nil {
+		t.Fatalf("create delete trigger: %v", err)
+	}
+	before := exactLedgerRows(t, db)
+
+	if err := repairForkMigrationVersions(db); err == nil {
+		t.Fatal("repair succeeded despite forced DELETE failure")
+	}
+	if got := exactLedgerRows(t, db); !reflect.DeepEqual(got, before) {
+		t.Fatalf("failed repair did not roll back prior insert:\nbefore: %#v\nafter: %#v", before, got)
+	}
+	if rows := exactVersionRows(t, db, 9000); len(rows) != 0 {
+		t.Fatalf("failed repair leaked inserted 9000 row: %#v", rows)
 	}
 }
 

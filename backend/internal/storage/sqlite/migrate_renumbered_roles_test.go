@@ -3,8 +3,10 @@ package sqlite
 import (
 	"database/sql"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/pressly/goose/v3"
 )
@@ -48,6 +50,10 @@ func TestOldRolesDatabaseRepairsBothMigrationIdentities(t *testing.T) {
 			t.Fatalf("rewrite version %d -> %d: %v", newV, oldV, err)
 		}
 	}
+	originalMuse := exactVersionRows(t, db, 53)
+	if len(originalMuse) != 1 {
+		t.Fatalf("pre-repair Muse rows = %#v, want exactly one", originalMuse)
+	}
 
 	// Now migrate as a daemon would on that machine. It must repair rather than
 	// relying on a duplicate-column failure as a safety net.
@@ -61,10 +67,13 @@ func TestOldRolesDatabaseRepairsBothMigrationIdentities(t *testing.T) {
 			t.Errorf("upstream-reclaimed version %d was removed", v)
 		}
 	}
-	for v := int64(9000); v <= 9007; v++ {
+	for v := int64(9000); v <= 9008; v++ {
 		if !got[v] {
 			t.Errorf("role migration %d was not repaired", v)
 		}
+	}
+	if repairedMuse := exactVersionRows(t, db, 53); !reflect.DeepEqual(repairedMuse, originalMuse) {
+		t.Fatalf("migration replaced genuine Muse ledger row:\noriginal: %#v\nrepaired: %#v", originalMuse, repairedMuse)
 	}
 
 	var pinnedColumns, catalogTables int
@@ -76,6 +85,21 @@ func TestOldRolesDatabaseRepairsBothMigrationIdentities(t *testing.T) {
 	}
 	if pinnedColumns != 1 || catalogTables != 1 {
 		t.Fatalf("upstream schema after repair: sessions.is_pinned=%d agent_model_catalog=%d, want 1 each", pinnedColumns, catalogTables)
+	}
+	if _, err := db.Exec(`
+INSERT INTO projects (id, path, registered_at, config)
+VALUES ('muse-repair', '/repo/muse-repair', ?, '{}');
+INSERT INTO sessions (id, project_id, num, harness, activity_last_at, created_at, updated_at)
+VALUES ('muse-repair-1', 'muse-repair', 1, 'muse', ?, ?, ?);
+`, time.Unix(100, 0).UTC(), time.Unix(101, 0).UTC(), time.Unix(101, 0).UTC(), time.Unix(101, 0).UTC()); err != nil {
+		t.Fatalf("insert Muse session after mixed-history repair: %v", err)
+	}
+	var integrity string
+	if err := db.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
+		t.Fatalf("integrity_check: %v", err)
+	}
+	if integrity != "ok" {
+		t.Fatalf("integrity_check = %q, want ok", integrity)
 	}
 }
 
