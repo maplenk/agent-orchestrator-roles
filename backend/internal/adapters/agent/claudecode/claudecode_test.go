@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -68,6 +69,28 @@ func TestNativeConversationExistsRequiresPersistedClaudeTranscript(t *testing.T)
 		map[string]string{"CLAUDE_CONFIG_DIR": configDir})
 	if err != nil || !exists {
 		t.Fatalf("session env transcript lookup: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestNativeConversationExistsExplicitEmptyConfigUsesChildHome(t *testing.T) {
+	p := &Plugin{}
+	id := claudeSessionUUID("ao-session-explicit-default")
+	childHome := t.TempDir()
+	projectDir := filepath.Join(childHome, ".claude", "projects", "encoded-workspace")
+	if err := os.MkdirAll(projectDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, id+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(claudeConfigDirEnv, filepath.Join(t.TempDir(), "daemon-profile"))
+
+	exists, err := p.NativeConversationExists(context.Background(), ports.SessionRef{}, id, map[string]string{
+		claudeConfigDirEnv: "",
+		"HOME":             childHome,
+	})
+	if err != nil || !exists {
+		t.Fatalf("NativeConversationExists = (%v, %v), want child HOME transcript", exists, err)
 	}
 }
 
@@ -313,6 +336,19 @@ func TestNativeSessionConfigDirUsesRuntimeOverride(t *testing.T) {
 	}
 }
 
+func TestNativeSessionConfigDirUsesExactDaemonOverrideWhenRuntimeDoesNotOverride(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "claude profile with spaces")
+	t.Setenv(claudeConfigDirEnv, dir)
+
+	got, err := (&Plugin{}).NativeSessionConfigDir(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dir {
+		t.Fatalf("config dir = %q, want exact daemon override %q", got, dir)
+	}
+}
+
 func TestNativeSessionConfigDirExplicitEmptyIgnoresDaemonOverride(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(claudeConfigDirEnv, filepath.Join(t.TempDir(), "daemon-claude-profile"))
@@ -336,20 +372,35 @@ func TestLocateAndProbeNativeSessionTranscript(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(transcript), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	ref := ports.NativeSessionRef{NativeSessionID: sessionID, ConfigDir: configDir}
 	p := &Plugin{}
 	path, ok, err := p.LocateTranscript(context.Background(), ref)
+	if err != nil || ok || path != "" {
+		t.Fatalf("empty LocateTranscript = (%q, %v, %v), want no readable transcript", path, ok, err)
+	}
+	availability, err := p.ProbeNativeSession(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if availability != ports.NativeSessionAvailabilityUnavailable {
+		t.Fatalf("empty availability = %q, want unavailable", availability)
+	}
+
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, ok, err = p.LocateTranscript(context.Background(), ref)
 	if err != nil || !ok {
 		t.Fatalf("LocateTranscript = (%q, %v, %v), want transcript", path, ok, err)
 	}
 	if path != transcript {
 		t.Fatalf("path = %q, want %q", path, transcript)
 	}
-	availability, err := p.ProbeNativeSession(context.Background(), ref)
+	availability, err = p.ProbeNativeSession(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,6 +427,27 @@ func TestProbeNativeSessionUnknownWithoutConfigDir(t *testing.T) {
 	}
 	if availability != ports.NativeSessionAvailabilityUnknown {
 		t.Fatalf("availability = %q, want unknown", availability)
+	}
+}
+
+func TestProbeNativeSessionHonorsCanceledContextWithoutConfigDir(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	availability, err := (&Plugin{}).ProbeNativeSession(ctx, ports.NativeSessionRef{
+		NativeSessionID: "019f9f7c-53c0-7f10-8d56-a8a979dd7001",
+	})
+	if availability != ports.NativeSessionAvailabilityUnknown || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProbeNativeSession = (%q, %v), want (unknown, context canceled)", availability, err)
+	}
+}
+
+func TestProbeNativeSessionInvalidIDIsUnknownNotUnavailable(t *testing.T) {
+	availability, err := (&Plugin{}).ProbeNativeSession(context.Background(), ports.NativeSessionRef{
+		NativeSessionID: "not-a-claude-uuid",
+		ConfigDir:       t.TempDir(),
+	})
+	if availability != ports.NativeSessionAvailabilityUnknown || err == nil {
+		t.Fatalf("ProbeNativeSession = (%q, %v), want (unknown, validation error)", availability, err)
 	}
 }
 

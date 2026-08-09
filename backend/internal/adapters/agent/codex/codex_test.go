@@ -3,6 +3,7 @@ package codex
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -117,6 +118,29 @@ func TestNativeConversationExistsRequiresActivePersistedCodexRollout(t *testing.
 	}
 }
 
+func TestNativeConversationExistsExplicitEmptyConfigUsesChildHome(t *testing.T) {
+	p := &Plugin{}
+	id := "019fc430-1234-7abc-8def-0123456789ab"
+	childHome := t.TempDir()
+	activeDir := filepath.Join(childHome, ".codex", "sessions", "2026", "08", "08")
+	if err := os.MkdirAll(activeDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	rollout := filepath.Join(activeDir, "rollout-2026-08-08T10-00-00-"+id+".jsonl")
+	if err := os.WriteFile(rollout, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexHomeEnv, filepath.Join(t.TempDir(), "daemon-home"))
+
+	exists, err := p.NativeConversationExists(context.Background(), ports.SessionRef{}, id, map[string]string{
+		codexHomeEnv: "",
+		"HOME":       childHome,
+	})
+	if err != nil || !exists {
+		t.Fatalf("NativeConversationExists = (%v, %v), want child HOME rollout", exists, err)
+	}
+}
+
 // canonicalTempDir returns a t.TempDir() with symlinks resolved so the
 // workspace trust flag collapses to a single predictable entry (macOS TempDir
 // lives under a /var -> /private/var symlink).
@@ -210,6 +234,19 @@ func TestNativeSessionConfigDirUsesRuntimeOverride(t *testing.T) {
 	}
 }
 
+func TestNativeSessionConfigDirUsesExactDaemonOverrideWhenRuntimeDoesNotOverride(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "codex home with spaces")
+	t.Setenv(codexHomeEnv, dir)
+
+	got, err := (&Plugin{}).NativeSessionConfigDir(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != dir {
+		t.Fatalf("config dir = %q, want exact daemon override %q", got, dir)
+	}
+}
+
 func TestNativeSessionConfigDirExplicitEmptyIgnoresDaemonOverride(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv(codexHomeEnv, filepath.Join(t.TempDir(), "daemon-codex-home"))
@@ -233,25 +270,90 @@ func TestLocateAndProbeNativeSessionTranscript(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(transcript), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	ref := ports.NativeSessionRef{NativeSessionID: sessionID, ConfigDir: configDir}
 	p := &Plugin{}
 	path, ok, err := p.LocateTranscript(context.Background(), ref)
+	if err != nil || ok || path != "" {
+		t.Fatalf("empty LocateTranscript = (%q, %v, %v), want no readable transcript", path, ok, err)
+	}
+	availability, err := p.ProbeNativeSession(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if availability != ports.NativeSessionAvailabilityUnavailable {
+		t.Fatalf("empty availability = %q, want unavailable", availability)
+	}
+
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path, ok, err = p.LocateTranscript(context.Background(), ref)
 	if err != nil || !ok {
 		t.Fatalf("LocateTranscript = (%q, %v, %v), want transcript", path, ok, err)
 	}
 	if path != transcript {
 		t.Fatalf("path = %q, want %q", path, transcript)
 	}
-	availability, err := p.ProbeNativeSession(context.Background(), ref)
+	availability, err = p.ProbeNativeSession(context.Background(), ref)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if availability != ports.NativeSessionAvailabilityAvailable {
 		t.Fatalf("availability = %q, want available", availability)
+	}
+}
+
+func TestCompressedActiveSessionIsResumableButNotReadableTranscript(t *testing.T) {
+	configDir := t.TempDir()
+	sessionID := "019f9f7c-53c0-7f10-8d56-a8a979dd7001"
+	compressed := filepath.Join(configDir, "sessions", "2026", "08", "04", "rollout-2026-08-04T00-00-00-"+sessionID+".jsonl.zst")
+	if err := os.MkdirAll(filepath.Dir(compressed), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(compressed, []byte("compressed provider state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ref := ports.NativeSessionRef{NativeSessionID: sessionID, ConfigDir: configDir}
+	p := &Plugin{}
+	availability, err := p.ProbeNativeSession(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if availability != ports.NativeSessionAvailabilityAvailable {
+		t.Fatalf("compressed availability = %q, want available", availability)
+	}
+	path, ok, err := p.LocateTranscript(context.Background(), ref)
+	if err != nil || ok || path != "" {
+		t.Fatalf("compressed LocateTranscript = (%q, %v, %v), want no readable transcript", path, ok, err)
+	}
+}
+
+func TestCodexTranscriptNameMatchingIsExact(t *testing.T) {
+	id := "019f9f7c-53c0-7f10-8d56-a8a979dd7001"
+	tests := []struct {
+		name              string
+		file              string
+		includeCompressed bool
+		want              bool
+	}{
+		{name: "plain rollout", file: "rollout-2026-08-04T00-00-00-" + id + ".jsonl", want: true},
+		{name: "compressed resume state", file: "rollout-2026-08-04T00-00-00-" + id + ".jsonl.zst", includeCompressed: true, want: true},
+		{name: "compressed is not readable transcript", file: "rollout-2026-08-04T00-00-00-" + id + ".jsonl.zst", want: false},
+		{name: "foreign prefix", file: "copy-2026-08-04T00-00-00-" + id + ".jsonl", want: false},
+		{name: "adjacent id", file: "rollout-2026-08-04T00-00-00-x" + id + ".jsonl", want: false},
+		{name: "trailing suffix", file: "rollout-2026-08-04T00-00-00-" + id + ".jsonl.bak", includeCompressed: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := codexTranscriptNameMatches(tt.file, id, tt.includeCompressed); got != tt.want {
+				t.Fatalf("codexTranscriptNameMatches(%q, compressed=%v) = %v, want %v", tt.file, tt.includeCompressed, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -290,6 +392,27 @@ func TestProbeNativeSessionUnknownWithoutConfigDir(t *testing.T) {
 	}
 	if availability != ports.NativeSessionAvailabilityUnknown {
 		t.Fatalf("availability = %q, want unknown", availability)
+	}
+}
+
+func TestProbeNativeSessionHonorsCanceledContextWithoutConfigDir(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	availability, err := (&Plugin{}).ProbeNativeSession(ctx, ports.NativeSessionRef{
+		NativeSessionID: "019f9f7c-53c0-7f10-8d56-a8a979dd7001",
+	})
+	if availability != ports.NativeSessionAvailabilityUnknown || !errors.Is(err, context.Canceled) {
+		t.Fatalf("ProbeNativeSession = (%q, %v), want (unknown, context canceled)", availability, err)
+	}
+}
+
+func TestProbeNativeSessionInvalidIDIsUnknownNotUnavailable(t *testing.T) {
+	availability, err := (&Plugin{}).ProbeNativeSession(context.Background(), ports.NativeSessionRef{
+		NativeSessionID: "not-a-codex-uuid",
+		ConfigDir:       t.TempDir(),
+	})
+	if availability != ports.NativeSessionAvailabilityUnknown || err == nil {
+		t.Fatalf("ProbeNativeSession = (%q, %v), want (unknown, validation error)", availability, err)
 	}
 }
 

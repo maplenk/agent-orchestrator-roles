@@ -84,6 +84,7 @@ var _ adapters.Adapter = (*Plugin)(nil)
 var _ ports.Agent = (*Plugin)(nil)
 var _ ports.AgentAuthChecker = (*Plugin)(nil)
 var _ ports.AgentSessionIDAllocator = (*Plugin)(nil)
+var _ ports.SubmitActivitySignaler = (*Plugin)(nil)
 var _ ports.EmptyComposerDetector = (*Plugin)(nil)
 var _ ports.AgentInterfaceHandoff = (*Plugin)(nil)
 var _ ports.AgentInterfaceHandoffHistoryProbe = (*Plugin)(nil)
@@ -370,43 +371,18 @@ func (p *Plugin) NativeConversationExists(
 	if !isUUID(id) {
 		return false, nil
 	}
-	configDir := strings.TrimSpace(env["CLAUDE_CONFIG_DIR"])
-	if configDir == "" {
-		configDir = strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR"))
-	}
-	if configDir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return false, fmt.Errorf("claude-code: resolve transcript root: %w", err)
-		}
-		configDir = filepath.Join(home, ".claude")
-	}
-	projectsDir := filepath.Join(configDir, "projects")
-	projects, err := os.ReadDir(projectsDir)
-	if os.IsNotExist(err) {
-		return false, nil
-	}
+	configDir, err := p.NativeSessionConfigDir(ctx, env)
 	if err != nil {
-		return false, fmt.Errorf("claude-code: read transcript root %s: %w", projectsDir, err)
+		return false, err
 	}
-	for _, project := range projects {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		if !project.IsDir() {
-			continue
-		}
-		info, err := os.Stat(filepath.Join(projectsDir, project.Name(), id+".jsonl"))
-		switch {
-		case err == nil && info.Mode().IsRegular() && info.Size() > 0:
-			return true, nil
-		case err == nil, os.IsNotExist(err):
-			continue
-		default:
-			return false, fmt.Errorf("claude-code: inspect transcript for %s: %w", id, err)
-		}
+	availability, err := p.ProbeNativeSession(ctx, ports.NativeSessionRef{
+		NativeSessionID: id,
+		ConfigDir:       configDir,
+	})
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+	return availability == ports.NativeSessionAvailabilityAvailable, nil
 }
 
 func isUUID(value string) bool {

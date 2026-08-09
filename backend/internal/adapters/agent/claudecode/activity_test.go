@@ -48,3 +48,21 @@ func TestDeriveActivityState(t *testing.T) {
 		})
 	}
 }
+
+func TestContinuationAcknowledgementHookContract(t *testing.T) {
+	p := &Plugin{}
+	if !p.EmitsSubmitActivity() {
+		t.Fatal("Claude continuation requires submit activity acknowledgement")
+	}
+	state, ok := DeriveActivityState("user-prompt-submit", nil)
+	if !ok || state != domain.ActivityActive {
+		t.Fatalf("user-prompt-submit = (%q, %v), want (active, true)", state, ok)
+	}
+	wantCommand := "ao hooks claude-code user-prompt-submit"
+	for _, spec := range claudeManagedHooks {
+		if spec.Event == "UserPromptSubmit" && spec.Command == wantCommand && spec.Matcher == nil {
+			return
+		}
+	}
+	t.Fatalf("managed hooks do not contain exact unfiltered acknowledgement command %q", wantCommand)
+}

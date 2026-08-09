@@ -59,6 +59,9 @@ func (p *Plugin) NativeSessionConfigDir(ctx context.Context, env map[string]stri
 // backing state for --resume. Claude stores one <session-id>.jsonl below a
 // workspace directory in <config>/projects.
 func (p *Plugin) ProbeNativeSession(ctx context.Context, ref ports.NativeSessionRef) (ports.NativeSessionAvailability, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.NativeSessionAvailabilityUnknown, err
+	}
 	if strings.TrimSpace(ref.ConfigDir) == "" {
 		return ports.NativeSessionAvailabilityUnknown, nil
 	}
@@ -107,8 +110,10 @@ func (p *Plugin) LocateTranscript(ctx context.Context, ref ports.NativeSessionRe
 		path := filepath.Join(projectsDir, project.Name(), sessionID+".jsonl")
 		info, err := os.Stat(path)
 		switch {
-		case err == nil && info.Mode().IsRegular():
+		case err == nil && info.Mode().IsRegular() && info.Size() > 0:
 			return path, true, nil
+		case err == nil:
+			continue
 		case errors.Is(err, os.ErrNotExist):
 			continue
 		case err != nil:

@@ -9,7 +9,6 @@ package codex
 import (
 	"context"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,6 +70,7 @@ var _ ports.ActiveTurnSteerer = (*Plugin)(nil)
 var _ ports.AgentAuthChecker = (*Plugin)(nil)
 var _ ports.AgentInterfaceHandoff = (*Plugin)(nil)
 var _ ports.AgentInterfaceHandoffHistoryProbe = (*Plugin)(nil)
+var _ ports.SubmitActivitySignaler = (*Plugin)(nil)
 var _ ports.TerminalActivityDetector = (*Plugin)(nil)
 var _ ports.EmptyComposerDetector = (*Plugin)(nil)
 
@@ -245,47 +245,18 @@ func (p *Plugin) NativeConversationExists(
 	if !valid {
 		return false, nil
 	}
-	codexHome := strings.TrimSpace(env["CODEX_HOME"])
-	if codexHome == "" {
-		codexHome = strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	}
-	if codexHome == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return false, fmt.Errorf("codex: resolve rollout root: %w", err)
-		}
-		codexHome = filepath.Join(home, ".codex")
-	}
-
-	found := false
-	sessionsDir := filepath.Join(codexHome, "sessions")
-	err := filepath.WalkDir(sessionsDir, func(_ string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if entry.IsDir() || !codexRolloutNameMatches(entry.Name(), id) {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode().IsRegular() && info.Size() > 0 {
-			found = true
-			return fs.SkipAll
-		}
-		return nil
-	})
-	if os.IsNotExist(err) {
-		return false, nil
-	}
+	codexHome, err := p.NativeSessionConfigDir(ctx, env)
 	if err != nil {
-		return false, fmt.Errorf("codex: inspect rollout root %s: %w", sessionsDir, err)
+		return false, err
 	}
-	return found, nil
+	availability, err := p.ProbeNativeSession(ctx, ports.NativeSessionRef{
+		NativeSessionID: id,
+		ConfigDir:       codexHome,
+	})
+	if err != nil {
+		return false, err
+	}
+	return availability == ports.NativeSessionAvailabilityAvailable, nil
 }
 
 func canonicalCodexThreadID(value string) (string, bool) {
@@ -294,14 +265,6 @@ func canonicalCodexThreadID(value string) (string, bool) {
 		return "", false
 	}
 	return parsed.String(), true
-}
-
-func codexRolloutNameMatches(name, nativeConversationID string) bool {
-	if !strings.HasPrefix(name, "rollout-") {
-		return false
-	}
-	suffix := "-" + nativeConversationID + ".jsonl"
-	return strings.HasSuffix(name, suffix) || strings.HasSuffix(name, suffix+".zst")
 }
 
 // AuthStatus checks Codex's local login state without making a model call.

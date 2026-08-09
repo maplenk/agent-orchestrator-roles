@@ -48,6 +48,9 @@ func (p *Plugin) NativeSessionConfigDir(ctx context.Context, env map[string]stri
 // archived transcript remains useful handoff context but is not treated as a
 // resumable active conversation.
 func (p *Plugin) ProbeNativeSession(ctx context.Context, ref ports.NativeSessionRef) (ports.NativeSessionAvailability, error) {
+	if err := ctx.Err(); err != nil {
+		return ports.NativeSessionAvailabilityUnknown, err
+	}
 	if strings.TrimSpace(ref.ConfigDir) == "" {
 		return ports.NativeSessionAvailabilityUnknown, nil
 	}
@@ -55,7 +58,7 @@ func (p *Plugin) ProbeNativeSession(ctx context.Context, ref ports.NativeSession
 	if err != nil {
 		return ports.NativeSessionAvailabilityUnknown, err
 	}
-	_, ok, err := findCodexTranscript(ctx, filepath.Join(ref.ConfigDir, "sessions"), sessionID)
+	_, ok, err := findCodexTranscript(ctx, filepath.Join(ref.ConfigDir, "sessions"), sessionID, true)
 	if err != nil {
 		return ports.NativeSessionAvailabilityUnknown, err
 	}
@@ -81,7 +84,7 @@ func (p *Plugin) LocateTranscript(ctx context.Context, ref ports.NativeSessionRe
 		return "", false, nil
 	}
 	for _, dir := range []string{"sessions", "archived_sessions"} {
-		path, ok, err := findCodexTranscript(ctx, filepath.Join(configDir, dir), sessionID)
+		path, ok, err := findCodexTranscript(ctx, filepath.Join(configDir, dir), sessionID, false)
 		if err != nil {
 			return "", false, err
 		}
@@ -92,7 +95,7 @@ func (p *Plugin) LocateTranscript(ctx context.Context, ref ports.NativeSessionRe
 	return "", false, nil
 }
 
-func findCodexTranscript(ctx context.Context, root, sessionID string) (string, bool, error) {
+func findCodexTranscript(ctx context.Context, root, sessionID string, includeCompressed bool) (string, bool, error) {
 	var found string
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
@@ -101,7 +104,14 @@ func findCodexTranscript(ctx context.Context, root, sessionID string) (string, b
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), "-"+sessionID+".jsonl") {
+		if !entry.Type().IsRegular() || !codexTranscriptNameMatches(entry.Name(), sessionID, includeCompressed) {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Size() > 0 {
 			found = path
 			return fs.SkipAll
 		}
@@ -116,9 +126,18 @@ func findCodexTranscript(ctx context.Context, root, sessionID string) (string, b
 	return found, found != "", nil
 }
 
+func codexTranscriptNameMatches(name, sessionID string, includeCompressed bool) bool {
+	if !strings.HasPrefix(name, "rollout-") {
+		return false
+	}
+	suffix := "-" + sessionID + ".jsonl"
+	return strings.HasSuffix(name, suffix) ||
+		(includeCompressed && strings.HasSuffix(name, suffix+".zst"))
+}
+
 func validateCodexNativeSessionID(value string) (string, error) {
-	value = strings.TrimSpace(value)
-	if value == "" || len(value) > 256 || strings.ContainsAny(value, `/\\`+"\x00") {
+	value, valid := canonicalCodexThreadID(value)
+	if !valid {
 		return "", fmt.Errorf("codex: invalid native session id")
 	}
 	return value, nil
