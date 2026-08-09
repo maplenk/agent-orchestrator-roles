@@ -99,7 +99,7 @@ describe("TaskComposer", () => {
 		);
 
 		expect(task()).toHaveAttribute("placeholder", "e.g. Fix the flaky checkout test (optional)…");
-		expect(screen.getByRole("button", { name: "Start task" })).toBeEnabled();
+		await waitFor(() => expect(screen.getByRole("button", { name: "Start task" })).toBeEnabled());
 		fireEvent.click(screen.getByText("Start task"));
 
 		await waitFor(() =>
@@ -125,14 +125,14 @@ describe("TaskComposer", () => {
 		expect(task()).toHaveValue("Investigate the failure");
 	});
 
-	it("keeps agent and model in equal stable toolbar tracks", () => {
+	it("keeps agent and model in equal stable toolbar tracks", async () => {
 		render(
 			<Wrap>
 				<TaskComposer projectId="proj-1" onCreated={vi.fn()} />
 			</Wrap>,
 		);
 
-		const runControls = screen.getByRole("group", { name: "Runs with" });
+		const runControls = await screen.findByRole("group", { name: "Runs with" });
 		expect(runControls).toHaveClass("composer-run-controls");
 		expect(runControls.closest(".composer-toolbar")).not.toBeNull();
 		expect(runControls.querySelectorAll(".composer-toolbar-slot")).toHaveLength(2);
@@ -244,6 +244,7 @@ describe("TaskComposer", () => {
 			target: { files: [new File([new Uint8Array([1, 2, 3])], "slow.txt", { type: "text/plain" })] },
 		});
 		fireEvent.change(task(), { target: { value: "Use the slow file" } });
+		await waitFor(() => expect(screen.getByText("Start task").closest("button")).toBeEnabled());
 		fireEvent.click(screen.getByText("Start task"));
 
 		expect(h.post).not.toHaveBeenCalled();

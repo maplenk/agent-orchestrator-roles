@@ -294,7 +294,7 @@ describe("ProjectSettingsForm", () => {
 
 		expect(await screen.findByRole("alert")).toHaveTextContent("refresh offline");
 		expect(screen.getByRole("switch", { name: "Strict delegation" })).toBeChecked();
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
 		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
 			params: { path: { id: "proj-1" } },
@@ -354,7 +354,7 @@ describe("ProjectSettingsForm", () => {
 
 		expect(screen.getByRole("switch", { name: "Strict delegation" })).toBeChecked();
 		expect(screen.getByRole("textbox", { name: "Template profile ID for orchestrator" })).toHaveValue("orchestrator-a");
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
 		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
 			params: { path: { id: "proj-1" } },
@@ -835,10 +835,8 @@ describe("ProjectSettingsForm", () => {
 			"Automatic failover requires reviewed structured limit detection, which is not promoted for any harness.",
 		);
 		expect(screen.getByText("Automatic (unavailable)")).toBeInTheDocument();
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
-		expect(screen.getAllByRole("alert").at(-1)).toHaveTextContent(
-			"Convert automatic failover to manual before saving.",
-		);
+		submitSettings();
+		expect(await screen.findByText(/^Convert automatic failover to manual before saving\./)).toBeInTheDocument();
 		expect(putMock).not.toHaveBeenCalled();
 		await userEvent.click(screen.getByRole("button", { name: "Convert to manual" }));
 		expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -850,7 +848,7 @@ describe("ProjectSettingsForm", () => {
 		const implementorCard = screen.getByRole("group", { name: "implementor" });
 		await userEvent.click(within(implementorCard).getByRole("button", { name: "Move rung down — implementor rung 1" }));
 		expect(within(implementorCard).getByRole("button", { name: "Move rung up — implementor rung 2" })).toHaveFocus();
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 
 		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
 		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
@@ -1688,7 +1686,7 @@ describe("ProjectSettingsForm", () => {
 		await userEvent.click(screen.getByRole("button", { name: "Remove role reviewer" }));
 		await userEvent.type(screen.getByRole("textbox", { name: "New role ID" }), "verifier");
 		await userEvent.click(screen.getByRole("button", { name: "Add role" }));
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 
 		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(1));
 		expect(putMock).toHaveBeenCalledWith("/api/v1/projects/{id}/role-map", {
@@ -1757,7 +1755,7 @@ describe("ProjectSettingsForm", () => {
 
 		renderSettings("proj-1", undefined, "roles");
 		await userEvent.click(await screen.findByRole("switch", { name: "Strict delegation" }));
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 
 		expect(await screen.findByText("Strict delegation requires role “orchestrator” to have spawn permission.")).toBeInTheDocument();
 		expect(putMock).not.toHaveBeenCalled();
@@ -1924,7 +1922,7 @@ describe("ProjectSettingsForm", () => {
 		const strict = await screen.findByRole("switch", { name: "Strict delegation" });
 		await userEvent.click(strict);
 		await userEvent.click(screen.getByRole("switch", { name: "Workspace writes for orchestrator" }));
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 
 		expect(await screen.findByText("roles[orchestrator]: claude-code does not enforce read-only workspace access")).toBeInTheDocument();
 		expect(strict).toBeChecked();
@@ -1969,7 +1967,7 @@ describe("ProjectSettingsForm", () => {
 		renderSettings("proj-1", undefined, "roles");
 		const strict = await screen.findByRole("switch", { name: "Strict delegation" });
 		await userEvent.click(strict);
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 
 		expect(await screen.findByText("Role map changed since it was loaded; reload before saving")).toBeInTheDocument();
 		expect(strict).toBeChecked();
@@ -1996,7 +1994,7 @@ describe("ProjectSettingsForm", () => {
 		expect(screen.queryByText("Role map changed since it was loaded; reload before saving")).not.toBeInTheDocument();
 
 		await userEvent.click(screen.getByRole("switch", { name: "Strict delegation" }));
-		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		submitSettings();
 		await waitFor(() => expect(putMock).toHaveBeenCalledTimes(2));
 		expect(putMock).toHaveBeenNthCalledWith(2, "/api/v1/projects/{id}/role-map", {
 			params: { path: { id: "proj-1" } },

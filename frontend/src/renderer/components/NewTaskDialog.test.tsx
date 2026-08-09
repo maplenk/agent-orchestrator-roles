@@ -203,6 +203,7 @@ describe("NewTaskDialog", () => {
 		const { onCreated, onOpenChange } = renderDialog();
 		const user = userEvent.setup();
 		await waitForAgentCatalog();
+		await waitFor(() => expect(screen.getByRole("button", { name: "Start task" })).toBeEnabled());
 
 		await user.click(screen.getByRole("button", { name: "Start task" }));
 

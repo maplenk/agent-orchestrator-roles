@@ -67,12 +67,16 @@ vi.mock("../hooks/useOrchestratorSwitch", () => ({
 	useOrchestratorSwitch: () => orchestratorSwitchMutation,
 }));
 
-vi.mock("../lib/api-client", () => ({
-	apiClient: {
-		GET: reviewGetMock,
-	},
-	apiErrorMessage: (_error: unknown, fallback: string) => fallback,
-}));
+vi.mock("../lib/api-client", async (importOriginal) => {
+	const actual = await importOriginal<typeof import("../lib/api-client")>();
+	return {
+		...actual,
+		apiClient: {
+			GET: reviewGetMock,
+		},
+		apiErrorMessage: (_error: unknown, fallback: string) => fallback,
+	};
+});
 
 type FakePanelHandle = {
 	collapse: Mock;

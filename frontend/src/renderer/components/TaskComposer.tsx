@@ -228,10 +228,6 @@ export function TaskComposer({
 
 	const submitTask = async (interfaceMode?: "tui") => {
 		if (!projectId || isSubmitting) return;
-		if (!prompt.trim()) {
-			setError(t("newTask.taskRequired"));
-			return;
-		}
 		if (configUnavailable) {
 			setError(t("newTask.configUnavailable"));
 			return;
@@ -425,71 +421,77 @@ export function TaskComposer({
 			)}
 
 			<div className="composer-toolbar">
-				<div className="composer-run-controls" role="group" aria-label={t("newTask.runsWith")}>
-					{strictDelegation ? (
-						<div className="composer-toolbar-slot min-w-48">
-							<SettingsOptionMenu
-								aria-label={t("newTask.role")}
-								value={role || "__none__"}
-								options={[
-									{ value: "__none__", label: t("newTask.rolePlaceholder") },
-									...roleOptions.map((id) => ({ value: id, label: id })),
-								]}
-								triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
-								onChange={(next) => setRole(next === "__none__" ? "" : next)}
-							/>
-							<span className="sr-only">{binding ? `${binding.harness}${binding.model ? ` · ${binding.model}` : ""}` : t("newTask.roleLocked")}</span>
-						</div>
-					) : (
-						<>
-					<div className="composer-toolbar-slot">
-						<RequiredAgentField
-							id={agentId}
-							variant="chip"
-							label={t("newTask.agent")}
-							placeholder={t("newTask.selectAgent")}
-							value={selectedAgent}
-							authorized={agentCatalog?.authorized}
-							installed={agentCatalog?.installed}
-							supported={agentCatalog?.supported}
-							disabled={agentsQuery.isFetching && agentCatalog === undefined}
-							triggerClassName="composer-toolbar-option w-full justify-between"
-							onChange={(value) => {
-								setAgent(value);
-								setAgentTouched(true);
-								// Never pair a newly selected agent with the previous agent's model.
-								// The new catalog will resolve its own default into this cleared slot.
-								setModel("");
-								setMode("");
-								setModelTouched(false);
-							}}
-						/>
+				{!configPending && !configUnavailable && !noDelegatableRole ? (
+					<div className="composer-run-controls" role="group" aria-label={t("newTask.runsWith")}>
+						{strictDelegation ? (
+							<div className="composer-toolbar-slot min-w-48">
+								<SettingsOptionMenu
+									aria-label={t("newTask.role")}
+									value={role || "__none__"}
+									options={[
+										{ value: "__none__", label: t("newTask.rolePlaceholder") },
+										...roleOptions.map((id) => ({ value: id, label: id })),
+									]}
+									triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
+									onChange={(next) => setRole(next === "__none__" ? "" : next)}
+								/>
+								<span className="sr-only">
+									{binding
+										? `${binding.harness}${binding.model ? ` · ${binding.model}` : ""}`
+										: t("newTask.roleLocked")}
+								</span>
+							</div>
+						) : (
+							<>
+								<div className="composer-toolbar-slot">
+									<RequiredAgentField
+										id={agentId}
+										variant="chip"
+										label={t("newTask.agent")}
+										placeholder={t("newTask.selectAgent")}
+										value={selectedAgent}
+										authorized={agentCatalog?.authorized}
+										installed={agentCatalog?.installed}
+										supported={agentCatalog?.supported}
+										disabled={agentsQuery.isFetching && agentCatalog === undefined}
+										triggerClassName="composer-toolbar-option w-full justify-between"
+										onChange={(value) => {
+											setAgent(value);
+											setAgentTouched(true);
+											// Never pair a newly selected agent with the previous agent's model.
+											// The new catalog will resolve its own default into this cleared slot.
+											setModel("");
+											setMode("");
+											setModelTouched(false);
+										}}
+									/>
+								</div>
+								<span className="composer-toolbar-divider" aria-hidden="true" />
+								<div className="composer-toolbar-slot">
+									<TaskModelPicker
+										id={modelId}
+										agentId={selectedAgent}
+										agentLabel={selectedAgentLabel}
+										projectId={projectId ?? ""}
+										value={model}
+										mode={mode}
+										onWarningChange={setModelWarning}
+										onModelChange={(value) => {
+											setModel(value);
+											setMode("");
+											setModelTouched(true);
+										}}
+										onModeChange={(value) => {
+											setMode(value);
+											setModel("");
+											setModelTouched(true);
+										}}
+									/>
+								</div>
+							</>
+						)}
 					</div>
-					<span className="composer-toolbar-divider" aria-hidden="true" />
-					<div className="composer-toolbar-slot">
-						<TaskModelPicker
-							id={modelId}
-							agentId={selectedAgent}
-							agentLabel={selectedAgentLabel}
-							projectId={projectId ?? ""}
-							value={model}
-							mode={mode}
-							onWarningChange={setModelWarning}
-							onModelChange={(value) => {
-								setModel(value);
-								setMode("");
-								setModelTouched(true);
-							}}
-							onModeChange={(value) => {
-								setMode(value);
-								setModel("");
-								setModelTouched(true);
-							}}
-						/>
-					</div>
-						</>
-					)}
-				</div>
+				) : null}
 				<button
 					type="button"
 					className="grid size-(--size-settings-action-height) place-items-center rounded-md text-muted-foreground transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"

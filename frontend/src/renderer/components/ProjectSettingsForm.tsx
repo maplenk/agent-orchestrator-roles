@@ -35,6 +35,7 @@ import { Input } from "./ui/input";
 
 type Project = components["schemas"]["Project"];
 type ProjectWithRoleMapRevision = Project & { roleMapSha256: string };
+type ProjectSettingsProject = Project & { roleMapSha256?: string };
 type DegradedProject = components["schemas"]["DegradedProject"];
 type ProjectGetResponse = components["schemas"]["ProjectGetResponse"];
 type ProjectConfig = components["schemas"]["ProjectConfig"];
@@ -78,7 +79,7 @@ export function ProjectSettingsForm({
 			});
 			if (error) throw new Error(apiErrorMessage(error));
 			if (!data) throw new Error(t("settings.project.loadFailed"));
-			if (data.status === "ok" && !(data.project as Project).roleMapSha256) {
+			if (section === "roles" && data.status === "ok" && !(data.project as Project).roleMapSha256) {
 				throw new Error(t("settings.project.loadFailed"));
 			}
 			return data;
@@ -136,7 +137,7 @@ function SettingsBody({
 	section = "general",
 	onSaveState,
 }: {
-	project: ProjectWithRoleMapRevision;
+	project: ProjectSettingsProject;
 	projectId: string;
 	onSaved: () => void;
 	onReloadRoleMap: () => Promise<ProjectWithRoleMapRevision | null>;
@@ -152,7 +153,7 @@ function SettingsBody({
 	const activeOrchestrator = newestActiveOrchestrator(workspace?.sessions ?? []);
 	const intake: TrackerIntakeConfig = config.trackerIntake ?? {};
 	const [baseRoleMap, setBaseRoleMap] = useState<RoleMap | undefined>(config.roleMap);
-	const [baseRoleMapSHA256, setBaseRoleMapSHA256] = useState(project.roleMapSha256);
+	const [baseRoleMapSHA256, setBaseRoleMapSHA256] = useState(project.roleMapSha256 ?? "");
 	const [roleMap, setRoleMap] = useState<RoleMap | undefined>(config.roleMap);
 	const [roleEditorEpoch, setRoleEditorEpoch] = useState(0);
 	const [form, setForm] = useState({
