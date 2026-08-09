@@ -34,6 +34,7 @@ func (e *LegacySwitchRecoveryError) Error() string {
 	return fmt.Sprintf("session %s: legacy switch requires recovery", e.SessionID)
 }
 
+// Is classifies legacy pending-switch ownership as recovery-required.
 func (e *LegacySwitchRecoveryError) Is(target error) bool {
 	return target == ErrSwitchRecoveryRequired
 }

@@ -248,17 +248,3 @@ func (m *Manager) releaseRetainedAgentSwitch(id domain.SessionID) {
 	delete(m.retainedSwitches, id)
 	delete(m.agentOperations, id)
 }
-
-func (m *Manager) beginAgentResume(ctx context.Context, id domain.SessionID) error {
-	if err := m.beginAgentOperation(ctx, id, agentOperationResume); err != nil {
-		if errors.Is(err, errAgentOperationInProgress) {
-			return ErrResumeInProgress
-		}
-		return err
-	}
-	return nil
-}
-
-func (m *Manager) endAgentResume(id domain.SessionID) {
-	m.endAgentOperation(id, agentOperationResume)
-}

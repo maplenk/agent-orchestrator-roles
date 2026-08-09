@@ -455,7 +455,9 @@ func TestContinueFailover_CanonicalSagaSharesExactAttemptIntent(t *testing.T) {
 	}
 	attempt := store.attempts[0]
 	var saga domain.AgentSwitch
-	for _, saga = range store.switches {
+	for _, current := range store.switches {
+		saga = current
+		break
 	}
 	if attempt.State != domain.FailoverAttemptAcked || saga.State != domain.AgentSwitchCompleted ||
 		!agentSwitchMatchesFailoverAttempt(saga, attempt) {
@@ -570,7 +572,9 @@ func TestContinueFailover_DeliveringCrashRestartRecoversSameAttemptWithoutRedeli
 	}
 	attempt := store.attempts[0]
 	var saga domain.AgentSwitch
-	for _, saga = range store.switches {
+	for _, current := range store.switches {
+		saga = current
+		break
 	}
 	if saga.State != domain.AgentSwitchDelivering || !agentSwitchMatchesFailoverAttempt(saga, attempt) {
 		t.Fatalf("attempt 1 did not reach exact durable delivery intent: attempt=%+v saga=%+v", attempt, saga)
