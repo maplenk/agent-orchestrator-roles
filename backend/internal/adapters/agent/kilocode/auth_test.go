@@ -114,7 +114,7 @@ func TestKilocodeDBHasAuthorizedAccount(t *testing.T) {
 	}
 }
 
-func TestAuthStatusUnknownWhenKeyOnlyComesFromInteractiveShell(t *testing.T) {
+func TestKilocodeLocalAuthStatusUnknownWhenKeyOnlyComesFromInteractiveShell(t *testing.T) {
 	dir := t.TempDir()
 	shellPath := filepath.Join(dir, "fake-shell")
 	if err := os.WriteFile(shellPath, []byte(`#!/bin/sh
@@ -122,16 +122,6 @@ func TestAuthStatusUnknownWhenKeyOnlyComesFromInteractiveShell(t *testing.T) {
 if [ "$1" = "-ic" ]; then
 	OPENAI_API_KEY=from-shell /bin/sh -c "$2"
 fi
-`), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	kilocodePath := filepath.Join(dir, "kilocode")
-	if err := os.WriteFile(kilocodePath, []byte(`#!/bin/sh
-if [ "$1" = "auth" ] && [ "$2" = "list" ]; then
-	printf 'auth status unavailable\n'
-	exit 1
-fi
-exit 1
 `), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -145,15 +135,22 @@ exit 1
 		t.Setenv(name, "")
 	}
 
-	status, err := (&Plugin{resolvedBinary: kilocodePath}).AuthStatus(context.Background())
+	status, ok, err := kilocodeLocalAuthStatus(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status != ports.AgentAuthStatusUnknown {
-		t.Fatalf("status = %q, want %q", status, ports.AgentAuthStatusUnknown)
+	if ok || status != ports.AgentAuthStatusUnknown {
+		t.Fatalf("status = (%q, %v), want (%q, false)", status, ok, ports.AgentAuthStatusUnknown)
 	}
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("interactive shell probe ran; marker stat error = %v", err)
+	}
+}
+
+func TestKilocodeAuthListStatusUnknownWhenUnavailable(t *testing.T) {
+	status, ok := kilocodeAuthListStatus("auth status unavailable")
+	if ok || status != ports.AgentAuthStatusUnknown {
+		t.Fatalf("status = (%q, %v), want (%q, false)", status, ok, ports.AgentAuthStatusUnknown)
 	}
 }
 

@@ -193,17 +193,21 @@ func (p *Plugin) AuthStatus(ctx context.Context) (ports.AgentAuthStatus, error) 
 	if probeCtx.Err() != nil {
 		return ports.AgentAuthStatusUnknown, probeCtx.Err()
 	}
-	text := strings.ToLower(string(out))
+	return opencodeAuthListStatus(string(out), err), nil
+}
+
+func opencodeAuthListStatus(output string, commandErr error) ports.AgentAuthStatus {
+	text := strings.ToLower(output)
 	if strings.Contains(text, "0 credentials") {
-		return ports.AgentAuthStatusUnknown, nil
+		return ports.AgentAuthStatusUnknown
 	}
-	if strings.Contains(text, "credential") && err == nil {
-		return ports.AgentAuthStatusAuthorized, nil
+	if strings.Contains(text, "credential") && commandErr == nil {
+		return ports.AgentAuthStatusAuthorized
 	}
-	if err != nil {
-		return ports.AgentAuthStatusUnknown, nil
+	if commandErr != nil {
+		return ports.AgentAuthStatusUnknown
 	}
-	return ports.AgentAuthStatusUnknown, nil
+	return ports.AgentAuthStatusUnknown
 }
 
 var opencodeAPIKeyEnvVars = []string{

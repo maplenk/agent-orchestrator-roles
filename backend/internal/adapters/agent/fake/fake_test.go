@@ -244,9 +244,9 @@ func (s *lifecycleStore) ListSessions(_ context.Context, _ domain.ProjectID) ([]
 // (lifecycle.Manager.ApplyActivitySignal, including the sticky-state precedence
 // rules) -> agent exit — and asserts the derived activity states in order.
 //
-// It also asserts the whole sped-up run compresses to well under a second, and
-// that the terminal state is a deterministic ActivityExited without terminating
-// the still-available runtime, not an incidental idle.
+// It also pins all six sleeps to the accelerated cadence structurally and
+// asserts that the terminal state is a deterministic ActivityExited without
+// terminating the still-available runtime, not an incidental idle.
 func TestFullLifecycleSpawnToTermination(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no POSIX shell on PATH")
@@ -272,6 +272,9 @@ func TestFullLifecycleSpawnToTermination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLaunchCommand: %v", err)
 	}
+	if count := strings.Count(cmd[2], "sleep 0.001\n"); count != 6 {
+		t.Fatalf("accelerated timeline contains %d exact 1ms sleeps, want 6; script:\n%s", count, cmd[2])
+	}
 
 	// Hooks fire: run the script with the stub `ao` ahead of the real PATH.
 	run := exec.Command(cmd[0], cmd[1:]...) //nolint:gosec // argv is the harness's own launch command
@@ -280,13 +283,8 @@ func TestFullLifecycleSpawnToTermination(t *testing.T) {
 		"AO_HOOK_LOG="+hookLog,
 		"AO_SESSION_ID=fake-1",
 	)
-	start := time.Now()
 	if out, err := run.CombinedOutput(); err != nil {
 		t.Fatalf("timeline script failed: %v\n%s", err, out)
-	}
-	elapsed := time.Since(start)
-	if elapsed > 5*time.Second {
-		t.Fatalf("sped-up run took %v, want well under a second (speedup not applied?)", elapsed)
 	}
 
 	raw, err := os.ReadFile(hookLog) //nolint:gosec // path is under the test's own TempDir

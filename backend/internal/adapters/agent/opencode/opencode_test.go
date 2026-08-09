@@ -210,25 +210,23 @@ func TestOpenCodeLocalAuthStatusUnknownWithEmptyDBAccounts(t *testing.T) {
 	}
 }
 
-func TestOpenCodeAuthStatusUnknownWithZeroCredentials(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("shell fixture")
+func TestOpenCodeAuthListStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		output     string
+		commandErr error
+		want       ports.AgentAuthStatus
+	}{
+		{name: "zero credentials", output: "0 credentials\n", want: ports.AgentAuthStatusUnknown},
+		{name: "credential listing", output: "Credentials\n1 credential\n", want: ports.AgentAuthStatusAuthorized},
+		{name: "credential output with command failure", output: "1 credential\n", commandErr: errors.New("exit 1"), want: ports.AgentAuthStatusUnknown},
 	}
-	clearOpenCodeAuthEnv(t)
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
-	binary := filepath.Join(t.TempDir(), "opencode")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '0 credentials\\n'\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	status, err := (&Plugin{resolvedBinary: binary}).AuthStatus(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status != ports.AgentAuthStatusUnknown {
-		t.Fatalf("AuthStatus = %q, want %q", status, ports.AgentAuthStatusUnknown)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := opencodeAuthListStatus(tt.output, tt.commandErr); got != tt.want {
+				t.Fatalf("opencodeAuthListStatus() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 
