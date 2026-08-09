@@ -3,6 +3,7 @@ package terminalui
 import (
 	"strings"
 	"testing"
+	"testing/quick"
 )
 
 func TestLastPromptIsEmptyOrDimPlaceholder(t *testing.T) {
@@ -20,6 +21,10 @@ func TestLastPromptIsEmptyOrDimPlaceholder(t *testing.T) {
 		{name: "plain codex placeholder fails closed", output: "› Explain this codebase\nmodel · workspace", marker: "›", want: false},
 		{name: "wrapped human draft fails closed", output: "❯\nhuman draft\nfooter", marker: "❯", want: false},
 		{name: "leading blank rows in human draft fail closed", output: "❯\n\nhuman draft", marker: "❯", want: false},
+		{name: "incomplete CSI fails closed", output: "❯ \x1b[2", marker: "❯", want: false},
+		{name: "unterminated OSC fails closed", output: "❯ \x1b]dim-looking draft", marker: "❯", want: false},
+		{name: "malformed SGR fails closed", output: "❯ \x1b[2;?mhidden draft", marker: "❯", want: false},
+		{name: "invalid UTF-8 fails closed", output: "❯ \xff", marker: "❯", want: false},
 		{name: "historical prompt is outside lookback", output: "❯\n1\n2\n3\n4\n5\n6\n7\n8\n9", marker: "❯", want: false},
 	}
 	for _, tt := range tests {
@@ -44,6 +49,7 @@ func TestLastBorderedPromptIsEmptyOrDimPlaceholder(t *testing.T) {
 		{name: "wrapped draft", output: rule + "\n❯\nwrapped human draft\n" + rule + "\n" + footer, want: false},
 		{name: "permission menu", output: rule + "\n❯ 1. Yes\n  2. No\n" + rule + "\n" + footer, want: false},
 		{name: "rule draft", output: rule + "\n❯\n" + strings.Repeat("─", 48) + "\n" + rule + "\n" + footer, want: false},
+		{name: "malformed ANSI", output: rule + "\n❯ \x1b[2\n" + rule + "\n" + footer, want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -52,4 +58,50 @@ func TestLastBorderedPromptIsEmptyOrDimPlaceholder(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestComposerDetectorsNeverClassifyPrintableDraftAsEmpty(t *testing.T) {
+	rule := strings.Repeat("─", 48)
+	property := func(input []byte) bool {
+		draft := printableDraft(input)
+		plain := "status\n❯ " + draft
+		bordered := rule + "\n❯ " + draft + "\n" + rule + "\nstatus"
+		return !LastPromptIsEmptyOrDimPlaceholder(plain, "❯") &&
+			!LastBorderedPromptIsEmptyOrDimPlaceholder(bordered, "❯")
+	}
+	if err := quick.Check(property, &quick.Config{MaxCount: 2_000}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func FuzzComposerDetectorsNeverClassifyPrintableDraftAsEmpty(f *testing.F) {
+	for _, seed := range [][]byte{nil, []byte("draft"), {0, 31, 32, 126, 255}} {
+		f.Add(seed)
+	}
+	rule := strings.Repeat("─", 48)
+	f.Fuzz(func(t *testing.T, input []byte) {
+		if len(input) > 4<<10 {
+			t.Skip()
+		}
+		draft := printableDraft(input)
+		if LastPromptIsEmptyOrDimPlaceholder("status\n› "+draft, "›") {
+			t.Fatalf("plain composer classified printable draft %q as empty", draft)
+		}
+		bordered := rule + "\n❯ " + draft + "\n" + rule + "\nstatus"
+		if LastBorderedPromptIsEmptyOrDimPlaceholder(bordered, "❯") {
+			t.Fatalf("bordered composer classified printable draft %q as empty", draft)
+		}
+	})
+}
+
+func printableDraft(input []byte) string {
+	var b strings.Builder
+	// Always retain one ordinary, non-placeholder rune so every generated case
+	// proves the destructive false-positive boundary rather than vacuously
+	// exercising an empty string.
+	b.WriteByte('X')
+	for _, value := range input {
+		b.WriteByte(33 + value%94)
+	}
+	return b.String()
 }

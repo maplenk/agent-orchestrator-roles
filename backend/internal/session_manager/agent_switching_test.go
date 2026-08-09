@@ -376,6 +376,21 @@ type switchCreateErrorRuntime struct {
 	exactProbeHandles []string
 }
 
+type switchPreflightRuntime struct {
+	*fakeRestartRuntime
+	preflightErr error
+	preflighted  []ports.RuntimeConfig
+	onPreflight  func(ports.RuntimeConfig)
+}
+
+func (r *switchPreflightRuntime) PreflightCreate(cfg ports.RuntimeConfig) error {
+	r.preflighted = append(r.preflighted, cfg)
+	if r.onPreflight != nil {
+		r.onPreflight(cfg)
+	}
+	return r.preflightErr
+}
+
 func (r *switchCreateErrorRuntime) Create(_ context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
 	r.lastCfg = cfg
 	return r.createHandle, r.createErr
@@ -742,6 +757,36 @@ func TestBuildTargetContinuationMessageUsesTerminalFallbackWithoutTranscript(t *
 	}
 }
 
+func TestBuildTargetContinuationMessagePreservesFallbackPrecedence(t *testing.T) {
+	sw := domain.AgentSwitch{
+		ID: "switch-precedence", SessionID: "proj-1", FromHarness: domain.HarnessClaudeCode,
+		TargetHarness: domain.HarnessCodex,
+	}
+	semantic := buildTargetContinuationMessage(sw, deterministicSwitchContext{
+		LatestUserPrompt: "LATEST_USER", LatestAssistantUpdate: "LATEST_ASSISTANT",
+		SemanticHandoff: json.RawMessage(`{"schemaVersion":1,"goal":"SEMANTIC","progressSummary":"ready"}`),
+		TerminalTail:    "TERMINAL_TAIL",
+	}, &switchTranscriptFact{Path: "/provider/source.jsonl", Tail: "TRANSCRIPT_TAIL"})
+	if !strings.Contains(semantic, "SEMANTIC") || strings.Contains(semantic, "TRANSCRIPT_TAIL") || strings.Contains(semantic, "TERMINAL_TAIL") {
+		t.Fatalf("verified semantic handoff did not suppress lower-priority inline fallbacks:\n%s", semantic)
+	}
+
+	transcript := buildTargetContinuationMessage(sw, deterministicSwitchContext{
+		LatestUserPrompt: "LATEST_USER", LatestAssistantUpdate: "LATEST_ASSISTANT", TerminalTail: "TERMINAL_TAIL",
+	}, &switchTranscriptFact{Path: "/provider/source.jsonl", Tail: "TRANSCRIPT_TAIL"})
+	userAt := strings.Index(transcript, "LATEST_USER")
+	assistantAt := strings.Index(transcript, "LATEST_ASSISTANT")
+	transcriptAt := strings.Index(transcript, "TRANSCRIPT_TAIL")
+	if userAt < 0 || assistantAt < 0 || transcriptAt < 0 || userAt > transcriptAt || assistantAt > transcriptAt || strings.Contains(transcript, "TERMINAL_TAIL") {
+		t.Fatalf("conversation facts and transcript did not precede/suppress the terminal fallback:\n%s", transcript)
+	}
+
+	terminal := buildTargetContinuationMessage(sw, deterministicSwitchContext{TerminalTail: "TERMINAL_TAIL"}, nil)
+	if !strings.Contains(terminal, "TERMINAL_TAIL") || strings.Contains(terminal, "TRANSCRIPT_TAIL") {
+		t.Fatalf("terminal fallback was not used only after transcript exhaustion:\n%s", terminal)
+	}
+}
+
 func TestBuildTargetContinuationMessageHasCompleteDeliveryByteCeiling(t *testing.T) {
 	message := buildTargetContinuationMessage(
 		domain.AgentSwitch{ID: "switch-1", SessionID: "proj-1", FromHarness: domain.HarnessCodex, TargetHarness: domain.HarnessClaudeCode},
@@ -1040,18 +1085,12 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 		t.Fatal(err)
 	}
 	transcriptPath := filepath.Join(source.configDir, "source-native.jsonl")
-	archivedTranscriptPath := filepath.Join(source.configDir, "source-native-archived.jsonl")
 	expectedTranscript := []byte("{\"event\":\"early source record\"}\n{\"event\":\"FINAL_SOURCE_RECORD\"}\n")
 	if err := os.WriteFile(transcriptPath, []byte("{\"event\":\"early source record\"}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	locateCalls := 0
 	source.locateTranscript = func(ports.NativeSessionRef) (string, bool, error) {
-		locateCalls++
-		if locateCalls == 1 {
-			return transcriptPath, true, nil
-		}
-		return archivedTranscriptPath, true, nil
+		return transcriptPath, true, nil
 	}
 	recBeforeSwitch := store.sessions["proj-1"]
 	recBeforeSwitch.Metadata.NativeTranscriptPath = transcriptPath
@@ -1062,11 +1101,23 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 		if call != 0 {
 			return
 		}
-		if err := os.Rename(transcriptPath, archivedTranscriptPath); err != nil {
-			t.Errorf("archive source transcript: %v", err)
-			return
+		// The immutable handoff and target prompt must already be frozen before
+		// source teardown. A provider may still append its own stop record, but
+		// that later history cannot rewrite the preflighted continuation.
+		if !strings.Contains(target.launchSystemPrompt, "early source record") || strings.Contains(target.launchSystemPrompt, "FINAL_SOURCE_RECORD") {
+			t.Errorf("target continuation was not finalized before source stop: %q", target.launchSystemPrompt)
 		}
-		f, err := os.OpenFile(archivedTranscriptPath, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // test-owned path.
+		active, found, activeErr := store.GetActiveAgentSwitch(context.Background(), "proj-1")
+		if activeErr != nil || !found {
+			t.Errorf("active switch at source stop = %+v, found=%v err=%v", active, found, activeErr)
+		} else {
+			path, pathErr := manager.finalizedHandoffPath(active.SessionID, string(active.ID))
+			body, readErr := os.ReadFile(path)
+			if pathErr != nil || readErr != nil || !bytes.Contains(body, []byte("early source record")) || bytes.Contains(body, []byte("FINAL_SOURCE_RECORD")) {
+				t.Errorf("immutable handoff was not finalized before source stop: pathErr=%v readErr=%v body=%q", pathErr, readErr, body)
+			}
+		}
+		f, err := os.OpenFile(transcriptPath, os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // test-owned path.
 		if err != nil {
 			t.Errorf("open source transcript for final append: %v", err)
 			return
@@ -1080,11 +1131,11 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 			t.Errorf("close final source transcript: %v", err)
 			return
 		}
-		if err := os.Chtimes(archivedTranscriptPath, providerFinalTime, providerFinalTime); err != nil {
+		if err := os.Chtimes(transcriptPath, providerFinalTime, providerFinalTime); err != nil {
 			t.Errorf("pin final source transcript time: %v", err)
 			return
 		}
-		providerFinalInfo, err = os.Stat(archivedTranscriptPath)
+		providerFinalInfo, err = os.Stat(transcriptPath)
 		if err != nil {
 			t.Errorf("stat final source transcript: %v", err)
 		}
@@ -1130,15 +1181,15 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 	if rec.Metadata.LatestUserPrompt != "please keep the API small" {
 		t.Fatalf("internal continuation replaced latest user prompt: %q", rec.Metadata.LatestUserPrompt)
 	}
-	resolvedFinalTranscriptPath, err := filepath.EvalSymlinks(archivedTranscriptPath)
+	resolvedFinalTranscriptPath, err := filepath.EvalSymlinks(transcriptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	providerAfterBytes, err := os.ReadFile(archivedTranscriptPath)
+	providerAfterBytes, err := os.ReadFile(transcriptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	providerAfterInfo, err := os.Stat(archivedTranscriptPath)
+	providerAfterInfo, err := os.Stat(transcriptPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1157,7 +1208,8 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 	}
 	if !strings.Contains(target.launchSystemPrompt, "<ao-continuation") ||
 		!strings.Contains(target.launchSystemPrompt, resolvedFinalTranscriptPath) ||
-		!strings.Contains(target.launchSystemPrompt, "FINAL_SOURCE_RECORD") ||
+		strings.Contains(target.launchSystemPrompt, "FINAL_SOURCE_RECORD") ||
+		!strings.Contains(target.launchSystemPrompt, "early source record") ||
 		!strings.Contains(target.launchSystemPrompt, "implement the feature") ||
 		!strings.Contains(target.launchSystemPrompt, "please keep the API small") ||
 		!strings.Contains(target.launchSystemPrompt, "implementation is half complete") ||
@@ -1204,6 +1256,91 @@ func TestSwitchAgentEmptyTargetGenerationRefusesBeforeSourceInteraction(t *testi
 	}
 	if manager.SessionMutationInProgress("proj-1") {
 		t.Fatal("empty generation refusal retained the transient input gate")
+	}
+}
+
+func TestSwitchAgentMinimumCommandBudgetFailsWhileSourceIsAlive(t *testing.T) {
+	runtime := &switchPreflightRuntime{
+		fakeRestartRuntime: &fakeRestartRuntime{fakeRuntime: &fakeRuntime{
+			aliveByHandle: map[string]bool{"proj-1": true},
+		}},
+		preflightErr: ports.ErrRuntimeLaunchCommandTooLong,
+	}
+	manager, store, messenger := newSwitchTestManager(t, runtime)
+
+	sw, err := manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
+		TargetHarness: domain.HarnessCodex, IdempotencyKey: "minimum-command-budget",
+	})
+	if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("SwitchAgent error = %v, want ErrRuntimeLaunchCommandTooLong", err)
+	}
+	if len(runtime.preflighted) != 1 {
+		t.Fatalf("target preflights = %d, want exactly one", len(runtime.preflighted))
+	}
+	preflight := runtime.preflighted[0]
+	if preflight.SessionID != "proj-1" || preflight.WorkspacePath == "" ||
+		!strings.Contains(strings.Join(preflight.Argv, " "), aoTargetActivationPrompt) {
+		t.Fatalf("minimum target preflight did not use the exact activation command: %+v", preflight)
+	}
+	if runtime.destroyed != 0 || runtime.created != 0 || !runtime.aliveByHandle["proj-1"] {
+		t.Fatalf("source crossed the stop boundary: destroyed=%d created=%d alive=%v",
+			runtime.destroyed, runtime.created, runtime.aliveByHandle["proj-1"])
+	}
+	if len(messenger.msgs) != 0 {
+		t.Fatalf("minimum command refusal spent a source model turn: %#v", messenger.msgs)
+	}
+	if sw.State != domain.AgentSwitchFailed || store.sessions["proj-1"].Harness != domain.HarnessClaudeCode {
+		t.Fatalf("failed preflight changed source ownership: switch=%+v session=%+v", sw, store.sessions["proj-1"])
+	}
+}
+
+func TestSwitchAgentFinalizesAndPreflightsHandoffBeforeSourceStop(t *testing.T) {
+	runtime := &switchPreflightRuntime{
+		fakeRestartRuntime: &fakeRestartRuntime{fakeRuntime: &fakeRuntime{
+			aliveByHandle: map[string]bool{"proj-1": true},
+		}},
+	}
+	manager, store, _ := newSwitchTestManager(t, runtime)
+	target := manager.agents.(switchTestAgents)[domain.HarnessCodex].(*switchTestAgent)
+	runtime.onDestroy = func(call int, _ ports.RuntimeHandle) {
+		if call != 0 {
+			return
+		}
+		if len(runtime.preflighted) != 2 {
+			t.Errorf("preflights at source stop = %d, want minimum and finalized commands", len(runtime.preflighted))
+			return
+		}
+		if minimum, final := strings.Join(runtime.preflighted[0].Argv, "\x00"), strings.Join(runtime.preflighted[1].Argv, "\x00"); minimum != final {
+			t.Errorf("minimum and finalized exact target argv differ:\nminimum=%q\nfinal=%q", minimum, final)
+		}
+		if !strings.Contains(target.launchSystemPrompt, "<ao-continuation") ||
+			!strings.Contains(target.launchSystemPrompt, "please keep the API small") {
+			t.Errorf("final target prompt was not frozen before source stop: %q", target.launchSystemPrompt)
+		}
+		active, found, err := store.GetActiveAgentSwitch(context.Background(), "proj-1")
+		if err != nil || !found {
+			t.Errorf("active switch at source stop = %+v, found=%v err=%v", active, found, err)
+			return
+		}
+		path, err := manager.finalizedHandoffPath(active.SessionID, string(active.ID))
+		if err != nil {
+			t.Errorf("finalized handoff path: %v", err)
+			return
+		}
+		body, err := os.ReadFile(path)
+		if err != nil || !bytes.Contains(body, []byte("please keep the API small")) {
+			t.Errorf("finalized handoff at source stop: err=%v body=%q", err, body)
+		}
+	}
+
+	sw, err := manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
+		TargetHarness: domain.HarnessCodex, IdempotencyKey: "final-preflight-before-stop",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sw.State != domain.AgentSwitchCompleted || len(runtime.preflighted) != 2 {
+		t.Fatalf("switch=%+v preflights=%d, want completed with two preflights", sw, len(runtime.preflighted))
 	}
 }
 

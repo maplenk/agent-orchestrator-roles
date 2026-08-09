@@ -68,6 +68,14 @@ type prFactReader interface {
 	ListPRFactsForSession(context.Context, domain.SessionID) ([]domain.PRFacts, error)
 }
 
+// runtimeCreatePreflighter is intentionally local to the switch pipeline. A
+// runtime with a bounded launch-command transport (tmux, for example) can
+// prove that the exact target argv fits without performing runtime I/O. Other
+// runtimes have no such message boundary and continue to rely on Create.
+type runtimeCreatePreflighter interface {
+	PreflightCreate(ports.RuntimeConfig) error
+}
+
 func (m *Manager) switchStore() (ports.AgentSwitchStore, error) {
 	store, ok := m.store.(ports.AgentSwitchStore)
 	if !ok {
@@ -280,6 +288,21 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 	if err != nil {
 		return result, fmt.Errorf("switch agent %s: target preflight: %w", id, err)
 	}
+	// Prove the minimum viable continuation command before asking the source to
+	// spend a model turn or crossing the irreversible source-stop boundary. The
+	// supported switch providers carry hidden context through the already-fixed
+	// system-prompt file path, so this is also the exact runtime argv shape used
+	// by the bounded final continuation.
+	minimumContext := deterministicSwitchContext{
+		UserNote:              cfg.Note,
+		OriginalTask:          rec.Metadata.Prompt,
+		LatestUserPrompt:      rec.Metadata.LatestUserPrompt,
+		LatestAssistantUpdate: rec.Metadata.LatestAssistantUpdate,
+		CapturedAt:            m.clock(),
+	}
+	if err := m.preflightMinimumTargetCommand(ctx, rec, target, result, minimumContext); err != nil {
+		return result, fmt.Errorf("switch agent %s: minimum continuation preflight: %w", id, err)
+	}
 	candidatePath, _, candidateErr := m.prepareAgentHandoffPaths(ctx, id, string(result.ID))
 	if candidateErr != nil {
 		m.logger.Warn("agent switch: optional semantic handoff directory unavailable", "sessionID", id, "switchID", result.ID, "error", candidateErr)
@@ -294,14 +317,75 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 	if err != nil {
 		return result, fmt.Errorf("switch agent %s: close permission input: %w", id, err)
 	}
-	// Capture the newest bounded scrollback at the final source boundary. The
-	// tmux runtime destroys its pane during stop, so this evidence cannot be
-	// recovered afterward. It stays in memory and is rendered only if the final
-	// semantic file and verified transcript excerpt are both unavailable.
+	// Freeze the final handoff while the source is still alive. A semantic turn
+	// may have refreshed the durable conversation facts or provider-native id,
+	// so reload them after collection under the same exact-generation fence.
+	handoffSession, ok, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		return result, fmt.Errorf("switch agent %s: reload final source snapshot: %w", id, err)
+	}
+	if !ok {
+		return result, fmt.Errorf("switch agent %s: reload final source snapshot: %w", id, ErrNotFound)
+	}
+	if handoffSession.IsTerminated {
+		return result, fmt.Errorf("switch agent %s: reload final source snapshot: %w", id, ErrTerminated)
+	}
+	if handoffSession.Harness != rec.Harness ||
+		handoffSession.Metadata.RuntimeHandleID != rec.Metadata.RuntimeHandleID ||
+		handoffSession.Metadata.RuntimeLaunchID != rec.Metadata.RuntimeLaunchID {
+		return result, fmt.Errorf("switch agent %s: reload final source snapshot: %w", id, errSourceHandoffOwnershipChanged)
+	}
+	if nativeID := strings.TrimSpace(handoffSession.Metadata.AgentSessionID); nativeID != "" {
+		sourceNative.NativeSessionID = nativeID
+	}
+
+	// Capture the newest bounded scrollback before source stop. The runtime
+	// destroys its pane during stop, so this final fallback cannot be recovered
+	// afterward.
 	sourceHandle := ports.RuntimeHandle{ID: rec.Metadata.RuntimeHandleID}
 	preStopTerminalTail := ""
 	if output, outputErr := m.runtime.GetOutput(ctx, sourceHandle, handoffTerminalMaxLines); outputErr == nil {
 		preStopTerminalTail = normalizeTerminalTail(output)
+	}
+	deliverySwitch := result
+	semanticHandoff, semanticHandoffAvailable := m.readVerifiedAgentHandoffForDelivery(ctx, result)
+	if !semanticHandoffAvailable {
+		// Preserve the durable row as provenance, but never advertise or rely on
+		// an absent, replaced, or hash-mismatched file in this delivery.
+		deliverySwitch.AgentHandoffStatus = domain.AgentHandoffFailed
+		deliverySwitch.AgentHandoffPath = ""
+		deliverySwitch.AgentHandoffHash = ""
+	}
+	includeTranscriptFallback := !semanticHandoffAvailable
+	observedTranscript, sourceTranscriptStatus := m.captureSourceTranscriptFact(ctx, sourceAgent, sourceNative, includeTranscriptFallback)
+	finalContext := deterministicSwitchContext{
+		UserNote:              cfg.Note,
+		OriginalTask:          handoffSession.Metadata.Prompt,
+		LatestUserPrompt:      handoffSession.Metadata.LatestUserPrompt,
+		LatestAssistantUpdate: handoffSession.Metadata.LatestAssistantUpdate,
+		SemanticHandoff:       semanticHandoff,
+		TerminalTail:          preStopTerminalTail,
+		Workspaces:            m.captureWorkspaceFacts(ctx, handoffSession),
+		PullRequests:          m.capturePRFacts(ctx, id),
+		CapturedAt:            m.clock(),
+	}
+	if observedTranscript != nil {
+		finalContext.SourceTranscriptPath = observedTranscript.Path
+	}
+	if !includeTranscriptFallback || (observedTranscript != nil && strings.TrimSpace(observedTranscript.Tail) != "") {
+		finalContext.TerminalTail = ""
+	}
+	continuation := buildTargetContinuationMessageWithLimit(deliverySwitch, finalContext, observedTranscript, handoffContinuationMaxBytes)
+	writtenFinal, err := m.writeFinalizedHandoffFile(ctx, deliverySwitch, continuation)
+	if err != nil {
+		return result, fmt.Errorf("switch agent %s: retain finalized handoff: %w", id, err)
+	}
+	finalSystemPrompt := appendAgentSwitchContinuation(target.launch.SystemPrompt, continuation)
+	if err := m.prepareTargetLaunchPrompt(ctx, rec, &target, finalSystemPrompt, aoTargetActivationPrompt); err != nil {
+		return result, fmt.Errorf("switch agent %s: prepare launch continuation: %w", id, err)
+	}
+	if err := m.preflightPreparedTargetCommand(rec, target); err != nil {
+		return result, fmt.Errorf("switch agent %s: final continuation preflight: %w", id, err)
 	}
 
 	if err := m.lcm.PrepareLaunch(id, string(target.launchID)); err != nil {
@@ -385,17 +469,14 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 	defer cancelPostStop()
 	ctx = postStopCtx
 
-	// Session-start/Stop hooks can reveal the provider-native identity and final
-	// transcript only after the initial switch snapshot. Refresh the retained
-	// source row at the conclusive stop boundary so a later switch back can
-	// resume the actual conversation instead of treating it as an anonymous
-	// source generation. Failure is non-fatal after source stop: retain the
-	// operational switch, but still use the newly observed values in memory.
+	// Session-stop hooks can still reveal provider-native registry metadata.
+	// Refresh that retained row for a later switch back, but do not mutate the
+	// already-finalized handoff artifact or its preflighted target command.
 	if nativeID := strings.TrimSpace(stoppedSession.Metadata.AgentSessionID); nativeID != "" {
 		sourceNative.NativeSessionID = nativeID
 	}
 	refreshCtx, cancelRefresh := switchDurableContext(ctx)
-	refreshedSourceNative, refreshErr := m.preserveCurrentNativeSession(
+	_, refreshErr := m.preserveCurrentNativeSession(
 		refreshCtx,
 		store,
 		stoppedSession,
@@ -410,54 +491,12 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 			"switchID", result.ID,
 			"error", refreshErr,
 		)
-	} else {
-		sourceNative = refreshedSourceNative
-	}
-
-	// Rebuild deterministic delivery context in memory only after the source is
-	// conclusively gone and before the target is allowed to mutate files.
-	deliverySwitch := result
-	semanticHandoff, semanticHandoffAvailable := m.readVerifiedAgentHandoffForDelivery(ctx, result)
-	if !semanticHandoffAvailable {
-		// Preserve the durable row as provenance, but never advertise or rely on
-		// an absent, replaced, or hash-mismatched file in this delivery.
-		deliverySwitch.AgentHandoffStatus = domain.AgentHandoffFailed
-		deliverySwitch.AgentHandoffPath = ""
-		deliverySwitch.AgentHandoffHash = ""
-	}
-	includeTranscriptFallback := !semanticHandoffAvailable
-	observedTranscript, sourceTranscriptStatus := m.captureSourceTranscriptFact(ctx, sourceAgent, sourceNative, includeTranscriptFallback)
-	finalContext := deterministicSwitchContext{
-		UserNote:              cfg.Note,
-		OriginalTask:          stoppedSession.Metadata.Prompt,
-		LatestUserPrompt:      stoppedSession.Metadata.LatestUserPrompt,
-		LatestAssistantUpdate: stoppedSession.Metadata.LatestAssistantUpdate,
-		SemanticHandoff:       semanticHandoff,
-		TerminalTail:          preStopTerminalTail,
-		Workspaces:            m.captureWorkspaceFacts(ctx, stoppedSession),
-		PullRequests:          m.capturePRFacts(ctx, id),
-		CapturedAt:            m.clock(),
-	}
-	if observedTranscript != nil {
-		finalContext.SourceTranscriptPath = observedTranscript.Path
-	}
-	if !includeTranscriptFallback || (observedTranscript != nil && strings.TrimSpace(observedTranscript.Tail) != "") {
-		finalContext.TerminalTail = ""
-	}
-	continuation := buildTargetContinuationMessageWithLimit(deliverySwitch, finalContext, observedTranscript, handoffContinuationMaxBytes)
-	writtenFinal, err := m.writeFinalizedHandoffFile(ctx, deliverySwitch, continuation)
-	if err != nil {
-		return result, fmt.Errorf("switch agent %s: retain finalized handoff: %w", id, err)
 	}
 	finalized, err := m.finalizeAgentSwitchHandoff(ctx, store, result, writtenFinal, semanticHandoffAvailable, sourceTranscriptStatus)
 	if err != nil {
 		return result, fmt.Errorf("switch agent %s: record finalized handoff: %w", id, err)
 	}
 	result = finalized
-	finalSystemPrompt := appendAgentSwitchContinuation(target.launch.SystemPrompt, continuation)
-	if err := m.prepareTargetLaunchPrompt(ctx, rec, &target, finalSystemPrompt, aoTargetActivationPrompt); err != nil {
-		return result, fmt.Errorf("switch agent %s: prepare launch continuation: %w", id, err)
-	}
 	// Only now may the target mutate workspace-local hooks/instructions. The
 	// source snapshot above therefore cannot contain target preflight artifacts.
 	// A pre-activation failure removes this provider-owned state.
@@ -850,6 +889,42 @@ func appendAgentSwitchContinuation(systemPrompt, continuation string) string {
 
 func appendAgentContinuationProtocol(systemPrompt string) string {
 	return appendAgentSwitchContinuation(systemPrompt, aoAgentContinuationProtocol)
+}
+
+func (m *Manager) preflightMinimumTargetCommand(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	target preparedTargetActivation,
+	sw domain.AgentSwitch,
+	snapshot deterministicSwitchContext,
+) error {
+	_, ok := m.runtime.(runtimeCreatePreflighter)
+	if !ok {
+		return nil
+	}
+	minimum := buildMinimumTargetContinuationMessage(sw, snapshot)
+	if len(minimum) > handoffContinuationMaxBytes {
+		return errors.New("minimum target continuation exceeds AO's handoff limit")
+	}
+	preflightTarget := target
+	finalSystemPrompt := appendAgentSwitchContinuation(target.launch.SystemPrompt, minimum)
+	if err := m.prepareTargetLaunchPrompt(ctx, rec, &preflightTarget, finalSystemPrompt, aoTargetActivationPrompt); err != nil {
+		return err
+	}
+	return m.preflightPreparedTargetCommand(rec, preflightTarget)
+}
+
+func (m *Manager) preflightPreparedTargetCommand(rec domain.SessionRecord, target preparedTargetActivation) error {
+	preflighter, ok := m.runtime.(runtimeCreatePreflighter)
+	if !ok {
+		return nil
+	}
+	return preflighter.PreflightCreate(ports.RuntimeConfig{
+		SessionID:     rec.ID,
+		WorkspacePath: rec.Metadata.WorkspacePath,
+		Argv:          target.argv,
+		Env:           target.env,
+	})
 }
 
 // systemPromptForNativeRestore reapplies the latest finalized inbound handoff
@@ -1725,6 +1800,13 @@ type progressiveContinuationRenderOptions struct {
 	fallbackBytes     int
 	includeReferences bool
 	compact           bool
+}
+
+func buildMinimumTargetContinuationMessage(sw domain.AgentSwitch, snapshot deterministicSwitchContext) string {
+	return buildProgressiveTargetContinuationBody(sw, snapshot, nil, progressiveContinuationRenderOptions{
+		factBytes: minimumCompactFactBytes,
+		compact:   true,
+	})
 }
 
 // buildProgressiveTargetContinuationMessage keeps the same three deterministic

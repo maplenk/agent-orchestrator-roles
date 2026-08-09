@@ -26,7 +26,10 @@ func LastPromptIsEmptyOrDimPlaceholder(output, marker string) bool {
 	if marker == "" {
 		return false
 	}
-	lines := styledTerminalLines(output)
+	lines, valid := styledTerminalLines(output)
+	if !valid {
+		return false
+	}
 	start := len(lines) - composerLookbackLines
 	if start < 0 {
 		start = 0
@@ -77,7 +80,10 @@ func LastBorderedPromptIsEmptyOrDimPlaceholder(output, marker string) bool {
 	if marker == "" {
 		return false
 	}
-	lines := styledTerminalLines(output)
+	lines, valid := styledTerminalLines(output)
+	if !valid {
+		return false
+	}
 	markerRunes := []rune(marker)
 	start := len(lines) - composerLookbackLines
 	if start < 0 {
@@ -137,22 +143,32 @@ func horizontalRuleWidth(line []styledRune) int {
 	return len(line)
 }
 
-func styledTerminalLines(output string) [][]styledRune {
+func styledTerminalLines(output string) ([][]styledRune, bool) {
 	output = strings.ReplaceAll(output, "\r", "\n")
 	lines := make([][]styledRune, 0, 1)
 	lines = append(lines, nil)
 	dim := false
 	for i := 0; i < len(output); {
 		if output[i] == '\x1b' {
-			if next, params, sgr := consumeEscape(output, i); next > i {
+			if next, params, sgr, valid := consumeEscape(output, i); next > i {
+				if !valid {
+					return nil, false
+				}
 				if sgr {
-					dim = applySGRDim(dim, params)
+					var ok bool
+					dim, ok = applySGRDim(dim, params)
+					if !ok {
+						return nil, false
+					}
 				}
 				i = next
 				continue
 			}
 		}
 		r, size := utf8.DecodeRuneInString(output[i:])
+		if r == utf8.RuneError && size == 1 {
+			return nil, false
+		}
 		i += size
 		if r == '\n' {
 			lines = append(lines, nil)
@@ -163,46 +179,61 @@ func styledTerminalLines(output string) [][]styledRune {
 		}
 		lines[len(lines)-1] = append(lines[len(lines)-1], styledRune{value: r, dim: dim})
 	}
-	return lines
+	return lines, true
 }
 
-func consumeEscape(output string, start int) (next int, params string, sgr bool) {
+func consumeEscape(output string, start int) (next int, params string, sgr bool, valid bool) {
 	if start+1 >= len(output) {
-		return start + 1, "", false
+		return len(output), "", false, false
 	}
 	switch output[start+1] {
 	case '[':
 		for i := start + 2; i < len(output); i++ {
 			b := output[i]
-			if b < 0x40 || b > 0x7e {
-				continue
+			if b >= 0x40 && b <= 0x7e {
+				return i + 1, output[start+2 : i], b == 'm', true
 			}
-			return i + 1, output[start+2 : i], b == 'm'
+			// CSI parameter/intermediate bytes occupy 0x20..0x3f. A control
+			// byte or ordinary non-ASCII data before the final byte means the
+			// capture is malformed, so an empty-composer decision must fail
+			// closed instead of swallowing a possible human draft.
+			if b < 0x20 || b > 0x3f {
+				return i + 1, "", false, false
+			}
+			continue
 		}
-		return len(output), "", false
+		return len(output), "", false, false
 	case ']':
 		for i := start + 2; i < len(output); i++ {
 			if output[i] == '\a' {
-				return i + 1, "", false
+				return i + 1, "", false, true
 			}
 			if output[i] == '\x1b' && i+1 < len(output) && output[i+1] == '\\' {
-				return i + 2, "", false
+				return i + 2, "", false, true
 			}
 		}
-		return len(output), "", false
+		return len(output), "", false, false
 	default:
-		return min(start+2, len(output)), "", false
+		// A two-byte ESC sequence has a final byte in 0x30..0x7e. Other
+		// bytes are incomplete or malformed and cannot be ignored safely.
+		if output[start+1] < 0x30 || output[start+1] > 0x7e {
+			return start + 2, "", false, false
+		}
+		return start + 2, "", false, true
 	}
 }
 
-func applySGRDim(current bool, params string) bool {
+func applySGRDim(current bool, params string) (bool, bool) {
 	if params == "" {
-		return false
+		return false, true
 	}
 	for _, raw := range strings.FieldsFunc(params, func(r rune) bool { return r == ';' || r == ':' }) {
+		if raw == "" {
+			continue
+		}
 		code, err := strconv.Atoi(raw)
 		if err != nil {
-			continue
+			return current, false
 		}
 		switch code {
 		case 0, 22:
@@ -211,7 +242,7 @@ func applySGRDim(current bool, params string) bool {
 			current = true
 		}
 	}
-	return current
+	return current, true
 }
 
 func trimLeftStyledSpace(line []styledRune) []styledRune {
