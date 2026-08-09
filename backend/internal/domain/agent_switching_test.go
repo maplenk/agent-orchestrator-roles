@@ -34,6 +34,18 @@ func TestAgentSwitchRequestFingerprintCanonicalizesStableIntent(t *testing.T) {
 	}
 }
 
+func TestAgentSwitchRequestFingerprintBindsAuthorizedModel(t *testing.T) {
+	providerDefault := ComputeAgentSwitchRequestFingerprint("session-1", HarnessCodex, "continue")
+	providerDefaultExplicit := ComputeAuthorizedAgentSwitchRequestFingerprint("session-1", HarnessCodex, "", "continue")
+	modelPinned := ComputeAuthorizedAgentSwitchRequestFingerprint("session-1", HarnessCodex, "o3", "continue")
+	if providerDefault != providerDefaultExplicit {
+		t.Fatalf("empty model changed the legacy fingerprint: %q != %q", providerDefault, providerDefaultExplicit)
+	}
+	if modelPinned == providerDefault {
+		t.Fatal("authorized target model was omitted from the request fingerprint")
+	}
+}
+
 func TestValidAgentSwitchTransitionRequiresSequentialProgress(t *testing.T) {
 	t.Parallel()
 

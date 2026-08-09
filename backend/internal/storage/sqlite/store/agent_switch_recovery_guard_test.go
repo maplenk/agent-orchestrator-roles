@@ -32,6 +32,7 @@ func createRecoveryGuardSwitch(t *testing.T, s *sqlite.Store) domain.AgentSwitch
 		RequestedAt:        now,
 		UpdatedAt:          now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	if _, created, err := s.CreateAgentSwitch(ctx, sw); err != nil || !created {
 		t.Fatalf("create agent switch: created=%v err=%v", created, err)
 	}
@@ -52,7 +53,7 @@ func TestHasNonterminalAgentSwitch(t *testing.T) {
 		sw.State = domain.AgentSwitchFailed
 		sw.ErrorCode = domain.AgentSwitchErrorRequestCancelled
 		sw.UpdatedAt = sw.UpdatedAt.Add(time.Second)
-		if changed, err := s.UpdateAgentSwitch(context.Background(), sw, domain.AgentSwitchPreparingHandoff, sw.SourceGenerationID, ""); err != nil || !changed {
+		if changed, err := s.UpdateAgentSwitch(context.Background(), sw, domain.AgentSwitchPreparingHandoff, sw.SourceGenerationID, sw.TargetGenerationID); err != nil || !changed {
 			t.Fatalf("close switch: changed=%v err=%v", changed, err)
 		}
 		if active, err := s.HasNonterminalAgentSwitch(context.Background()); err != nil || active {

@@ -112,9 +112,13 @@ type FailoverAttempt struct {
 	// whose crash window can only be closed by guessing which runtime belongs to
 	// which attempt, and a wrong guess there is a second runtime.
 	GenerationID string
-	State        FailoverAttemptState
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// SourceGenerationID is the one-time source-runtime CAS captured in the
+	// attempt's first durable write. Adoption after a crash must not substitute
+	// whichever generation happens to own the session later.
+	SourceGenerationID string
+	State              FailoverAttemptState
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // Target returns the attempt's destination as a ladder target.

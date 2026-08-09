@@ -45,7 +45,7 @@ WHERE id = sqlc.arg(id)
 -- name: InsertAgentSwitch :execrows
 INSERT INTO agent_switches (
     id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
+    from_harness, target_harness, target_model, role_snapshot_json, failover_attempt_id,
     target_native_session_ref, target_start_mode,
     state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
     agent_handoff_path, agent_handoff_hash,
@@ -54,60 +54,28 @@ INSERT INTO agent_switches (
     requested_at, updated_at,
     final_handoff_path, final_handoff_hash
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT DO NOTHING;
 
 -- name: GetAgentSwitch :one
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT *
 FROM agent_switches
 WHERE id = ?;
 
 -- name: GetAgentSwitchByIdempotencyKey :one
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT *
 FROM agent_switches
 WHERE session_id = ? AND idempotency_key = ?;
 
 -- name: GetActiveAgentSwitch :one
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT *
 FROM agent_switches
 WHERE session_id = ?
   AND state NOT IN ('completed', 'failed');
 
 -- name: ListAgentSwitches :many
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT *
 FROM agent_switches
 WHERE session_id = ?
 ORDER BY requested_at DESC, id DESC;
@@ -304,6 +272,15 @@ WHERE id = sqlc.arg(id)
 -- name: ActivateSessionAgentSwitchTarget :execrows
 UPDATE sessions SET
     harness = sqlc.arg(target_harness),
+    role_id = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_role_id) ELSE role_id END,
+    role_map_schema_version = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_role_map_schema_version) ELSE role_map_schema_version END,
+    role_map_sha256 = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_role_map_sha256) ELSE role_map_sha256 END,
+    role_config_revision = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_role_config_revision) ELSE role_config_revision END,
+    template_artifact_id = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_template_artifact_id) ELSE template_artifact_id END,
+    template_sha256 = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_template_sha256) ELSE template_sha256 END,
+    resolved_model = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_model) ELSE resolved_model END,
+    resolved_workspace_writes = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_workspace_writes) ELSE resolved_workspace_writes END,
+    resolved_can_spawn = CASE WHEN sqlc.arg(apply_role_snapshot) THEN sqlc.arg(target_can_spawn) ELSE resolved_can_spawn END,
     activity_state = 'idle',
     activity_last_at = sqlc.arg(activated_at),
     first_signal_at = NULL,

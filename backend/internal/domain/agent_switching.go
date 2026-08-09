@@ -28,13 +28,23 @@ const agentSwitchRequestFingerprintPrefix = "v1:"
 // key to the stable request tuple. Note whitespace is normalized in the same
 // way as the switch entry point before it is hashed.
 func ComputeAgentSwitchRequestFingerprint(sessionID SessionID, targetHarness AgentHarness, note string) AgentSwitchRequestFingerprint {
+	return ComputeAuthorizedAgentSwitchRequestFingerprint(sessionID, targetHarness, "", note)
+}
+
+// ComputeAuthorizedAgentSwitchRequestFingerprint binds the exact authorized
+// harness/model pair to a stable request. The empty model remains omitted from
+// the canonical JSON so fingerprints created before model-aware switching stay
+// compatible with provider-default requests.
+func ComputeAuthorizedAgentSwitchRequestFingerprint(sessionID SessionID, targetHarness AgentHarness, targetModel, note string) AgentSwitchRequestFingerprint {
 	payload, _ := json.Marshal(struct {
 		SessionID     SessionID    `json:"sessionId"`
 		TargetHarness AgentHarness `json:"targetHarness"`
+		TargetModel   string       `json:"targetModel,omitempty"`
 		Note          string       `json:"note"`
 	}{
 		SessionID:     sessionID,
 		TargetHarness: targetHarness,
+		TargetModel:   strings.TrimSpace(targetModel),
 		Note:          strings.TrimSpace(note),
 	})
 	sum := sha256.Sum256(payload)
@@ -60,6 +70,23 @@ func (f AgentSwitchRequestFingerprint) Valid() bool {
 // AgentGenerationID identifies one concrete provider invocation. A retained
 // native conversation can be used by several generations over its lifetime.
 type AgentGenerationID string
+
+// AuthorizedSwitchIntent is the immutable policy-to-engine contract. Runtime
+// observations are explicit CAS inputs and never enter RequestFingerprint.
+// RequiredTargetGenerationID is allocated by the caller and must join the
+// saga, runtime, activation and acknowledgement.
+type AuthorizedSwitchIntent struct {
+	SessionID                       SessionID
+	IdempotencyKey                  string
+	RequestFingerprint              AgentSwitchRequestFingerprint
+	RequiredTargetGenerationID      AgentGenerationID
+	ExpectedSourceRuntimeGeneration AgentGenerationID
+	TargetHarness                   AgentHarness
+	TargetModel                     string
+	RoleSnapshot                    SessionRoleBinding
+	FailoverAttemptID               string
+	Note                            string
+}
 
 // AgentNativeSession is AO's provider-neutral registry entry for one retained
 // provider conversation. Multiple records with the same AO session and
@@ -297,6 +324,9 @@ type AgentSwitch struct {
 	RequestFingerprint      AgentSwitchRequestFingerprint     `json:"-"`
 	FromHarness             AgentHarness                      `json:"fromHarness"`
 	TargetHarness           AgentHarness                      `json:"targetHarness"`
+	TargetModel             string                            `json:"targetModel,omitempty"`
+	RoleSnapshot            SessionRoleBinding                `json:"-"`
+	FailoverAttemptID       string                            `json:"-"`
 	TargetNativeSessionRef  *AgentNativeSessionID             `json:"targetNativeSessionRef,omitempty"`
 	TargetStartMode         AgentSwitchTargetStartMode        `json:"targetStartMode,omitempty"`
 	State                   AgentSwitchState                  `json:"state"`

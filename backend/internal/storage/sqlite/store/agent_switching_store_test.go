@@ -19,6 +19,19 @@ type agentSwitchFixtureUpdater interface {
 	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 }
 
+func authorizeAgentSwitchFixture(sw *domain.AgentSwitch) {
+	if sw.TargetGenerationID == "" {
+		sw.TargetGenerationID = "target-generation"
+	}
+	if sw.RoleSnapshot.RoleID == "" {
+		sw.RoleSnapshot = domain.SessionRoleBinding{
+			RoleID:          "test-worker",
+			ResolvedHarness: sw.TargetHarness,
+			ResolvedModel:   sw.TargetModel,
+		}
+	}
+}
+
 func advanceAgentSwitchFixture(ctx context.Context, t *testing.T, s agentSwitchFixtureUpdater, sw *domain.AgentSwitch, next domain.AgentSwitchState, at time.Time) {
 	advanceAgentSwitchFixtureWithMutation(ctx, t, s, sw, next, at, nil)
 }
@@ -267,6 +280,7 @@ func TestAgentSwitchIdempotencySingleActiveSagaAndGenerationFences(t *testing.T)
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted,
 		SourceGenerationID: "source-generation", RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&switchRec)
 	for _, status := range []domain.AgentHandoffStatus{domain.AgentHandoffRequested, domain.AgentHandoffReceived} {
 		prepopulated := switchRec
 		prepopulated.ID = domain.AgentSwitchID("prepopulated-" + string(status))
@@ -328,7 +342,7 @@ func TestAgentSwitchIdempotencySingleActiveSagaAndGenerationFences(t *testing.T)
 	// Amend from a value captured before semantic collection. The general saga
 	// update must not erase the received tuple written by RecordAgentHandoff.
 	staleBeforeHandoff.UpdatedAt = now.Add(1500 * time.Millisecond)
-	if ok, err := s.UpdateAgentSwitch(ctx, staleBeforeHandoff, domain.AgentSwitchPreparingHandoff, "source-generation", ""); err != nil || !ok {
+	if ok, err := s.UpdateAgentSwitch(ctx, staleBeforeHandoff, domain.AgentSwitchPreparingHandoff, "source-generation", "target-generation"); err != nil || !ok {
 		t.Fatalf("amend switch using stale pre-handoff value: ok=%v err=%v", ok, err)
 	}
 	current, ok, err := s.GetActiveAgentSwitch(ctx, session.ID)
@@ -440,14 +454,16 @@ func TestAgentSwitchTargetStartUnconfirmedMarkerIsNonTerminalAndMonotonic(t *tes
 		t.Fatalf("create target native session: %v", err)
 	}
 	targetRef := target.ID
-	sw, created, err := s.CreateAgentSwitch(ctx, domain.AgentSwitch{
+	requested := domain.AgentSwitch{
 		ID: "switch-recovery", SessionID: session.ID, IdempotencyKey: "switch-recovery",
 		RequestFingerprint: domain.ComputeAgentSwitchRequestFingerprint(session.ID, domain.HarnessCodex, ""),
 		FromHarness:        domain.HarnessClaudeCode, TargetHarness: domain.HarnessCodex,
 		State: domain.AgentSwitchPreparingHandoff, TargetStartMode: domain.AgentSwitchTargetStartPending,
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 		RequestedAt: now, UpdatedAt: now,
-	})
+	}
+	authorizeAgentSwitchFixture(&requested)
+	sw, created, err := s.CreateAgentSwitch(ctx, requested)
 	if err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
 	}
@@ -520,6 +536,7 @@ func TestAgentHandoffOutcomeIsMonotonicWhenTimeoutWins(t *testing.T) {
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted,
 		SourceGenerationID: "source-generation", RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&switchRec)
 	if _, created, err := s.CreateAgentSwitch(ctx, switchRec); err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
 	}
@@ -557,6 +574,7 @@ func TestAgentHandoffUnavailableClosesRequestedLaneDuringRecovery(t *testing.T) 
 		State: domain.AgentSwitchPreparingHandoff, AgentHandoffStatus: domain.AgentHandoffNotAttempted,
 		SourceGenerationID: "source-generation", RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	if _, created, err := s.CreateAgentSwitch(ctx, sw); err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
 	}
@@ -633,7 +651,7 @@ func TestAgentSwitchRejectsNativeReferenceFromAnotherAOSession(t *testing.T) {
 	if _, _, err := s.CreateAgentNativeSession(ctx, foreign); err != nil {
 		t.Fatalf("create foreign native session: %v", err)
 	}
-	base, created, err := s.CreateAgentSwitch(ctx, domain.AgentSwitch{
+	requested := domain.AgentSwitch{
 		ID: "cross-session", SessionID: first.ID, IdempotencyKey: "cross-session",
 		RequestFingerprint: domain.ComputeAgentSwitchRequestFingerprint(first.ID, domain.HarnessCodex, ""),
 		FromHarness:        domain.HarnessClaudeCode,
@@ -641,7 +659,9 @@ func TestAgentSwitchRejectsNativeReferenceFromAnotherAOSession(t *testing.T) {
 		State:              domain.AgentSwitchPreparingHandoff,
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 		RequestedAt: now, UpdatedAt: now,
-	})
+	}
+	authorizeAgentSwitchFixture(&requested)
+	base, created, err := s.CreateAgentSwitch(ctx, requested)
 	if err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
 	}
@@ -680,6 +700,7 @@ func TestAgentSwitchRejectsTargetNativeReferenceWithWrongHarness(t *testing.T) {
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 		RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&base)
 	stored, created, err := s.CreateAgentSwitch(ctx, base)
 	if err != nil || !created {
 		t.Fatalf("create switch without source reference: created=%v err=%v", created, err)
@@ -734,6 +755,7 @@ func TestAgentSwitchTargetAcknowledgementIsGenerationFencedAndWriteOnce(t *testi
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 		RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	stored, created, err := s.CreateAgentSwitch(ctx, sw)
 	if err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
@@ -812,6 +834,7 @@ func TestAgentSwitchDeliveryFailureIsAtomicWithAcknowledgement(t *testing.T) {
 				AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 				RequestedAt: now, UpdatedAt: now,
 			}
+			authorizeAgentSwitchFixture(&sw)
 			stored, created, err := s.CreateAgentSwitch(ctx, sw)
 			if err != nil || !created {
 				t.Fatalf("create switch: created=%v err=%v", created, err)
@@ -902,12 +925,13 @@ func TestAgentSwitchSourceStopAndTargetActivationAreAtomicAndNarrow(t *testing.T
 	targetRef := target.ID
 	sw := domain.AgentSwitch{
 		ID: "switch-activation", SessionID: session.ID, IdempotencyKey: "switch-activation",
-		RequestFingerprint: domain.ComputeAgentSwitchRequestFingerprint(session.ID, domain.HarnessCodex, "keep going"),
+		RequestFingerprint: domain.ComputeAuthorizedAgentSwitchRequestFingerprint(session.ID, domain.HarnessCodex, "o3", "keep going"),
 		FromHarness:        domain.HarnessClaudeCode,
-		TargetHarness:      domain.HarnessCodex, State: domain.AgentSwitchPreparingHandoff,
+		TargetHarness:      domain.HarnessCodex, TargetModel: "o3", State: domain.AgentSwitchPreparingHandoff,
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-switch-generation",
 		RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	stored, created, err := s.CreateAgentSwitch(ctx, sw)
 	if err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
@@ -1041,6 +1065,9 @@ func TestAgentSwitchSourceStopAndTargetActivationAreAtomicAndNarrow(t *testing.T
 		activated.Metadata.NativeTranscriptPath != rec.Metadata.NativeTranscriptPath {
 		t.Fatalf("target owner projection = %+v", activated)
 	}
+	if activated.Metadata.Role != sw.RoleSnapshot {
+		t.Fatalf("target role snapshot = %+v, want %+v", activated.Metadata.Role, sw.RoleSnapshot)
+	}
 	if !activated.FirstSignalAt.IsZero() {
 		t.Fatalf("target activation retained old hook receipt: %v", activated.FirstSignalAt)
 	}
@@ -1134,6 +1161,7 @@ func TestAgentSwitchOwnershipTransactionsRejectTerminatedSession(t *testing.T) {
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 		RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	stored, _, err := s.CreateAgentSwitch(ctx, sw)
 	if err != nil {
 		t.Fatalf("create switch: %v", err)
@@ -1224,6 +1252,7 @@ func TestAgentSwitchAndOwnerChangesEmitSessionInvalidationCDC(t *testing.T) {
 		AgentHandoffStatus: domain.AgentHandoffNotAttempted, SourceGenerationID: "source-generation",
 		RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	if _, created, err := s.CreateAgentSwitch(ctx, sw); err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
 	}

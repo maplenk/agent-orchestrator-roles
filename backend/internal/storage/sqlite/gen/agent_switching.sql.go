@@ -51,22 +51,41 @@ func (q *Queries) AcknowledgeAgentSwitchTarget(ctx context.Context, arg Acknowle
 const activateSessionAgentSwitchTarget = `-- name: ActivateSessionAgentSwitchTarget :execrows
 UPDATE sessions SET
     harness = ?1,
+    role_id = CASE WHEN ?2 THEN ?3 ELSE role_id END,
+    role_map_schema_version = CASE WHEN ?2 THEN ?4 ELSE role_map_schema_version END,
+    role_map_sha256 = CASE WHEN ?2 THEN ?5 ELSE role_map_sha256 END,
+    role_config_revision = CASE WHEN ?2 THEN ?6 ELSE role_config_revision END,
+    template_artifact_id = CASE WHEN ?2 THEN ?7 ELSE template_artifact_id END,
+    template_sha256 = CASE WHEN ?2 THEN ?8 ELSE template_sha256 END,
+    resolved_model = CASE WHEN ?2 THEN ?9 ELSE resolved_model END,
+    resolved_workspace_writes = CASE WHEN ?2 THEN ?10 ELSE resolved_workspace_writes END,
+    resolved_can_spawn = CASE WHEN ?2 THEN ?11 ELSE resolved_can_spawn END,
     activity_state = 'idle',
-    activity_last_at = ?2,
+    activity_last_at = ?12,
     first_signal_at = NULL,
-    runtime_handle_id = ?3,
-    runtime_launch_id = ?4,
-    updated_at = ?2
-WHERE id = ?5
+    runtime_handle_id = ?13,
+    runtime_launch_id = ?14,
+    updated_at = ?12
+WHERE id = ?15
   AND is_terminated = 0
   AND activity_state = 'exited'
-  AND harness = ?6
-  AND runtime_launch_id = ?7
-  AND activity_last_at <= ?2
+  AND harness = ?16
+  AND runtime_launch_id = ?17
+  AND activity_last_at <= ?12
 `
 
 type ActivateSessionAgentSwitchTargetParams struct {
 	TargetHarness                 domain.AgentHarness
+	ApplyRoleSnapshot             string
+	TargetRoleID                  string
+	TargetRoleMapSchemaVersion    int64
+	TargetRoleMapSha256           string
+	TargetRoleConfigRevision      int64
+	TargetTemplateArtifactID      string
+	TargetTemplateSha256          string
+	TargetModel                   string
+	TargetWorkspaceWrites         int64
+	TargetCanSpawn                int64
 	ActivatedAt                   time.Time
 	RuntimeHandleID               string
 	TargetGenerationID            string
@@ -78,6 +97,16 @@ type ActivateSessionAgentSwitchTargetParams struct {
 func (q *Queries) ActivateSessionAgentSwitchTarget(ctx context.Context, arg ActivateSessionAgentSwitchTargetParams) (int64, error) {
 	result, err := q.db.ExecContext(ctx, activateSessionAgentSwitchTarget,
 		arg.TargetHarness,
+		arg.ApplyRoleSnapshot,
+		arg.TargetRoleID,
+		arg.TargetRoleMapSchemaVersion,
+		arg.TargetRoleMapSha256,
+		arg.TargetRoleConfigRevision,
+		arg.TargetTemplateArtifactID,
+		arg.TargetTemplateSha256,
+		arg.TargetModel,
+		arg.TargetWorkspaceWrites,
+		arg.TargetCanSpawn,
 		arg.ActivatedAt,
 		arg.RuntimeHandleID,
 		arg.TargetGenerationID,
@@ -231,15 +260,7 @@ func (q *Queries) FindAgentNativeSession(ctx context.Context, arg FindAgentNativ
 }
 
 const getActiveAgentSwitch = `-- name: GetActiveAgentSwitch :one
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT id, session_id, idempotency_key, request_fingerprint, from_harness, target_harness, target_native_session_ref, target_start_mode, state, agent_handoff_status, source_transcript_status, semantic_handoff_included, agent_handoff_path, agent_handoff_hash, source_generation_id, target_generation_id, target_runtime_handle_id, target_acknowledged_at, error_code, requested_at, updated_at, final_handoff_path, final_handoff_hash, target_model, role_snapshot_json, failover_attempt_id
 FROM agent_switches
 WHERE session_id = ?
   AND state NOT IN ('completed', 'failed')
@@ -272,6 +293,9 @@ func (q *Queries) GetActiveAgentSwitch(ctx context.Context, sessionID domain.Ses
 		&i.UpdatedAt,
 		&i.FinalHandoffPath,
 		&i.FinalHandoffHash,
+		&i.TargetModel,
+		&i.RoleSnapshotJson,
+		&i.FailoverAttemptID,
 	)
 	return i, err
 }
@@ -302,15 +326,7 @@ func (q *Queries) GetAgentNativeSession(ctx context.Context, id domain.AgentNati
 }
 
 const getAgentSwitch = `-- name: GetAgentSwitch :one
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT id, session_id, idempotency_key, request_fingerprint, from_harness, target_harness, target_native_session_ref, target_start_mode, state, agent_handoff_status, source_transcript_status, semantic_handoff_included, agent_handoff_path, agent_handoff_hash, source_generation_id, target_generation_id, target_runtime_handle_id, target_acknowledged_at, error_code, requested_at, updated_at, final_handoff_path, final_handoff_hash, target_model, role_snapshot_json, failover_attempt_id
 FROM agent_switches
 WHERE id = ?
 `
@@ -342,20 +358,15 @@ func (q *Queries) GetAgentSwitch(ctx context.Context, id domain.AgentSwitchID) (
 		&i.UpdatedAt,
 		&i.FinalHandoffPath,
 		&i.FinalHandoffHash,
+		&i.TargetModel,
+		&i.RoleSnapshotJson,
+		&i.FailoverAttemptID,
 	)
 	return i, err
 }
 
 const getAgentSwitchByIdempotencyKey = `-- name: GetAgentSwitchByIdempotencyKey :one
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT id, session_id, idempotency_key, request_fingerprint, from_harness, target_harness, target_native_session_ref, target_start_mode, state, agent_handoff_status, source_transcript_status, semantic_handoff_included, agent_handoff_path, agent_handoff_hash, source_generation_id, target_generation_id, target_runtime_handle_id, target_acknowledged_at, error_code, requested_at, updated_at, final_handoff_path, final_handoff_hash, target_model, role_snapshot_json, failover_attempt_id
 FROM agent_switches
 WHERE session_id = ? AND idempotency_key = ?
 `
@@ -392,6 +403,9 @@ func (q *Queries) GetAgentSwitchByIdempotencyKey(ctx context.Context, arg GetAge
 		&i.UpdatedAt,
 		&i.FinalHandoffPath,
 		&i.FinalHandoffHash,
+		&i.TargetModel,
+		&i.RoleSnapshotJson,
+		&i.FailoverAttemptID,
 	)
 	return i, err
 }
@@ -438,7 +452,7 @@ func (q *Queries) InsertAgentNativeSession(ctx context.Context, arg InsertAgentN
 const insertAgentSwitch = `-- name: InsertAgentSwitch :execrows
 INSERT INTO agent_switches (
     id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
+    from_harness, target_harness, target_model, role_snapshot_json, failover_attempt_id,
     target_native_session_ref, target_start_mode,
     state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
     agent_handoff_path, agent_handoff_hash,
@@ -447,7 +461,7 @@ INSERT INTO agent_switches (
     requested_at, updated_at,
     final_handoff_path, final_handoff_hash
 ) VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 )
 ON CONFLICT DO NOTHING
 `
@@ -459,6 +473,9 @@ type InsertAgentSwitchParams struct {
 	RequestFingerprint      domain.AgentSwitchRequestFingerprint
 	FromHarness             domain.AgentHarness
 	TargetHarness           domain.AgentHarness
+	TargetModel             string
+	RoleSnapshotJson        string
+	FailoverAttemptID       string
 	TargetNativeSessionRef  *domain.AgentNativeSessionID
 	TargetStartMode         domain.AgentSwitchTargetStartMode
 	State                   domain.AgentSwitchState
@@ -486,6 +503,9 @@ func (q *Queries) InsertAgentSwitch(ctx context.Context, arg InsertAgentSwitchPa
 		arg.RequestFingerprint,
 		arg.FromHarness,
 		arg.TargetHarness,
+		arg.TargetModel,
+		arg.RoleSnapshotJson,
+		arg.FailoverAttemptID,
 		arg.TargetNativeSessionRef,
 		arg.TargetStartMode,
 		arg.State,
@@ -553,15 +573,7 @@ func (q *Queries) ListAgentNativeSessions(ctx context.Context, aoSessionID domai
 }
 
 const listAgentSwitches = `-- name: ListAgentSwitches :many
-SELECT id, session_id, idempotency_key, request_fingerprint,
-    from_harness, target_harness,
-    target_native_session_ref, target_start_mode,
-    state, agent_handoff_status, source_transcript_status, semantic_handoff_included,
-    agent_handoff_path, agent_handoff_hash,
-    source_generation_id, target_generation_id, target_runtime_handle_id,
-    target_acknowledged_at, error_code,
-    requested_at, updated_at,
-    final_handoff_path, final_handoff_hash
+SELECT id, session_id, idempotency_key, request_fingerprint, from_harness, target_harness, target_native_session_ref, target_start_mode, state, agent_handoff_status, source_transcript_status, semantic_handoff_included, agent_handoff_path, agent_handoff_hash, source_generation_id, target_generation_id, target_runtime_handle_id, target_acknowledged_at, error_code, requested_at, updated_at, final_handoff_path, final_handoff_hash, target_model, role_snapshot_json, failover_attempt_id
 FROM agent_switches
 WHERE session_id = ?
 ORDER BY requested_at DESC, id DESC
@@ -600,6 +612,9 @@ func (q *Queries) ListAgentSwitches(ctx context.Context, sessionID domain.Sessio
 			&i.UpdatedAt,
 			&i.FinalHandoffPath,
 			&i.FinalHandoffHash,
+			&i.TargetModel,
+			&i.RoleSnapshotJson,
+			&i.FailoverAttemptID,
 		); err != nil {
 			return nil, err
 		}

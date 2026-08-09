@@ -36,6 +36,7 @@ func TestAgentSwitchAcknowledgementRequiresExactSessionGenerationTuple(t *testin
 		State: domain.AgentSwitchPreparingHandoff, AgentHandoffStatus: domain.AgentHandoffNotAttempted,
 		SourceGenerationID: "source-generation", RequestedAt: now, UpdatedAt: now,
 	}
+	authorizeAgentSwitchFixture(&sw)
 	stored, created, err := s.CreateAgentSwitch(ctx, sw)
 	if err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)

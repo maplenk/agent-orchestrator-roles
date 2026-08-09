@@ -59,7 +59,7 @@ INSERT INTO sessions (
 	if err := migrate(db); err != nil {
 		t.Fatalf("migrate copied fork-9008 database: %v", err)
 	}
-	for _, version := range []int64{85, 9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009} {
+	for _, version := range []int64{85, 9000, 9001, 9002, 9003, 9004, 9005, 9006, 9007, 9008, 9009, 9010} {
 		var applied int
 		if err := db.QueryRow(`
 SELECT COALESCE((
@@ -108,6 +108,7 @@ func applyHistoricalFork9008(t *testing.T, db *sql.DB) {
 		48: true, 49: true, 54: true,
 		80: true, 81: true, 82: true, 83: true, 84: true, 85: true,
 		9009: true,
+		9010: true,
 	}
 	paths, err := fs.Glob(migrationsFS, "migrations/*.sql")
 	if err != nil {

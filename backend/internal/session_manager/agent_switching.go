@@ -47,9 +47,15 @@ var errSourceHandoffOwnershipChanged = errors.New("source session ownership chan
 // SwitchAgentConfig describes one deliberate, user-requested provider
 // replacement.
 type SwitchAgentConfig struct {
-	TargetHarness  domain.AgentHarness
-	Note           string
-	IdempotencyKey string
+	TargetHarness              domain.AgentHarness
+	TargetModel                string
+	Note                       string
+	IdempotencyKey             string
+	RequiredTargetGenerationID domain.AgentGenerationID
+	AllocateTargetGeneration   func() domain.AgentGenerationID
+	ExpectedSourceGenerationID domain.AgentGenerationID
+	RoleSnapshot               domain.SessionRoleBinding
+	FailoverAttemptID          string
 }
 
 type preparedTargetActivation struct {
@@ -90,6 +96,19 @@ func (m *Manager) switchStore() (ports.AgentSwitchStore, error) {
 // accepted by the target generation. Operational ownership boundaries and the
 // exact finalized hidden continuation remain durable for crash recovery.
 func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg SwitchAgentConfig) (result domain.AgentSwitch, retErr error) {
+	return m.switchAgentWithAdmission(ctx, id, cfg, nil)
+}
+
+// switchAgentWithAdmission runs an optional durable admission write under the
+// same per-session gate as new-saga creation. Failover uses this to append its
+// attempt and audit row only after the source fence and active-saga checks have
+// succeeded; ordinary manual switching passes nil.
+func (m *Manager) switchAgentWithAdmission(
+	ctx context.Context,
+	id domain.SessionID,
+	cfg SwitchAgentConfig,
+	admit func(context.Context) error,
+) (result domain.AgentSwitch, retErr error) {
 	store, err := m.switchStore()
 	if err != nil {
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, err)
@@ -98,9 +117,10 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, ErrAgentSwitchInitiationDisabled)
 	}
 	cfg.TargetHarness = domain.AgentHarness(strings.TrimSpace(string(cfg.TargetHarness)))
+	cfg.TargetModel = strings.TrimSpace(cfg.TargetModel)
 	cfg.Note = boundedString(strings.TrimSpace(cfg.Note), maxSwitchNoteBytes)
 	cfg.IdempotencyKey = strings.TrimSpace(cfg.IdempotencyKey)
-	requestFingerprint := domain.ComputeAgentSwitchRequestFingerprint(id, cfg.TargetHarness, cfg.Note)
+	requestFingerprint := domain.ComputeAuthorizedAgentSwitchRequestFingerprint(id, cfg.TargetHarness, cfg.TargetModel, cfg.Note)
 	if cfg.IdempotencyKey != "" {
 		if existing, ok, err := store.GetAgentSwitchByIdempotencyKey(ctx, id, cfg.IdempotencyKey); err != nil {
 			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: idempotency lookup: %w", id, err)
@@ -198,6 +218,21 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 	if rec.Harness == cfg.TargetHarness {
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w: %s", id, ErrAlreadyUsingHarness, cfg.TargetHarness)
 	}
+	// The first idempotency lookup happened before acquiring the in-process
+	// gate. Recheck durable ownership under that gate before a failover attempt
+	// is admitted, so a concurrent manual saga cannot spend its rung.
+	if active, exists, activeErr := store.GetActiveAgentSwitch(ctx, id); activeErr != nil {
+		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: active saga recheck: %w", id, activeErr)
+	} else if exists {
+		if active.IdempotencyKey == cfg.IdempotencyKey {
+			if active.RequestFingerprint != requestFingerprint {
+				return active, fmt.Errorf("switch agent %s: %w", id, domain.ErrAgentSwitchIdempotencyConflict)
+			}
+			return active, nil
+		}
+		return active, fmt.Errorf("switch agent %s: %w", id,
+			errors.Join(domain.ErrAgentSwitchInProgress, agentSwitchRecoveryError(active)))
+	}
 
 	project, err := m.loadProject(ctx, rec.ProjectID)
 	if err != nil {
@@ -216,16 +251,34 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, errors.Join(ErrUnsupportedSwitchHarness, err))
 	}
 
-	sourceGeneration := domain.AgentGenerationID(strings.TrimSpace(rec.Metadata.RuntimeLaunchID))
+	observedSourceGeneration := domain.AgentGenerationID(strings.TrimSpace(rec.Metadata.RuntimeLaunchID))
+	if cfg.ExpectedSourceGenerationID != "" && cfg.ExpectedSourceGenerationID != observedSourceGeneration {
+		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w: expected %s, observed %s", id,
+			ErrAgentSwitchSourceGenerationChanged, cfg.ExpectedSourceGenerationID, observedSourceGeneration)
+	}
+	sourceGeneration := observedSourceGeneration
 	if sourceGeneration == "" {
 		// Sessions created by older AO versions predate unconditional generation
 		// ids. A unique legacy fence still makes handoff submission idempotent;
 		// the target generation is always a real AO_RUNTIME_LAUNCH_ID.
 		sourceGeneration = domain.AgentGenerationID("legacy-" + uuid.NewString())
 	}
-	targetGeneration := domain.AgentGenerationID(strings.TrimSpace(m.newLaunchID()))
+	targetGeneration := domain.AgentGenerationID(strings.TrimSpace(string(cfg.RequiredTargetGenerationID)))
+	if targetGeneration == "" && cfg.AllocateTargetGeneration != nil {
+		targetGeneration = domain.AgentGenerationID(strings.TrimSpace(string(cfg.AllocateTargetGeneration())))
+	}
+	if targetGeneration == "" {
+		// Compatibility for deliberately narrow manager embedders. Production
+		// policy supplies AllocateTargetGeneration; failover supplies Required.
+		targetGeneration = domain.AgentGenerationID(strings.TrimSpace(m.newLaunchID()))
+	}
 	if targetGeneration == "" {
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: allocate target generation: empty generation", id)
+	}
+	if admit != nil {
+		if err := admit(ctx); err != nil {
+			return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: durable admission: %w", id, err)
+		}
 	}
 	sourceEnv := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, "")
 	m.augmentAgentRuntimeEnv(sourceAgent, sourceEnv)
@@ -242,6 +295,9 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 		RequestFingerprint:     requestFingerprint,
 		FromHarness:            rec.Harness,
 		TargetHarness:          cfg.TargetHarness,
+		TargetModel:            cfg.TargetModel,
+		RoleSnapshot:           cfg.RoleSnapshot,
+		FailoverAttemptID:      strings.TrimSpace(cfg.FailoverAttemptID),
 		State:                  domain.AgentSwitchPreparingHandoff,
 		AgentHandoffStatus:     domain.AgentHandoffNotAttempted,
 		SourceTranscriptStatus: domain.AgentSwitchSourceTranscriptNotAttempted,
@@ -792,6 +848,10 @@ func (m *Manager) prepareTargetActivation(ctx context.Context, store ports.Agent
 		return preparedTargetActivation{}, fmt.Errorf("system prompt file: %w", err)
 	}
 	config := effectiveAgentConfig(rec.Kind, project.Config)
+	// The policy snapshot is authoritative for this target. Assignment (rather
+	// than nonempty overlay) intentionally clears a project-wide source model
+	// when the authorized target selects the provider default.
+	config.Model = sw.TargetModel
 	env := m.runtimeEnv(rec.ID, rec.ProjectID, rec.IssueID, project.Config.Env, "")
 	m.augmentAgentRuntimeEnv(agent, env)
 	configDir, err := nativeConfigDir(ctx, agent, env)

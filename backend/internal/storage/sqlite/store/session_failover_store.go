@@ -81,21 +81,22 @@ func (s *Store) AppendSessionFailoverAttemptWithLedger(
 			return fmt.Errorf("ledger row %s: %w", ledger.ID, err)
 		}
 		if err := q.InsertSessionFailoverAttempt(ctx, gen.InsertSessionFailoverAttemptParams{
-			ID:           attempt.ID,
-			SessionID:    string(attempt.SessionID),
-			ProjectID:    string(attempt.ProjectID),
-			IncidentID:   attempt.IncidentID,
-			Seq:          int64(attempt.Seq),
-			RoleID:       attempt.RoleID,
-			FromHarness:  string(attempt.FromHarness),
-			FromModel:    attempt.FromModel,
-			ToHarness:    string(attempt.ToHarness),
-			ToModel:      attempt.ToModel,
-			RungIndex:    int64(attempt.RungIndex),
-			GenerationID: attempt.GenerationID,
-			State:        string(attempt.State),
-			CreatedAt:    attempt.CreatedAt.UTC(),
-			UpdatedAt:    attempt.UpdatedAt.UTC(),
+			ID:                 attempt.ID,
+			SessionID:          string(attempt.SessionID),
+			ProjectID:          string(attempt.ProjectID),
+			IncidentID:         attempt.IncidentID,
+			Seq:                int64(attempt.Seq),
+			RoleID:             attempt.RoleID,
+			FromHarness:        string(attempt.FromHarness),
+			FromModel:          attempt.FromModel,
+			ToHarness:          string(attempt.ToHarness),
+			ToModel:            attempt.ToModel,
+			RungIndex:          int64(attempt.RungIndex),
+			GenerationID:       attempt.GenerationID,
+			SourceGenerationID: attempt.SourceGenerationID,
+			State:              string(attempt.State),
+			CreatedAt:          attempt.CreatedAt.UTC(),
+			UpdatedAt:          attempt.UpdatedAt.UTC(),
 		}); err != nil {
 			return fmt.Errorf("attempt row %s: %w", attempt.ID, err)
 		}
@@ -198,6 +199,9 @@ func validateFailoverAttempt(a domain.FailoverAttempt) error {
 	if strings.TrimSpace(a.GenerationID) == "" {
 		return fmt.Errorf("failover attempt %s: generation_id required", a.ID)
 	}
+	if strings.TrimSpace(a.SourceGenerationID) == "" {
+		return fmt.Errorf("failover attempt %s: source_generation_id required", a.ID)
+	}
 	return nil
 }
 
@@ -205,21 +209,22 @@ func failoverAttemptsToDomain(rows []gen.SessionFailoverAttempt) []domain.Failov
 	out := make([]domain.FailoverAttempt, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, domain.FailoverAttempt{
-			ID:           r.ID,
-			SessionID:    domain.SessionID(r.SessionID),
-			ProjectID:    domain.ProjectID(r.ProjectID),
-			IncidentID:   r.IncidentID,
-			Seq:          int(r.Seq),
-			RoleID:       r.RoleID,
-			FromHarness:  domain.AgentHarness(r.FromHarness),
-			FromModel:    r.FromModel,
-			ToHarness:    domain.AgentHarness(r.ToHarness),
-			ToModel:      r.ToModel,
-			RungIndex:    int(r.RungIndex),
-			GenerationID: r.GenerationID,
-			State:        domain.FailoverAttemptState(r.State),
-			CreatedAt:    r.CreatedAt.UTC(),
-			UpdatedAt:    r.UpdatedAt.UTC(),
+			ID:                 r.ID,
+			SessionID:          domain.SessionID(r.SessionID),
+			ProjectID:          domain.ProjectID(r.ProjectID),
+			IncidentID:         r.IncidentID,
+			Seq:                int(r.Seq),
+			RoleID:             r.RoleID,
+			FromHarness:        domain.AgentHarness(r.FromHarness),
+			FromModel:          r.FromModel,
+			ToHarness:          domain.AgentHarness(r.ToHarness),
+			ToModel:            r.ToModel,
+			RungIndex:          int(r.RungIndex),
+			GenerationID:       r.GenerationID,
+			SourceGenerationID: r.SourceGenerationID,
+			State:              domain.FailoverAttemptState(r.State),
+			CreatedAt:          r.CreatedAt.UTC(),
+			UpdatedAt:          r.UpdatedAt.UTC(),
 		})
 	}
 	return out

@@ -57,6 +57,9 @@ type AgentSwitch struct {
 	UpdatedAt               time.Time
 	FinalHandoffPath        string
 	FinalHandoffHash        string
+	TargetModel             string
+	RoleSnapshotJson        string
+	FailoverAttemptID       string
 }
 
 type AppSetting struct {
@@ -433,21 +436,22 @@ type SessionCleanupFact struct {
 }
 
 type SessionFailoverAttempt struct {
-	ID           string
-	SessionID    string
-	ProjectID    string
-	IncidentID   string
-	Seq          int64
-	RoleID       string
-	FromHarness  string
-	FromModel    string
-	ToHarness    string
-	ToModel      string
-	RungIndex    int64
-	GenerationID string
-	State        string
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID                 string
+	SessionID          string
+	ProjectID          string
+	IncidentID         string
+	Seq                int64
+	RoleID             string
+	FromHarness        string
+	FromModel          string
+	ToHarness          string
+	ToModel            string
+	RungIndex          int64
+	GenerationID       string
+	State              string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	SourceGenerationID string
 }
 
 type SessionInterfaceTransition struct {

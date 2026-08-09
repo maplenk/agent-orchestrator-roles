@@ -362,6 +362,8 @@ type switchTestAgent struct {
 	restoreSystemPrompt string
 	launchSystemFile    string
 	restoreSystemFile   string
+	launchModel         string
+	restoreModel        string
 }
 
 type switchReleaseLCM struct {
@@ -485,6 +487,7 @@ func (a *switchTestAgent) GetLaunchCommand(_ context.Context, cfg ports.LaunchCo
 	a.launchNativeID = cfg.NativeSessionID
 	a.launchSystemPrompt = cfg.SystemPrompt
 	a.launchSystemFile = cfg.SystemPromptFile
+	a.launchModel = cfg.Config.Model
 	return []string{"agent", "fresh", cfg.Prompt}, nil
 }
 
@@ -496,6 +499,7 @@ func (a *switchTestAgent) GetRestoreCommand(_ context.Context, cfg ports.Restore
 	a.restorePrompt = cfg.Prompt
 	a.restoreSystemPrompt = cfg.SystemPrompt
 	a.restoreSystemFile = cfg.SystemPromptFile
+	a.restoreModel = cfg.Config.Model
 	return []string{"agent", "resume", id, cfg.Prompt}, true, nil
 }
 
@@ -1256,6 +1260,63 @@ func TestSwitchAgentEmptyTargetGenerationRefusesBeforeSourceInteraction(t *testi
 	}
 	if manager.SessionMutationInProgress("proj-1") {
 		t.Fatal("empty generation refusal retained the transient input gate")
+	}
+}
+
+func TestSwitchAgentPersistsAndLaunchesExactAuthorizedIntent(t *testing.T) {
+	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
+	manager, store, _ := newSwitchTestManager(t, runtime)
+	manager.newLaunchID = func() string {
+		t.Fatal("manager substituted the policy-owned target generation")
+		return ""
+	}
+	target := manager.agents.(switchTestAgents)[domain.HarnessCodex].(*switchTestAgent)
+	role := domain.SessionRoleBinding{
+		RoleID: "implementor", RoleMapSchemaVersion: 1, RoleMapSHA256: strings.Repeat("a", 64),
+		ResolvedHarness: domain.HarnessCodex, ResolvedModel: "o3",
+		ResolvedPermissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+	}
+
+	sw, err := manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
+		TargetHarness: domain.HarnessCodex, TargetModel: "o3", IdempotencyKey: "authorized-intent",
+		RequiredTargetGenerationID: "policy-target-generation",
+		ExpectedSourceGenerationID: "source-generation",
+		RoleSnapshot:               role, FailoverAttemptID: "proj-1:incident-1:1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sw.TargetGenerationID != "policy-target-generation" || sw.TargetModel != "o3" ||
+		sw.RoleSnapshot != role || sw.FailoverAttemptID != "proj-1:incident-1:1" {
+		t.Fatalf("durable authorized intent = %+v", sw)
+	}
+	if target.launchModel != "o3" && target.restoreModel != "o3" {
+		t.Fatalf("target launch model = fresh %q restore %q, want o3", target.launchModel, target.restoreModel)
+	}
+	if stored := store.switches[sw.ID]; stored.TargetGenerationID != sw.TargetGenerationID || stored.TargetModel != sw.TargetModel {
+		t.Fatalf("stored intent = %+v", stored)
+	}
+}
+
+func TestSwitchAgentRejectsStaleExpectedSourceBeforeAdmission(t *testing.T) {
+	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
+	manager, store, _ := newSwitchTestManager(t, runtime)
+	admitted := false
+
+	_, err := manager.switchAgentWithAdmission(context.Background(), "proj-1", SwitchAgentConfig{
+		TargetHarness: domain.HarnessCodex, IdempotencyKey: "stale-source-intent",
+		RequiredTargetGenerationID: "policy-target-generation",
+		ExpectedSourceGenerationID: "stale-source-generation",
+	}, func(context.Context) error {
+		admitted = true
+		return nil
+	})
+	if !errors.Is(err, ErrAgentSwitchSourceGenerationChanged) {
+		t.Fatalf("SwitchAgent error = %v, want source-generation CAS", err)
+	}
+	if admitted || len(store.switches) != 0 || len(store.native) != 0 || runtime.created != 0 || runtime.destroyed != 0 {
+		t.Fatalf("stale source mutated state: admitted=%v switches=%d native=%d created=%d destroyed=%d",
+			admitted, len(store.switches), len(store.native), runtime.created, runtime.destroyed)
 	}
 }
 

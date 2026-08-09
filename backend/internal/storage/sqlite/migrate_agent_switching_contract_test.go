@@ -37,9 +37,11 @@ INSERT INTO sessions (
 INSERT INTO agent_switches (
     id, session_id, idempotency_key, request_fingerprint,
     from_harness, target_harness, state, agent_handoff_status,
-    source_generation_id, requested_at, updated_at
+    source_generation_id, target_generation_id, role_snapshot_json,
+    requested_at, updated_at
 ) VALUES (?, 'switch-contract-1', ?, ?, 'claude-code', 'codex', ?,
-          'not_attempted', 'source-generation', ?, ?);`,
+          'not_attempted', 'source-generation', 'target-generation',
+          '{"roleId":"test-worker","resolvedHarness":"codex"}', ?, ?);`,
 			id, id, "v1:"+strings.Repeat("a", 64), state, now, now)
 		return err
 	}
@@ -64,7 +66,7 @@ WHERE id = 'switch-contract';`, now.Add(time.Second)); err == nil {
 	if _, err := db.Exec(`
 UPDATE agent_switches
 SET state = 'stopping_source', target_start_mode = 'fresh',
-    target_generation_id = 'target-generation', updated_at = ?
+    updated_at = ?
 WHERE id = 'switch-contract';`, now.Add(time.Second)); err != nil {
 		t.Fatalf("record target plan: %v", err)
 	}

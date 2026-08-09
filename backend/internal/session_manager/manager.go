@@ -127,6 +127,9 @@ var (
 	// ErrSwitchNotFound is returned for a switch id outside the requested AO
 	// session (the same response is used for absent and cross-session ids).
 	ErrSwitchNotFound = errors.New("session: agent switch not found")
+	// ErrAgentSwitchSourceGenerationChanged rejects an authorized intent whose
+	// one-time source CAS no longer names the live session generation.
+	ErrAgentSwitchSourceGenerationChanged = errors.New("session: agent switch source generation changed")
 	// ErrStaleHandoff rejects semantic handoff submissions from an old provider
 	// generation or after the collection window has closed.
 	ErrStaleHandoff = errors.New("session: stale agent handoff")

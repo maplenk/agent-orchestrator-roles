@@ -17,11 +17,11 @@
 INSERT INTO session_failover_attempts (
     id, session_id, project_id, incident_id, seq,
     role_id, from_harness, from_model, to_harness, to_model,
-    rung_index, generation_id, state, created_at, updated_at
+    rung_index, generation_id, state, created_at, updated_at, source_generation_id
 ) VALUES (
     ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?
 );
 
 -- name: ListSessionFailoverAttemptsByIncident :many
@@ -32,7 +32,7 @@ INSERT INTO session_failover_attempts (
 SELECT
     id, session_id, project_id, incident_id, seq,
     role_id, from_harness, from_model, to_harness, to_model,
-    rung_index, generation_id, state, created_at, updated_at
+    rung_index, generation_id, state, created_at, updated_at, source_generation_id
 FROM session_failover_attempts
 WHERE session_id = ? AND incident_id = ?
 ORDER BY seq ASC;
@@ -45,7 +45,7 @@ ORDER BY seq ASC;
 SELECT
     id, session_id, project_id, incident_id, seq,
     role_id, from_harness, from_model, to_harness, to_model,
-    rung_index, generation_id, state, created_at, updated_at
+    rung_index, generation_id, state, created_at, updated_at, source_generation_id
 FROM session_failover_attempts
 WHERE session_id = ?
 ORDER BY created_at ASC, seq ASC;

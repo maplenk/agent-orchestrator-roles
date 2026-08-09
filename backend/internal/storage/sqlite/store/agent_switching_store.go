@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -576,11 +577,25 @@ func (s *Store) ActivateAgentSwitchTarget(ctx context.Context, activation domain
 		return false, fmt.Errorf("activate agent switch target %s: target native session %s has no provider-native identity", activation.SwitchID, activation.TargetNativeSessionRef)
 	}
 
+	applyRoleSnapshot := "0"
+	if sw.RoleSnapshot.RoleID != "" {
+		applyRoleSnapshot = "1"
+	}
 	n, err := q.ActivateSessionAgentSwitchTarget(ctx, gen.ActivateSessionAgentSwitchTargetParams{
 		TargetHarness: activation.TargetHarness, ActivatedAt: activation.ActivatedAt,
-		RuntimeHandleID:    activation.RuntimeHandleID,
-		TargetGenerationID: string(activation.TargetGenerationID),
-		SessionID:          activation.SessionID, ExpectedSourceHarness: activation.SourceHarness,
+		ApplyRoleSnapshot:          applyRoleSnapshot,
+		TargetRoleID:               sw.RoleSnapshot.RoleID,
+		TargetRoleMapSchemaVersion: int64(sw.RoleSnapshot.RoleMapSchemaVersion),
+		TargetRoleMapSha256:        sw.RoleSnapshot.RoleMapSHA256,
+		TargetRoleConfigRevision:   sw.RoleSnapshot.RoleConfigRevision,
+		TargetTemplateArtifactID:   sw.RoleSnapshot.TemplateArtifactID,
+		TargetTemplateSha256:       sw.RoleSnapshot.TemplateSHA256,
+		TargetModel:                sw.RoleSnapshot.ResolvedModel,
+		TargetWorkspaceWrites:      boolInt(sw.RoleSnapshot.ResolvedPermissions.WorkspaceWrites),
+		TargetCanSpawn:             boolInt(sw.RoleSnapshot.ResolvedPermissions.CanSpawn),
+		RuntimeHandleID:            activation.RuntimeHandleID,
+		TargetGenerationID:         string(activation.TargetGenerationID),
+		SessionID:                  activation.SessionID, ExpectedSourceHarness: activation.SourceHarness,
 		ExpectedSourceRuntimeLaunchID: activation.ExpectedSourceRuntimeLaunchID,
 	})
 	if err != nil {
@@ -637,6 +652,14 @@ func validateAgentSwitch(rec domain.AgentSwitch, create bool) error {
 	if !rec.FromHarness.IsKnown() || !rec.TargetHarness.IsKnown() || rec.FromHarness == rec.TargetHarness {
 		return fmt.Errorf("agent switch %s: source and distinct known target harnesses are required", rec.ID)
 	}
+	if rec.TargetModel != strings.TrimSpace(rec.TargetModel) || rec.FailoverAttemptID != strings.TrimSpace(rec.FailoverAttemptID) {
+		return fmt.Errorf("agent switch %s: target model and failover attempt id cannot have surrounding whitespace", rec.ID)
+	}
+	if rec.RoleSnapshot.RoleID != "" {
+		if rec.RoleSnapshot.ResolvedHarness != rec.TargetHarness || strings.TrimSpace(rec.RoleSnapshot.ResolvedModel) != rec.TargetModel {
+			return fmt.Errorf("agent switch %s: role snapshot does not match the authorized target", rec.ID)
+		}
+	}
 	if !rec.State.Valid() || !rec.TargetStartMode.Valid() || !rec.AgentHandoffStatus.Valid() || !rec.SourceTranscriptStatus.Valid() {
 		return fmt.Errorf("agent switch %s: invalid state, target start mode, handoff status, or transcript status", rec.ID)
 	}
@@ -658,8 +681,11 @@ func validateAgentSwitch(rec domain.AgentSwitch, create bool) error {
 	}
 	hasTargetGeneration := rec.TargetGenerationID != ""
 	hasTargetStartMode := rec.TargetStartMode != domain.AgentSwitchTargetStartPending
-	if hasTargetGeneration != hasTargetStartMode {
-		return fmt.Errorf("agent switch %s: target generation and start mode must be recorded together", rec.ID)
+	if hasTargetStartMode && !hasTargetGeneration {
+		return fmt.Errorf("agent switch %s: target start mode requires a target generation", rec.ID)
+	}
+	if hasTargetGeneration && !hasTargetStartMode && rec.State != domain.AgentSwitchPreparingHandoff && rec.State != domain.AgentSwitchFailed {
+		return fmt.Errorf("agent switch %s: a reserved target generation may be pending only while preparing handoff", rec.ID)
 	}
 	switch rec.State {
 	case domain.AgentSwitchStoppingSource, domain.AgentSwitchSourceStopped,
@@ -703,13 +729,14 @@ func validateAgentSwitch(rec domain.AgentSwitch, create bool) error {
 	}
 	if create {
 		if rec.State != domain.AgentSwitchPreparingHandoff || rec.TargetNativeSessionRef != nil ||
-			rec.TargetStartMode != domain.AgentSwitchTargetStartPending || rec.TargetGenerationID != "" ||
+			rec.TargetStartMode != domain.AgentSwitchTargetStartPending || rec.TargetGenerationID == "" ||
 			rec.TargetRuntimeHandleID != "" || rec.TargetAcknowledgedAt != nil ||
 			rec.AgentHandoffStatus != domain.AgentHandoffNotAttempted ||
 			rec.SemanticHandoffIncluded ||
 			rec.AgentHandoffPath != "" || rec.AgentHandoffHash != "" ||
 			rec.FinalHandoffPath != "" || rec.FinalHandoffHash != "" ||
-			(rec.SourceTranscriptStatus != "" && rec.SourceTranscriptStatus != domain.AgentSwitchSourceTranscriptNotAttempted) {
+			(rec.SourceTranscriptStatus != "" && rec.SourceTranscriptStatus != domain.AgentSwitchSourceTranscriptNotAttempted) ||
+			strings.TrimSpace(rec.RoleSnapshot.RoleID) == "" {
 			return fmt.Errorf("agent switch %s: a new saga must be preparing handoff without target launch or handoff facts", rec.ID)
 		}
 	}
@@ -807,10 +834,13 @@ func sameAgentNativeCreateIdentity(a, b domain.AgentNativeSession) bool {
 }
 
 func agentSwitchToInsert(rec domain.AgentSwitch) gen.InsertAgentSwitchParams {
+	roleSnapshotJSON, _ := json.Marshal(rec.RoleSnapshot)
 	return gen.InsertAgentSwitchParams{
 		ID: rec.ID, SessionID: rec.SessionID, IdempotencyKey: rec.IdempotencyKey,
 		RequestFingerprint: rec.RequestFingerprint,
 		FromHarness:        rec.FromHarness, TargetHarness: rec.TargetHarness,
+		TargetModel: rec.TargetModel, RoleSnapshotJson: string(roleSnapshotJSON),
+		FailoverAttemptID:      rec.FailoverAttemptID,
 		TargetNativeSessionRef: rec.TargetNativeSessionRef,
 		TargetStartMode:        rec.TargetStartMode, State: rec.State,
 		AgentHandoffStatus:      rec.AgentHandoffStatus,
@@ -830,10 +860,16 @@ func agentSwitchToInsert(rec domain.AgentSwitch) gen.InsertAgentSwitchParams {
 }
 
 func agentSwitchFromGen(row gen.AgentSwitch) domain.AgentSwitch {
+	var roleSnapshot domain.SessionRoleBinding
+	if row.RoleSnapshotJson != "" {
+		_ = json.Unmarshal([]byte(row.RoleSnapshotJson), &roleSnapshot)
+	}
 	return domain.AgentSwitch{
 		ID: row.ID, SessionID: row.SessionID, IdempotencyKey: row.IdempotencyKey,
 		RequestFingerprint: row.RequestFingerprint,
 		FromHarness:        row.FromHarness, TargetHarness: row.TargetHarness,
+		TargetModel: row.TargetModel, RoleSnapshot: roleSnapshot,
+		FailoverAttemptID:      row.FailoverAttemptID,
 		TargetNativeSessionRef: cloneNativeSessionID(row.TargetNativeSessionRef),
 		TargetStartMode:        row.TargetStartMode, State: row.State,
 		AgentHandoffStatus:      row.AgentHandoffStatus,
