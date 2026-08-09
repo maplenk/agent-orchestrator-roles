@@ -410,8 +410,13 @@ type Manager struct {
 	preview             PreviewLifecycle
 	browser             BrowserLifecycle
 	browserCapabilities BrowserCapabilityIssuer
-	dataDir             string
-	clock               func() time.Time
+	// Initiation and recovery are deliberately independent. A forward rollback
+	// may refuse new switches while retaining the engine required to drain an
+	// already-durable saga.
+	agentSwitchInitiationEnabled     bool
+	canRecoverNonterminalAgentSwitch bool
+	dataDir                          string
+	clock                            func() time.Time
 	// openTranscriptFile is os.Open in production. The narrow seam lets tests
 	// deterministically prove that a post-stop transcript read failure falls
 	// back without advertising the provider path.
@@ -695,6 +700,9 @@ type Deps struct {
 	Preview             PreviewLifecycle
 	Browser             BrowserLifecycle
 	BrowserCapabilities BrowserCapabilityIssuer
+	// AgentSwitchCapabilities overrides the capabilities inferred from Store.
+	// Nil enables both only when Store implements the durable switch engine.
+	AgentSwitchCapabilities *AgentSwitchCapabilities
 	// DataDir is exported to spawned agents as AO_DATA_DIR so their hook
 	// commands can open the same store.
 	DataDir string
@@ -714,38 +722,55 @@ type Deps struct {
 	Logger *slog.Logger
 }
 
+// AgentSwitchCapabilities keeps accepting new switch requests separate from
+// the ability to recover durable ownership left by a prior build.
+type AgentSwitchCapabilities struct {
+	InitiationEnabled bool
+	RecoveryEnabled   bool
+}
+
 // New builds a Session Manager from its dependencies, defaulting the clock to
 // time.Now when Deps.Clock is nil.
 func New(d Deps) *Manager {
+	_, hasAgentSwitchEngine := d.Store.(ports.AgentSwitchStore)
+	agentSwitchCapabilities := AgentSwitchCapabilities{
+		InitiationEnabled: hasAgentSwitchEngine,
+		RecoveryEnabled:   hasAgentSwitchEngine,
+	}
+	if d.AgentSwitchCapabilities != nil {
+		agentSwitchCapabilities = *d.AgentSwitchCapabilities
+	}
 	m := &Manager{
-		runtime:                      d.Runtime,
-		agents:                       d.Agents,
-		workspace:                    d.Workspace,
-		store:                        d.Store,
-		defaults:                     d.Defaults,
-		chat:                         d.Chat,
-		lcm:                          d.Lifecycle,
-		preview:                      d.Preview,
-		browser:                      d.Browser,
-		browserCapabilities:          d.BrowserCapabilities,
-		dataDir:                      d.DataDir,
-		clock:                        d.Clock,
-		openTranscriptFile:           os.Open,
-		lookPath:                     d.LookPath,
-		executable:                   d.Executable,
-		newLaunchID:                  d.NewLaunchID,
-		resuming:                     make(map[domain.SessionID]struct{}),
-		switching:                    make(map[domain.SessionID]struct{}),
-		automaticFailovers:           make(map[automaticFailoverKey]struct{}),
-		projectOwnership:             make(map[domain.ProjectID]chan struct{}),
-		agentOperations:              make(map[domain.SessionID]agentOperationKind),
-		switchDecisionInput:          make(map[domain.SessionID]domain.AgentSwitchID),
-		retainedSwitches:             make(map[domain.SessionID]struct{}),
-		inputLeases:                  make(map[domain.SessionID]int),
-		inputDrained:                 make(map[domain.SessionID]chan struct{}),
-		handoffWait:                  60 * time.Second,
-		switchPermissionDecisionWait: 2 * time.Minute,
-		switchTargetStartWait:        3 * time.Second,
+		runtime:                          d.Runtime,
+		agents:                           d.Agents,
+		workspace:                        d.Workspace,
+		store:                            d.Store,
+		defaults:                         d.Defaults,
+		chat:                             d.Chat,
+		lcm:                              d.Lifecycle,
+		preview:                          d.Preview,
+		browser:                          d.Browser,
+		browserCapabilities:              d.BrowserCapabilities,
+		agentSwitchInitiationEnabled:     agentSwitchCapabilities.InitiationEnabled && hasAgentSwitchEngine,
+		canRecoverNonterminalAgentSwitch: agentSwitchCapabilities.RecoveryEnabled && hasAgentSwitchEngine,
+		dataDir:                          d.DataDir,
+		clock:                            d.Clock,
+		openTranscriptFile:               os.Open,
+		lookPath:                         d.LookPath,
+		executable:                       d.Executable,
+		newLaunchID:                      d.NewLaunchID,
+		resuming:                         make(map[domain.SessionID]struct{}),
+		switching:                        make(map[domain.SessionID]struct{}),
+		automaticFailovers:               make(map[automaticFailoverKey]struct{}),
+		projectOwnership:                 make(map[domain.ProjectID]chan struct{}),
+		agentOperations:                  make(map[domain.SessionID]agentOperationKind),
+		switchDecisionInput:              make(map[domain.SessionID]domain.AgentSwitchID),
+		retainedSwitches:                 make(map[domain.SessionID]struct{}),
+		inputLeases:                      make(map[domain.SessionID]int),
+		inputDrained:                     make(map[domain.SessionID]chan struct{}),
+		handoffWait:                      60 * time.Second,
+		switchPermissionDecisionWait:     2 * time.Minute,
+		switchTargetStartWait:            3 * time.Second,
 		// Provider startup, including slow MCP initialization, can delay the
 		// prompt-submit hook even though the continuation is correctly buffered.
 		// Keep the acknowledgement wait below the CLI's seven-minute switch timeout
@@ -2912,11 +2937,16 @@ func (m *Manager) reconcileReap(ctx context.Context, rec domain.SessionRecord) e
 // pass so the daemon cannot serve with an unknown switch and an open input
 // fence.
 func (m *Manager) Reconcile(ctx context.Context) error {
+	if err := m.validateAgentSwitchRecoveryCapability(ctx); err != nil {
+		return fmt.Errorf("reconcile: agent-switch recovery capability: %w", err)
+	}
 	// A daemon restart destroys the in-memory input fence. Close any durable
 	// non-terminal switch before adopting runtimes so the API never implies an
 	// unconfirmed continuation was delivered.
-	if err := m.ReconcileAgentSwitches(ctx); err != nil {
-		return fmt.Errorf("reconcile: agent-switch pass: %w", err)
+	if m.canRecoverNonterminalAgentSwitch {
+		if err := m.ReconcileAgentSwitches(ctx); err != nil {
+			return fmt.Errorf("reconcile: agent-switch pass: %w", err)
+		}
 	}
 	m.startTransitionMessageDispatcher(ctx)
 	_, err := m.recoverInterruptedInterfaceTransitions(ctx)
