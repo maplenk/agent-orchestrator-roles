@@ -2,9 +2,10 @@
 
 **Status:** implementation and the locally executable acceptance matrix are
 complete on `codex/upstream-sync3-integration` at
-`81302eb53bfb8f7edd15bafee0bb267d6ff59437`. Promotion, real-desktop dogfood,
-GitHub branch-protection enforcement, Windows execution, and release-conductor
-artifact checks remain pending as recorded below.
+`5a37008494d1f56b03577d2d65a3192d7d6502ac`. Promotion, GitHub
+branch-protection enforcement, Windows execution, and release-conductor
+artifact checks remain pending as recorded below. Real-desktop dogfood is
+complete.
 
 **Fork source:** `roles/multi-sub-v1` at
 `37f2db5471d667e225d131babe6555f031229684`.
@@ -18,7 +19,7 @@ artifact checks remain pending as recorded below.
 **Integration branch:** `codex/upstream-sync3-integration`.
 
 **Validated implementation head:**
-`81302eb53bfb8f7edd15bafee0bb267d6ff59437` (32 integration commits after the
+`5a37008494d1f56b03577d2d65a3192d7d6502ac` (37 integration commits after the
 merge).
 
 **Promotion target:** `roles/multi-sub-v1`.
@@ -357,8 +358,8 @@ recorded at the top of this ledger.
 | Phase 2 provider continuity and handoff | `7a533f53b`, `89f957423`, `4a94473f5`, `bb3ec3bea`, `10d5d25ff`, `81a709b0f` | provider-native continuation probes hardened; native identity promoted only after exact acknowledgement; recovery-incapable boot refused; final handoff precedes source stop; initiation separated from recovery; adversarial boundary coverage added |
 | Maintenance automation | `7744297be` | daily/manual upstream drift inventory, fast-forward-only fork mirror, high-risk classification, and one stable tracker workflow added without any automatic fork-trunk merge |
 | Phase 3 policy, recovery and failover convergence | `b31f406f8`, `190ea997d`, `5d5a7866e`, `97c7913c7`, `26584306a`, `e2a8c597f`, `45631c0dd`, `866d3f08e` | exact-fenced safe recovery; immutable target/model/role intent; failover role snapshot; worker route enforcement; idempotent policy proof; automatic failover convergence; final generation and recovery gates closed |
-| Phase 4 API, CLI and desktop | `b4038015e`, `6457c621d`, `c68f36e1b`, `4703071f1` | safe worker switch controls; canonical create/history/options/exact-recovery HTTP contract; legacy switch compatibility wrapper; HTTP-only CLI idempotency/note/JSON/history/recovery; generated client adoption; settings/task-flow conflict reconciliation |
-| Final acceptance and lint reconciliation | `5d91676c1`, `7aede584d`, `32481ebcc`, `b0e8201e6`, `81302eb53` | missing orchestrator-mode paths restored; manager, service/controller, provider and storage lint cleared; Muse top-level activity contract restored |
+| Phase 4 API, CLI and desktop | `b4038015e`, `6457c621d`, `c68f36e1b`, `4703071f1`, `f8d31046b` | safe worker switch controls; canonical create/history/options/exact-recovery HTTP contract; legacy switch compatibility wrapper; HTTP-only CLI idempotency/note/JSON/history/recovery; generated client adoption; settings/task-flow conflict reconciliation; real-xterm handle replacement no longer races xterm's queued viewport work |
+| Final acceptance and lint reconciliation | `5d91676c1`, `7aede584d`, `32481ebcc`, `b0e8201e6`, `81302eb53`, `fae06ab9e`, `120bdcc6a`, `5a3700849` | missing orchestrator-mode paths restored; manager, service/controller, provider and storage lint cleared; Muse top-level activity contract restored; all merged preview, navigation, inspector, terminal-tab and retained-terminal E2E contracts reconciled with the shipped UI |
 
 The canonical worker-switch operation now authorizes the exact role-map
 harness/model pair before saga creation, persists the target and source
@@ -398,8 +399,9 @@ their final sources.
 | `npm run typecheck:e2e` | passed |
 | `AO_AGENT_BROWSER_TEST_BINARY=$PWD/agent-browser/agent-browser npm run test -- --reporter=dot` | 2,222 of 2,222 Vitest tests passed; zero skips |
 | `npm run test:e2e:renderer` | 21 of 21 passed after installing the pinned Chromium build |
-| `npm run test:e2e` | passed with exit status 0 |
+| `npm run test:e2e` | 44 of 44 Playwright tests passed after the final merged-fixture reconciliation |
 | `npm run package` | passed; Electron Forge produced the local Darwin arm64 package |
+| real-xterm active-handle replacement regression | exact pre-fix `Viewport.syncScrollArea` exception reproduced; 1 of 1 passed after `f8d31046b` |
 | ConPTY cross-compile gate | passed; execution on a Windows host remains external |
 
 The generated client is the only renderer switch contract. The UI reads exact
@@ -437,7 +439,25 @@ its drift, no-drift, and non-fast-forward-refusal paths.
 These are environmental or repository-administration gates, not known local
 test failures:
 
-- **Desktop dogfood:** **PENDING — root will insert real-desktop evidence here.**
+- **Desktop dogfood:** passed in the real Electron development app with an
+  isolated `AO_DATA_DIR`, run file, and loopback port. A strict `implementor`
+  role resolved Claude Code as primary and Codex as its only authorized
+  failover. The TUI worker switched through durable switch
+  `switch-f5e9338a-db74-47cb-97fd-7ffb7604ba7d`; the unauthenticated source
+  timed out its optional semantic report, AO retained the available source
+  transcript, started Codex in `fresh` mode, promoted the session harness only
+  after acknowledgement, and Codex replied `SWITCHED`. Replaying the identical
+  idempotency key returned the same completed switch ID without a second
+  runtime. In the Electron renderer, the worker inspector exposed the switch
+  control and its history displayed `Claude Code → Codex`, `Fresh
+  conversation`, and `Completed`. The isolated worker was terminated and the
+  dev app shut down after the check. This dogfood also found a real xterm 5.5
+  disposal race during same-session terminal-handle replacement. Commit
+  `f8d31046b` defers only the terminal object's final disposal by one macrotask
+  while detaching AO listeners and transport synchronously; the exact
+  real-xterm reproduction, 86 focused Vitest tests, both TypeScript typechecks,
+  and a second isolated native Electron launch all passed without the renderer
+  exception.
 - **Promotion PR:** **PENDING — root will insert the PR URL here.**
 - `npx @redwoodjs/agent-ci run --all` could not run because this host has no
   Docker binary or socket.
