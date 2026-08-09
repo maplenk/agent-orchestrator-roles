@@ -37,6 +37,7 @@ type switchTestStore struct {
 	requestHandoffNoop            bool
 	failTransitionErr             error
 	getSwitchErrOnceWhenRequested error
+	panicAfterUpdateState         domain.AgentSwitchState
 }
 
 type switchDeliveryDeadlineStore struct {
@@ -174,6 +175,10 @@ func (s *switchTestStore) UpdateAgentSwitch(_ context.Context, rec domain.AgentS
 		return false, nil
 	}
 	s.switches[rec.ID] = rec
+	if s.panicAfterUpdateState == rec.State {
+		s.panicAfterUpdateState = ""
+		panic("simulated daemon crash after durable agent-switch state update")
+	}
 	return true, nil
 }
 
@@ -522,7 +527,27 @@ func (w switchTestWorkspace) ObserveWorkspace(_ context.Context, info ports.Work
 	return ports.WorkspaceObservation{Path: info.Path, Branch: info.Branch, HeadSHA: "abc123", Dirty: true, Changes: []ports.WorkspaceChange{{Status: " M", Path: "main.go"}}}, nil
 }
 
-func newSwitchTestManager(t *testing.T, runtime runtimeController) (*Manager, *switchTestStore, *fakeMessenger) {
+// switchTestPolicyManager is the test caller's policy adapter. Production
+// callers allocate a generation in service policy or failover admission; tests
+// that exercise the engine directly must make that ownership equally explicit.
+type switchTestPolicyManager struct {
+	*Manager
+}
+
+func (m *switchTestPolicyManager) SwitchAgent(
+	ctx context.Context,
+	id domain.SessionID,
+	cfg SwitchAgentConfig,
+) (domain.AgentSwitch, error) {
+	if cfg.RequiredTargetGenerationID == "" && cfg.AllocateTargetGeneration == nil {
+		cfg.AllocateTargetGeneration = func() domain.AgentGenerationID {
+			return domain.AgentGenerationID(m.newLaunchID())
+		}
+	}
+	return m.Manager.SwitchAgent(ctx, id, cfg)
+}
+
+func newSwitchTestManager(t *testing.T, runtime runtimeController) (*switchTestPolicyManager, *switchTestStore, *fakeMessenger) {
 	t.Helper()
 	root := t.TempDir()
 	workspacePath := filepath.Join(root, "workspace")
@@ -578,7 +603,7 @@ func newSwitchTestManager(t *testing.T, runtime runtimeController) (*Manager, *s
 			}
 		},
 	}
-	return manager, store, messenger
+	return &switchTestPolicyManager{Manager: manager}, store, messenger
 }
 
 func TestBuildSourceHandoffRequestUsesCurrentNativeSessionContext(t *testing.T) {
@@ -1244,9 +1269,8 @@ func TestSwitchAgentFreshPreservesAOIdentityAndDeliversArtifact(t *testing.T) {
 func TestSwitchAgentEmptyTargetGenerationRefusesBeforeSourceInteraction(t *testing.T) {
 	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
 	manager, store, _ := newSwitchTestManager(t, runtime)
-	manager.newLaunchID = func() string { return "" }
 
-	_, err := manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
+	_, err := manager.Manager.SwitchAgent(context.Background(), "proj-1", SwitchAgentConfig{
 		TargetHarness: domain.HarnessCodex, IdempotencyKey: "empty-generation",
 	})
 	if err == nil || !strings.Contains(err.Error(), "allocate target generation: empty generation") {

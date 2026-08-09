@@ -268,11 +268,6 @@ func (m *Manager) switchAgentWithAdmission(
 		targetGeneration = domain.AgentGenerationID(strings.TrimSpace(string(cfg.AllocateTargetGeneration())))
 	}
 	if targetGeneration == "" {
-		// Compatibility for deliberately narrow manager embedders. Production
-		// policy supplies AllocateTargetGeneration; failover supplies Required.
-		targetGeneration = domain.AgentGenerationID(strings.TrimSpace(m.newLaunchID()))
-	}
-	if targetGeneration == "" {
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: allocate target generation: empty generation", id)
 	}
 	if admit != nil {

@@ -319,7 +319,8 @@ func failoverFixture(t *testing.T) (*failoverFakeStore, *fakeRuntime, *Manager, 
 func canonicalFailoverFixture(t *testing.T) (*canonicalFailoverStore, *fakeRestartRuntime, *Manager, domain.SessionID) {
 	t.Helper()
 	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
-	manager, switchStore, _ := newSwitchTestManager(t, runtime)
+	testPolicy, switchStore, _ := newSwitchTestManager(t, runtime)
+	manager := testPolicy.Manager
 	id := domain.SessionID("proj-1")
 	rec := switchStore.sessions[id]
 	rec.Metadata.Role = domain.SessionRoleBinding{
@@ -548,6 +549,87 @@ func TestContinueFailover_NonterminalCanonicalSagaCannotSpendNextRung(t *testing
 		store.attempts[0].RungIndex != attempt.RungIndex ||
 		store.attempts[0].State != domain.FailoverAttemptPostStop {
 		t.Fatalf("reserved attempt identity changed: %+v", store.attempts[0])
+	}
+}
+
+func TestContinueFailover_DeliveringCrashRestartRecoversSameAttemptWithoutRedelivery(t *testing.T) {
+	store, runtime, manager, id := canonicalFailoverFixture(t)
+	store.panicAfterUpdateState = domain.AgentSwitchDelivering
+
+	var crash any
+	func() {
+		defer func() { crash = recover() }()
+		_, _ = manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	}()
+	if crash == nil {
+		t.Fatal("attempt 1 did not stop at the simulated post-delivery durable crash boundary")
+	}
+	if len(store.attempts) != 1 || len(store.switches) != 1 || store.appendCalls != 1 {
+		t.Fatalf("crashed attempt/saga/appends = %d/%d/%d, want 1/1/1",
+			len(store.attempts), len(store.switches), store.appendCalls)
+	}
+	attempt := store.attempts[0]
+	var saga domain.AgentSwitch
+	for _, saga = range store.switches {
+	}
+	if saga.State != domain.AgentSwitchDelivering || !agentSwitchMatchesFailoverAttempt(saga, attempt) {
+		t.Fatalf("attempt 1 did not reach exact durable delivery intent: attempt=%+v saga=%+v", attempt, saga)
+	}
+	if runtime.created != 1 {
+		t.Fatalf("attempt 1 target runtimes = %d, want 1", runtime.created)
+	}
+	originalAttemptID := attempt.ID
+	originalRung := attempt.RungIndex
+	originalGeneration := attempt.GenerationID
+	originalRuntimeHandle := saga.TargetRuntimeHandleID
+
+	_, err := manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("attempt 2 error = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if len(store.attempts) != 1 || store.appendCalls != 1 || runtime.created != 1 {
+		t.Fatalf("attempt 2 spent a rung or launched a target: attempts=%d appends=%d creates=%d",
+			len(store.attempts), store.appendCalls, runtime.created)
+	}
+	if got := store.attempts[0]; got.ID != originalAttemptID || got.RungIndex != originalRung ||
+		got.GenerationID != originalGeneration {
+		t.Fatalf("attempt 2 changed reserved identity: got=%+v want id=%s rung=%d generation=%s",
+			got, originalAttemptID, originalRung, originalGeneration)
+	}
+
+	restartMessenger := &fakeMessenger{}
+	restarted := New(Deps{
+		Runtime: runtime, Agents: manager.agents, Workspace: manager.workspace,
+		Store: store, Messenger: restartMessenger, Lifecycle: manager.lcm,
+		DataDir: manager.dataDir, Clock: manager.clock, LookPath: manager.lookPath,
+		Executable: manager.executable,
+		NewLaunchID: func() string {
+			t.Fatal("restart recovery allocated a second target generation")
+			return ""
+		},
+	})
+	recovered, err := restarted.RecoverAgentSwitch(context.Background(), id, saga.ID)
+	if err != nil {
+		t.Fatalf("restart recovery: %v", err)
+	}
+	if recovered.State != domain.AgentSwitchFailed ||
+		recovered.ErrorCode != domain.AgentSwitchErrorDeliveryUnconfirmed {
+		t.Fatalf("recovered saga = %+v, want failed delivery_unconfirmed", recovered)
+	}
+	if err := restarted.ReconcileFailoverAttempts(context.Background(), id); err != nil {
+		t.Fatalf("reconcile recovered failover attempt: %v", err)
+	}
+	if got := store.attempts[0]; got.ID != originalAttemptID || got.RungIndex != originalRung ||
+		got.GenerationID != originalGeneration || got.State != domain.FailoverAttemptFailed {
+		t.Fatalf("recovered attempt changed identity: got=%+v want id=%s rung=%d generation=%s failed",
+			got, originalAttemptID, originalRung, originalGeneration)
+	}
+	if runtime.created != 1 || recovered.TargetRuntimeHandleID != originalRuntimeHandle {
+		t.Fatalf("restart recovery changed target runtime: creates=%d handle=%q want=%q",
+			runtime.created, recovered.TargetRuntimeHandleID, originalRuntimeHandle)
+	}
+	if len(restartMessenger.msgs) != 0 {
+		t.Fatalf("restart recovery redelivered ambiguous continuation: %#v", restartMessenger.msgs)
 	}
 }
 
