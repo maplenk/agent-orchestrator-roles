@@ -133,8 +133,8 @@ func TestRolesMigrationsStartInTheForkRange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read migrations: %v", err)
 	}
-	// Upstream's highest at the pinned merge target (fa799a7a) is 0079.
-	const upstreamHighest = 79
+	// Upstream's highest at the immutable Sync 3 pin (6e9dbb1) is 0085.
+	const upstreamHighest = 85
 	// The fork's own range. Deliberately distant: upstream would have to add
 	// ~8900 migrations to reach it.
 	const forkRangeStart = 9000

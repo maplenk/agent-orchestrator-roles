@@ -473,7 +473,7 @@ func TestSendConfirm_ReNudgeStopsAtAPause(t *testing.T) {
 	m := newSendTestManager(t, signalingAgent{}, msg, st)
 
 	// A user send still goes through — pause does not lock the user out.
-	if err := m.Send(context.Background(), "s1", "do the thing"); err != nil {
+	if err := m.Send(context.Background(), "s1", "do the thing", nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if len(msg.msgs) == 0 {
@@ -499,7 +499,7 @@ func TestSendConfirm_ReNudgesWhenNotPaused(t *testing.T) {
 	msg := &fakeMessenger{}
 	m := newSendTestManager(t, signalingAgent{}, msg, st)
 
-	if err := m.Send(context.Background(), "s1", "do the thing"); err != nil {
+	if err := m.Send(context.Background(), "s1", "do the thing", nil); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if len(msg.msgs) < 2 {

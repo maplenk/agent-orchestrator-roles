@@ -138,7 +138,7 @@ func (m *Manager) EnsureOrchestrator(ctx context.Context, cfg ports.SpawnConfig,
 	for _, orch := range existing {
 		// Best effort: a retire notice can legitimately be suppressed (pane
 		// exited, awaiting input). Replacement must not depend on it landing.
-		if sendErr := m.Send(ctx, orch.ID, OrchestratorRetireNotice); sendErr != nil {
+		if sendErr := m.Send(ctx, orch.ID, OrchestratorRetireNotice, nil); sendErr != nil {
 			m.logger.Warn("orchestrator retire notice not delivered",
 				"session", orch.ID, "project", cfg.ProjectID, "err", sendErr)
 		}

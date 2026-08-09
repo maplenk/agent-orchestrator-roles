@@ -43,6 +43,7 @@ func (deadChatLauncher) RelayChatTurnWithID(context.Context, domain.SessionID, s
 }
 
 func (deadChatLauncher) StopChat(context.Context, domain.SessionID) error { return nil }
+func (deadChatLauncher) HasLiveChatController(domain.SessionID) bool      { return false }
 
 // A dead chat controller must answer POST /sessions/{id}/send the way it
 // already answers the conversation routes: 409 CHAT_CONTROLLER_NOT_READY.

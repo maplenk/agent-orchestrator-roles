@@ -50,6 +50,17 @@ type SessionMetadata struct {
 	RuntimeLaunchID   string `json:"runtimeLaunchId,omitempty"`
 	AgentSessionID    string `json:"agentSessionId,omitempty"`
 	Prompt            string `json:"prompt,omitempty"`
+	// LatestUserPrompt is the latest real user-authored task direction observed
+	// for this AO session. Internal AO coordination messages (for example an
+	// agent-switch handoff request) must not replace it.
+	LatestUserPrompt string `json:"latestUserPrompt,omitempty"`
+	// LatestAssistantUpdate is the latest user-facing assistant update observed
+	// before any internal agent-switch coordination turn.
+	LatestAssistantUpdate string `json:"latestAssistantUpdate,omitempty"`
+	// NativeTranscriptPath is the read-only transcript path for the currently
+	// active native agent session when its provider exposes one. Retained
+	// provider-specific paths also live on AgentNativeSession records.
+	NativeTranscriptPath string `json:"nativeTranscriptPath,omitempty"`
 	// ProviderConversationID is the opaque handle a Chat driver needs to resume
 	// this session's provider conversation after a restart (a Codex thread id
 	// today). Normally empty for TUI sessions. It remains a distinct field from
@@ -70,7 +81,6 @@ type SessionMetadata struct {
 	// even when PreviewURL is unchanged. The desktop browser panel keys
 	// navigation on it so a repeated `ao preview <same-url>` still refreshes.
 	PreviewRevision int64 `json:"previewRevision,omitempty"`
-
 	// Role is the durable multi-sub role identity pinned at spawn (optional).
 	// Persisted in session metadata columns once migration 0053 is applied;
 	// until then it is carried in-memory for the spawn path and tests.
@@ -91,6 +101,12 @@ type SessionMetadata struct {
 	// capability. The plaintext token is never stored — only injected as
 	// AO_SPAWN_CAPABILITY for the owning process.
 	SpawnCapabilityHash string `json:"-"`
+	// BrowserCapabilityVerifier is a one-way verifier for the random browser
+	// capability held by this session's worker process. The bearer token itself
+	// is never persisted, so reading the database cannot grant access to another
+	// session. Keeping the verifier durable lets a surviving worker authenticate
+	// after the desktop app or daemon restarts.
+	BrowserCapabilityVerifier string `json:"-"`
 }
 
 // SwitchPending is the durable in-flight target pin for a worker switch/fresh.
@@ -125,7 +141,7 @@ type SessionRecord struct {
 	Harness   AgentHarness `json:"harness,omitempty"`
 	// ReviewerHarness is this session's preferred reviewer. Empty delegates to
 	// the project configuration.
-	ReviewerHarness ReviewerHarness `json:"reviewerHarness,omitempty" enum:"claude-code,codex,opencode"`
+	ReviewerHarness ReviewerHarness `json:"reviewerHarness,omitempty" enum:"claude-code,codex,copilot,cursor,kilocode,opencode,kiro,pi,qwen,agy,continue,goose,vibe,devin,droid,kimi,kimchi,muse,amp,aider,grok,crush,auggie,cline,autohand"`
 	DisplayName     string          `json:"displayName,omitempty"`
 	// Mode is the session's currently committed conversation controller. Every
 	// send, restore, kill, and reaper decision dispatches from it. Only the
@@ -144,6 +160,7 @@ type SessionRecord struct {
 	// TerminateOnPRMerge is a user-controlled lifecycle policy. When enabled,
 	// completing the session's PR set through a merge tears down the session.
 	TerminateOnPRMerge bool            `json:"terminateOnPrMerge"`
+	AutoInjectReview   bool            `json:"autoInjectReview"`
 	Metadata           SessionMetadata `json:"-"`
 	// CleanupGeneration is a monotonic counter bumped each time the session is
 	// un-terminated (spawn/restore). The terminal-resource reconciler stamps its

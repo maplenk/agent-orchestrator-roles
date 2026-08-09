@@ -45,6 +45,7 @@ const config: ForgeConfig = {
 		extraResource: [
 			"daemon",
 			"profiles",
+			"agent-browser",
 			"resources/acp-runtime",
 			"assets/icon.png",
 			"assets/icon.ico",

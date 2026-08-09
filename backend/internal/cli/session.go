@@ -153,6 +153,9 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionSwitchCommand(ctx))
 	cmd.AddCommand(newSessionContinueCommand(ctx))
 	cmd.AddCommand(newSessionFreshCommand(ctx))
+	cmd.AddCommand(newSessionSwitchAgentCommand(ctx))
+	cmd.AddCommand(newSessionAgentSwitchCommand(ctx))
+	cmd.AddCommand(newSessionHandoffCommand(ctx))
 	return cmd
 }
 

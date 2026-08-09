@@ -765,8 +765,8 @@ func TestOwnershipMutex_NoDeadlock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			if m.beginAgentResume(id) {
-				m.endAgentResume(id)
+			if m.beginOwnershipResume(id) {
+				m.endOwnershipResume(id)
 			}
 		}
 	}()
@@ -792,21 +792,21 @@ func TestAutomaticFailoverAndAgentResumeOwnershipAreMutuallyExclusive(t *testing
 		}
 		defer m.endAutomaticFailover(id, "limit-1")
 
-		if m.beginAgentResume(id) {
-			m.endAgentResume(id)
+		if m.beginOwnershipResume(id) {
+			m.endOwnershipResume(id)
 			t.Fatal("resume acquired ownership during automatic failover")
 		}
-		if !m.beginAgentResume(otherID) {
+		if !m.beginOwnershipResume(otherID) {
 			t.Fatal("automatic failover blocked resume for a different session")
 		}
-		m.endAgentResume(otherID)
+		m.endOwnershipResume(otherID)
 	})
 
 	t.Run("resume excludes automatic", func(t *testing.T) {
-		if !m.beginAgentResume(id) {
+		if !m.beginOwnershipResume(id) {
 			t.Fatal("resume did not acquire ownership")
 		}
-		defer m.endAgentResume(id)
+		defer m.endOwnershipResume(id)
 
 		if m.beginAutomaticFailover(id, "limit-2") {
 			m.endAutomaticFailover(id, "limit-2")
