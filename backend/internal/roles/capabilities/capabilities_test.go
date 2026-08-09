@@ -448,3 +448,65 @@ func TestSwitchSupportedPromoted(t *testing.T) {
 		t.Fatal("switchSupportedPromoted must be true once Claude/Codex cells are on")
 	}
 }
+
+func automaticRoleMapForCapabilityTest() domain.RoleMap {
+	return domain.RoleMap{
+		SchemaVersion: domain.RoleMapSchemaVersion,
+		Roles: map[string]domain.RoleBinding{
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Mode: domain.FailoverModeAutomatic,
+			Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.HarnessCodex}},
+			},
+		},
+	}
+}
+
+func TestValidateRoleMap_AutomaticRequiresPromotedSourceLimitDetection(t *testing.T) {
+	err := ValidateRoleMap(automaticRoleMapForCapabilityTest())
+	if err == nil || !strings.Contains(err.Error(), "roles[implementor]") ||
+		!strings.Contains(err.Error(), "limit_detection_supported=false") {
+		t.Fatalf("err = %v, want source limit-detection refusal", err)
+	}
+}
+
+func TestValidateRoleMap_AutomaticRequiresPromotedEveryRungLimitDetection(t *testing.T) {
+	err := validateRoleMapWithCaps(automaticRoleMapForCapabilityTest(), func(h domain.AgentHarness) Caps {
+		c := For(h)
+		c.LimitDetectionSupported = h == domain.HarnessClaudeCode
+		return c
+	})
+	if err == nil || !strings.Contains(err.Error(), "failover.roles[implementor][0]") ||
+		!strings.Contains(err.Error(), "limit_detection_supported=false") {
+		t.Fatalf("err = %v, want rung limit-detection refusal", err)
+	}
+}
+
+func TestValidateRoleMap_AutomaticPassesOnlyWithInjectedReviewedCells(t *testing.T) {
+	err := validateRoleMapWithCaps(automaticRoleMapForCapabilityTest(), func(h domain.AgentHarness) Caps {
+		c := For(h)
+		if h == domain.HarnessClaudeCode || h == domain.HarnessCodex {
+			c.LimitDetectionSupported = true
+		}
+		return c
+	})
+	if err != nil {
+		t.Fatalf("reviewed source+rung cells should validate in the test-only promoted matrix: %v", err)
+	}
+}
+
+func TestEveryShippedHarnessKeepsLimitDetectionFalse(t *testing.T) {
+	for h, c := range AllDocumented() {
+		if c.LimitDetectionSupported {
+			t.Fatalf("%s promoted limit_detection_supported in the implementation slice", h)
+		}
+	}
+	if For(domain.HarnessClaudeCode).ReadOnlyEnforced {
+		t.Fatal("Claude read_only_enforced changed while implementing automatic failover")
+	}
+}

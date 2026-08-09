@@ -10,7 +10,7 @@ import (
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
-// Phase 3B manual failover (PHASE3B_MVP_CONTRACT sections 6, 6a, 6b).
+// Phase 3B failover (PHASE3B_MVP_CONTRACT sections 6, 6a, 6b).
 //
 // Continue is the only one of the three pause controls that changes harness or
 // model, and it never changes role_id. It does not open a relaunch path of its
@@ -64,6 +64,18 @@ func (m *Manager) ContinueFailover(
 	id domain.SessionID,
 	req ContinueFailoverRequest,
 ) (ContinueFailoverResult, error) {
+	return m.continueFailover(ctx, id, req, false)
+}
+
+// continueFailover is the single manual/automatic saga entry. Automatic is a
+// trigger policy only: it may select the first rung for an incident, but every
+// durable and runtime transition below is the accepted Continue transaction.
+func (m *Manager) continueFailover(
+	ctx context.Context,
+	id domain.SessionID,
+	req ContinueFailoverRequest,
+	automatic bool,
+) (ContinueFailoverResult, error) {
 	incident := strings.TrimSpace(req.IncidentID)
 	if err := domain.ValidateIncidentID(incident); err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: %w", id, ErrIncidentRequired, err)
@@ -111,6 +123,19 @@ func (m *Manager) ContinueFailover(
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, domain.ErrFailoverRoleRequired)
 	}
 
+	var project domain.ProjectRecord
+	var automaticSource domain.AgentHarness
+	if automatic {
+		var enabled bool
+		project, automaticSource, enabled, err = m.automaticFailoverPolicy(ctx, rec)
+		if err != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: automatic policy: %w", id, err)
+		}
+		if !enabled {
+			return ContinueFailoverResult{}, errAutomaticFailoverDisabled
+		}
+	}
+
 	attempts, err := store.ListSessionFailoverAttemptsByIncident(ctx, id, incident)
 	if err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read attempts: %w", id, err)
@@ -121,6 +146,13 @@ func (m *Manager) ContinueFailover(
 	// non-terminal, and failing to adopt one is how a duplicate Continue opens a
 	// second runtime over a source that is already stopped.
 	if active, ok := domain.ActiveFailoverAttempt(attempts); ok {
+		if automatic {
+			if active.FromHarness != automaticSource || rec.Harness != automaticSource ||
+				!m.automaticFailoverHarnessSupported(active.FromHarness) ||
+				!m.automaticFailoverHarnessSupported(active.ToHarness) {
+				return ContinueFailoverResult{}, errAutomaticFailoverDisabled
+			}
+		}
 		return m.adoptFailoverAttempt(ctx, store, rec, active)
 	}
 	// D5's convergence branch. `acked` is terminal, so the check above will not
@@ -144,7 +176,21 @@ func (m *Manager) ContinueFailover(
 		if failoverPromotionSettled(rec, latest) {
 			return m.finishFailoverPinClear(ctx, rec, latest)
 		}
+		if automatic && (latest.FromHarness != automaticSource || rec.Harness != automaticSource ||
+			!m.automaticFailoverHarnessSupported(latest.FromHarness) ||
+			!m.automaticFailoverHarnessSupported(latest.ToHarness)) {
+			return ContinueFailoverResult{}, errAutomaticFailoverDisabled
+		}
 		return m.convergeUnpromotedAck(ctx, store, rec, latest)
+	}
+
+	// Automatic mode gets exactly one new rung selection per stable incident.
+	// Any prior terminal attempt means a first automatic action already ran; a
+	// failed rung stays paused for explicit manual Continue. Active attempts and
+	// ack convergence were handled above so crash recovery still reuses their
+	// stored target and generation instead of selecting another rung.
+	if automatic && len(attempts) != 0 {
+		return ContinueFailoverResult{}, errAutomaticFailoverAlreadyAttempted
 	}
 
 	if domain.CountFailoverAttempts(attempts) >= domain.MaxFailoversPerIncident {
@@ -152,22 +198,29 @@ func (m *Manager) ContinueFailover(
 			id, domain.ErrFailoverLimitReached, len(attempts), domain.MaxFailoversPerIncident)
 	}
 
-	project, err := m.loadProject(ctx, rec.ProjectID)
-	if err != nil {
-		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	if !automatic {
+		project, err = m.loadProject(ctx, rec.ProjectID)
+		if err != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+		}
+	} else if rec.Harness != automaticSource || !m.automaticFailoverHarnessSupported(automaticSource) {
+		return ContinueFailoverResult{}, errAutomaticFailoverDisabled
 	}
 	current := domain.FailoverTarget{
 		Harness: rec.Harness,
 		Model:   strings.TrimSpace(rec.Metadata.Role.ResolvedModel),
 	}
 	// `used` is every prior attempt for this incident in ANY state: a rung that
-	// failed is spent, not retried. Automatic retry is what this MVP refuses to
-	// build, and re-offering a rung that just failed is that feature wearing a
-	// manual button.
+	// failed is spent, not retried. The one-shot automatic trigger can select a
+	// rung only when this set is empty; after a failure, only explicit manual
+	// Continue may select the next unused target.
 	target, rungIndex, err := domain.NextFailoverRung(
 		project.Config.RoleMap, roleID, current, domain.UsedFailoverTargets(attempts))
 	if err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+	if automatic && !m.automaticFailoverHarnessSupported(target.Harness) {
+		return ContinueFailoverResult{}, errAutomaticFailoverDisabled
 	}
 
 	// Contract section 6b: the generation is minted HERE, before the durable
@@ -221,6 +274,13 @@ func (m *Manager) ContinueFailover(
 		},
 	})
 	if switchErr != nil {
+		// Another Continue may have adopted this exact durable attempt and won
+		// the switch ownership fence between our append and SwitchWorker. That
+		// caller owns the shared attempt now. Marking it failed here can race its
+		// target ack and leave a live target behind a terminal-failed row.
+		if errors.Is(switchErr, ErrSwitchInProgress) {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, switchErr)
+		}
 		return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
 	}
 	return m.completeFailoverAttempt(ctx, store, rec, attempt, res, false)
@@ -254,8 +314,9 @@ func failoverEligible(rec domain.SessionRecord) error {
 //
 // No path advances the ladder. An abandoned attempt is finished on its stored
 // rung and generation; a live one is left untouched for its current owner.
-// Neither is an automatic retry: only a human's Continue ever selects a new
-// rung.
+// Neither is an automatic retry: adoption never selects a new rung. A new rung
+// is selected only by explicit manual Continue or the first, capability-gated
+// automatic action for an incident.
 func (m *Manager) adoptFailoverAttempt(
 	ctx context.Context,
 	store failoverAttemptStore,
@@ -548,10 +609,69 @@ func (m *Manager) recordFailoverFailure(
 	switchErr error,
 ) (ContinueFailoverResult, error) {
 	state := m.failoverFailureState(ctx, rec.ID, attempt.GenerationID, switchErr)
-	if _, err := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
-		attempt.State, state, m.clock()); err != nil {
+	updated, err := store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
+		attempt.State, state, m.clock())
+	if err != nil {
 		m.logger.Warn("failover: recording attempt failure",
 			"sessionID", rec.ID, "attempt", attempt.ID, "state", string(state), "error", err)
+		return ContinueFailoverResult{}, errors.Join(
+			fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+			fmt.Errorf("continue %s: record attempt failure: %w", rec.ID, err),
+		)
+	}
+	if !updated {
+		// A competing adopter may have completed this exact requested attempt
+		// while the original caller was waiting to enter SwitchWorker. The stale
+		// caller must not append `failed` after the shared row reached `acked`.
+		rows, readErr := store.ListSessionFailoverAttemptsByIncident(ctx, attempt.SessionID, attempt.IncidentID)
+		if readErr != nil {
+			return ContinueFailoverResult{}, errors.Join(
+				fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+				fmt.Errorf("continue %s: re-read attempt after failure CAS miss: %w", rec.ID, readErr),
+			)
+		}
+		var currentAttempt *domain.FailoverAttempt
+		for i := range rows {
+			if rows[i].ID == attempt.ID {
+				currentAttempt = &rows[i]
+				break
+			}
+		}
+		if currentAttempt == nil {
+			return ContinueFailoverResult{}, errors.Join(
+				fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+				fmt.Errorf("continue %s: %w: attempt %s disappeared after failure CAS miss",
+					rec.ID, ErrFailoverRecoveryRequired, attempt.ID),
+			)
+		}
+		if currentAttempt.State == domain.FailoverAttemptAcked {
+			row := *currentAttempt
+			current, ok, currentErr := m.store.GetSession(ctx, rec.ID)
+			if currentErr != nil {
+				return ContinueFailoverResult{}, errors.Join(
+					fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+					fmt.Errorf("continue %s: re-read completed attempt session: %w", rec.ID, currentErr),
+				)
+			}
+			if !ok {
+				return ContinueFailoverResult{}, errors.Join(
+					fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+					fmt.Errorf("continue %s: %w", rec.ID, ErrNotFound),
+				)
+			}
+			if failoverPromotionSettled(current, row) {
+				return m.finishFailoverPinClear(ctx, current, row)
+			}
+			return ContinueFailoverResult{}, errors.Join(
+				fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+				fmt.Errorf("continue %s: %w", rec.ID, ErrSwitchInProgress),
+			)
+		}
+		return ContinueFailoverResult{}, errors.Join(
+			fmt.Errorf("continue %s: %w", rec.ID, switchErr),
+			fmt.Errorf("continue %s: %w: attempt %s is %s after failure CAS miss",
+				rec.ID, ErrFailoverRecoveryRequired, attempt.ID, currentAttempt.State),
+		)
 	}
 	failed := attempt
 	failed.State = state

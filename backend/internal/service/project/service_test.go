@@ -690,6 +690,59 @@ func TestManager_ListIncludesOnlySummarySafeProjectConfig(t *testing.T) {
 	}
 }
 
+func TestManager_SetRoleMapRejectsUnpromotedAutomaticModeBeforeMutation(t *testing.T) {
+	ctx := context.Background()
+	m := newManager(t)
+	repo := gitRepo(t)
+	manual := domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {
+				Template: "orchestrator", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: true},
+			},
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: false},
+			},
+		},
+		Failover: domain.FailoverConfig{
+			Mode: domain.FailoverModeManual,
+			Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.HarnessCodex}},
+			},
+		},
+	}
+	if _, err := m.Add(ctx, project.AddInput{
+		Path: repo, ProjectID: ptr("ao"), Config: &domain.ProjectConfig{RoleMap: manual},
+	}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	before, err := m.Get(ctx, "ao")
+	if err != nil || before.Project == nil {
+		t.Fatalf("Get before: project=%+v err=%v", before.Project, err)
+	}
+
+	automatic := manual
+	automatic.Failover.Mode = domain.FailoverModeAutomatic
+	_, err = m.SetRoleMap(ctx, "ao", project.SetRoleMapInput{
+		RoleMap: automatic, ExpectedRoleMapSHA256: before.Project.RoleMapSHA256,
+	})
+	wantCode(t, err, "INVALID_PROJECT_CONFIG")
+
+	after, err := m.Get(ctx, "ao")
+	if err != nil || after.Project == nil || after.Project.Config == nil {
+		t.Fatalf("Get after: project=%+v err=%v", after.Project, err)
+	}
+	if after.Project.RoleMapSHA256 != before.Project.RoleMapSHA256 ||
+		after.Project.Config.RoleMap.Failover.Mode != domain.FailoverModeManual {
+		t.Fatalf("automatic refusal mutated role map: before=%q after=%q mode=%q",
+			before.Project.RoleMapSHA256, after.Project.RoleMapSHA256,
+			after.Project.Config.RoleMap.Failover.Mode)
+	}
+}
+
 func TestManager_ContainsUnreadableProjectConfigAndRefusesMutations(t *testing.T) {
 	ctx := context.Background()
 	dataDir := t.TempDir()

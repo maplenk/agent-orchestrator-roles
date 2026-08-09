@@ -514,7 +514,6 @@ func TestUpdateProjectRoleMapCASAllowsExactlyOneConcurrentWriter(t *testing.T) {
 		storeTestRoleMap(domain.HarnessClaudeCode, "orchestrator-a"),
 		storeTestRoleMap(domain.HarnessCodex, "orchestrator-b"),
 	} {
-		roleMap := roleMap
 		go func() {
 			<-start
 			_, ok, err := s.UpdateProjectRoleMap(ctx, "role-race", initialSHA, roleMap)

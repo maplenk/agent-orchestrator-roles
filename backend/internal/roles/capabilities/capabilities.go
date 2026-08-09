@@ -98,6 +98,10 @@ func For(h domain.AgentHarness) Caps {
 // with a non-empty ladder — the primary is the switch source, not just a spawn
 // target.
 func ValidateRoleMap(m domain.RoleMap) error {
+	return validateRoleMapWithCaps(m, For)
+}
+
+func validateRoleMapWithCaps(m domain.RoleMap, lookup func(domain.AgentHarness) Caps) error {
 	if m.IsZero() {
 		return nil
 	}
@@ -113,6 +117,11 @@ func ValidateRoleMap(m domain.RoleMap) error {
 			return fmt.Errorf("roles[%s]: harness %q has a failover ladder but does not support switch "+
 				"(switch_supported=false); remove the ladder or bind a switch-capable harness", id, b.Harness)
 		}
+		if m.Failover.Mode == domain.FailoverModeAutomatic && len(m.Failover.Roles[id]) > 0 &&
+			!lookup(b.Harness).LimitDetectionSupported {
+			return fmt.Errorf("roles[%s]: harness %q has automatic failover but does not support structured limit detection "+
+				"(limit_detection_supported=false); use manual mode until the detector is promoted", id, b.Harness)
+		}
 	}
 	for roleID, targets := range m.Failover.Roles {
 		owner, ok := m.Roles[roleID]
@@ -127,6 +136,12 @@ func ValidateRoleMap(m domain.RoleMap) error {
 				t.Harness, owner.Permissions, true,
 			); err != nil {
 				return err
+			}
+			if m.Failover.Mode == domain.FailoverModeAutomatic &&
+				!lookup(t.Harness).LimitDetectionSupported {
+				return fmt.Errorf("failover.roles[%s][%d]: harness %q has automatic failover but does not support "+
+					"structured limit detection (limit_detection_supported=false); use manual mode until the detector is promoted",
+					roleID, i, t.Harness)
 			}
 		}
 	}

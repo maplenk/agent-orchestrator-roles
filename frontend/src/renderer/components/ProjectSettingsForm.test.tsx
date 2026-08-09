@@ -714,7 +714,7 @@ describe("ProjectSettingsForm", () => {
 		expect(postMock).not.toHaveBeenCalled();
 	});
 
-	it("preserves a CLI-authored automatic mode while reordering its ladder", async () => {
+	it("requires an explicit manual conversion before saving a legacy automatic ladder", async () => {
 		mockProject({
 			id: "proj-1",
 			name: "Project One",
@@ -752,7 +752,22 @@ describe("ProjectSettingsForm", () => {
 		});
 
 		renderSettings("proj-1", undefined, "roles");
-		expect(await screen.findByText("Automatic mode is preserved but is not enabled by this editor yet.")).toBeInTheDocument();
+		expect(await screen.findByRole("alert")).toHaveTextContent(
+			"Automatic failover requires reviewed structured limit detection, which is not promoted for any harness.",
+		);
+		expect(screen.getByText("Automatic (unavailable)")).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Save changes" }));
+		expect(screen.getAllByRole("alert").at(-1)).toHaveTextContent(
+			"Convert automatic failover to manual before saving.",
+		);
+		expect(putMock).not.toHaveBeenCalled();
+		await userEvent.click(screen.getByRole("button", { name: "Convert to manual" }));
+		expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+		expect(screen.getByText("Manual")).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Discard role-map changes" }));
+		expect(await screen.findByText("Automatic (unavailable)")).toBeInTheDocument();
+		expect(screen.getByRole("button", { name: "Convert to manual" })).toBeInTheDocument();
+		await userEvent.click(screen.getByRole("button", { name: "Convert to manual" }));
 		const implementorCard = screen.getByRole("group", { name: "implementor" });
 		await userEvent.click(within(implementorCard).getByRole("button", { name: "Move rung down — implementor rung 1" }));
 		expect(within(implementorCard).getByRole("button", { name: "Move rung up — implementor rung 2" })).toHaveFocus();
@@ -763,9 +778,9 @@ describe("ProjectSettingsForm", () => {
 			params: { path: { id: "proj-1" } },
 			body: {
 				expectedRoleMapSha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-				roleMap: expect.objectContaining({
+			roleMap: expect.objectContaining({
 					failover: {
-						mode: "automatic",
+						mode: "manual",
 						roles: {
 							implementor: [{ harness: "codex", model: "gpt-5" }, { harness: "claude-code" }],
 						},

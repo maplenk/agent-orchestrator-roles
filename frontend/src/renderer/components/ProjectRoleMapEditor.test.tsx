@@ -61,4 +61,23 @@ describe("role-map editor validation", () => {
 
 		expect(validateRoleMapDraft(valid, appI18n.getFixedT("en"))).toBeNull();
 	});
+
+	it("blocks a legacy automatic map until the user explicitly converts it", () => {
+		const automatic: RoleMap = {
+			role_map_schema_version: 1,
+			orchestratorRole: "orchestrator",
+			roles: {
+				orchestrator: {
+					template: "orchestrator",
+					harness: "claude-code",
+					permissions: { workspaceWrites: true, canSpawn: true },
+				},
+			},
+			failover: { mode: "automatic", roles: {} },
+		};
+
+		expect(validateRoleMapDraft(automatic, appI18n.getFixedT("en"))).toBe(
+			"Convert automatic failover to manual before saving. Reviewed structured limit detection is not promoted for any harness.",
+		);
+	});
 });

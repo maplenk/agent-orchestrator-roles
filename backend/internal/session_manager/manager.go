@@ -383,6 +383,11 @@ type Manager struct {
 	ownershipMu sync.Mutex
 	resuming    map[domain.SessionID]struct{}
 	switching   map[domain.SessionID]struct{}
+	// automaticFailovers serializes the one automatic decision allowed for a
+	// session. The durable attempt ledger remains the cross-restart authority;
+	// this in-memory fence only prevents concurrent duplicate deliveries from
+	// both observing an empty ledger before the first requested row lands.
+	automaticFailovers map[automaticFailoverKey]struct{}
 	// projectOwnership serializes orchestrator ownership mutations per project.
 	// Lock order is projectOwnership -> beginSwitch -> lifecycle/store; see
 	// acquireProjectOwnership.
@@ -390,6 +395,10 @@ type Manager struct {
 	// switchCapsOverride is tests-only: when set, SwitchWorker uses it instead
 	// of capabilities.For (e.g. force-enable cells or pin a matrix for isolation).
 	switchCapsOverride func(domain.AgentHarness) capabilities.Caps
+	// automaticFailoverCapsOverride is tests-only. Production automatic policy
+	// always consults the same capability registry that gates structured limit
+	// routing and config-save.
+	automaticFailoverCapsOverride func(domain.AgentHarness) capabilities.Caps
 	// The fork's ownershipMu covers resuming (and switching, and the project
 	// ownership map) under ONE lock order; upstream's separate resumeMu would
 	// be a second lock over the same map.
@@ -591,6 +600,7 @@ func New(d Deps) *Manager {
 		newLaunchID:            d.NewLaunchID,
 		resuming:               make(map[domain.SessionID]struct{}),
 		switching:              make(map[domain.SessionID]struct{}),
+		automaticFailovers:     make(map[automaticFailoverKey]struct{}),
 		defaults:               d.Defaults,
 		chat:                   d.Chat,
 		transitions:            make(map[domain.SessionID]*interfaceTransitionRun),
@@ -2766,6 +2776,39 @@ func (m *Manager) Reconcile(ctx context.Context) error {
 	// them was not established. Continue the earlier per-row passes so unrelated
 	// cleanup can make progress, then stop here before workspace adoption or
 	// runtime creation.
+	if len(unresolved) > 0 {
+		return errors.Join(unresolved...)
+	}
+	// Automatic failover has one boot-owned durability obligation: a crash may
+	// land after the structured pause pin commits but before the first attempt
+	// row, or while that same attempt is requested/post_stop. This launch-capable
+	// phase runs only AFTER the board-wide live/reap safety gate above, so an
+	// unrelated uncertain runtime prevents every automatic create/destroy just
+	// as it prevents RestoreAll. Manual/operator pauses, terminal failed attempts,
+	// and unpromoted harnesses remain passive.
+	recs, err = m.store.ListAllSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("reconcile: list automatic failover candidates: %w", err)
+	}
+	for _, rec := range recs {
+		if rec.IsTerminated || rec.Kind != domain.KindWorker || rec.Metadata.Pause == nil ||
+			rec.Metadata.Pause.Reason != domain.PauseReasonUsageLimit ||
+			rec.Metadata.Pause.DetectedBy != domain.PauseDetectionStructured {
+			continue
+		}
+		if _, autoErr := m.ContinueAutomaticFailover(ctx, rec.ID, AutomaticFailoverRequest{
+			IncidentID: rec.Metadata.Pause.IncidentID,
+		}); autoErr != nil {
+			if errors.Is(autoErr, ErrLaunchCleanupUnresolved) || errors.Is(autoErr, ErrBootUnsafe) {
+				m.logger.Error("reconcile: automatic failover left boot unsafe",
+					"sessionID", rec.ID, "error", autoErr)
+				unresolved = append(unresolved, autoErr)
+				continue
+			}
+			m.logger.Error("reconcile: automatic failover failed; session remains paused",
+				"sessionID", rec.ID, "error", autoErr)
+		}
+	}
 	if len(unresolved) > 0 {
 		return errors.Join(unresolved...)
 	}

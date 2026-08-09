@@ -9,6 +9,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 )
 
 // selectiveReapRuntime lets one board contain an uncertain runtime and another
@@ -91,6 +92,50 @@ func TestReconcile_UnavailableTerminatedRuntimeBlocksEveryRestore(t *testing.T) 
 	}
 	if !slices.Contains(rt.destroyedIDs, "tmux-live") {
 		t.Fatalf("safe reap work did not continue after uncertainty: destroyed=%v", rt.destroyedIDs)
+	}
+}
+
+func TestReconcile_UncertainBoardBlocksAutomaticFailoverBeforeAnyRuntimeEffect(t *testing.T) {
+	st := newFailoverStore()
+	workspacePath := t.TempDir()
+	artifact, sha := pinImplementorTemplate(t, st.fakeStore)
+	id := domain.SessionID("mer-auto")
+	workerSession(st.fakeStore, id, domain.HarnessClaudeCode, workspacePath, artifact, sha)
+	failoverLadder(st, domain.FailoverTarget{Harness: domain.HarnessCodex})
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	structuredLimitPauseAt(st, id, "inc-auto")
+	addSavedTerminatedWorker(st.fakeStore, "mer-uncertain", "tmux-uncertain")
+
+	cause := fmt.Errorf("tmux error connecting to stale socket: %w", ports.ErrRuntimeUnavailable)
+	base := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+	rt := &selectiveReapRuntime{
+		fakeRuntime: base,
+		probeErr:    map[string]error{"tmux-uncertain": cause},
+	}
+	m := New(Deps{
+		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st.fakeStore},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+	m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = true
+		return c
+	}
+
+	err := m.Reconcile(context.Background())
+	if !errors.Is(err, ErrBootUnsafe) || !errors.Is(err, ports.ErrRuntimeUnavailable) {
+		t.Fatalf("Reconcile = %v, want board-wide boot-unsafe probe error", err)
+	}
+	if len(st.attempts) != 0 || rt.created != 0 || rt.destroyed != 0 {
+		t.Fatalf("automatic failover ran before the safety gate: attempts=%d created=%d destroyed=%d",
+			len(st.attempts), rt.created, rt.destroyed)
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("boot-unsafe board cleared the automatic incident pause")
 	}
 }
 

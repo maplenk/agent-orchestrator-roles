@@ -10,6 +10,7 @@ import (
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
+	"github.com/aoagents/agent-orchestrator/backend/internal/roles/capabilities"
 )
 
 // failoverFakeStore adds the narrow failover surface to the shared fakeStore by
@@ -32,7 +33,21 @@ type failoverFakeStore struct {
 	// row underneath an in-flight transition and make the CAS legitimately miss.
 	// That race is the only way to reach the miss branch: everywhere else the
 	// caller's expected state came from reading this same store.
-	beforeUpdate func()
+	beforeUpdate  func()
+	getSessionErr error
+	// afterAppend runs after both durable fake rows exist but before Continue
+	// reaches SwitchWorker. It exposes the crash/race window without weakening
+	// the production ordering being tested.
+	afterAppend func()
+}
+
+func (f *failoverFakeStore) GetSession(
+	ctx context.Context, id domain.SessionID,
+) (domain.SessionRecord, bool, error) {
+	if f.getSessionErr != nil {
+		return domain.SessionRecord{}, false, f.getSessionErr
+	}
+	return f.fakeStore.GetSession(ctx, id)
 }
 
 func newFailoverStore() *failoverFakeStore {
@@ -56,6 +71,9 @@ func (f *failoverFakeStore) AppendSessionFailoverAttemptWithLedger(
 		return err
 	}
 	f.attempts = append(f.attempts, a)
+	if f.afterAppend != nil {
+		f.afterAppend()
+	}
 	return nil
 }
 
@@ -145,6 +163,33 @@ func pauseSessionAt(st *failoverFakeStore, id domain.SessionID, incident string)
 	st.sessions[id] = rec
 }
 
+func structuredLimitPauseAt(st *failoverFakeStore, id domain.SessionID, incident string) {
+	rec := st.sessions[id]
+	rec.Metadata.Pause = &domain.SessionPause{
+		IncidentID: incident,
+		Reason:     domain.PauseReasonUsageLimit,
+		DetectedBy: domain.PauseDetectionStructured,
+		Harness:    rec.Harness,
+		EvidenceJSON: `{"version":1,"kind":"usage_limit","harness":"claude-code",` +
+			`"scope":"account","sourceKey":"window-1"}`,
+		PausedAt: time.Date(2026, 8, 9, 9, 0, 0, 0, time.UTC),
+	}
+	st.sessions[id] = rec
+}
+
+func enableAutomaticFailover(t *testing.T, st *failoverFakeStore, m *Manager, id domain.SessionID) {
+	t.Helper()
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	structuredLimitPauseAt(st, id, "inc-1")
+	m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = true
+		return c
+	}
+}
+
 // failoverFixture builds a paused, role-pinned worker with a two-rung ladder.
 func failoverFixture(t *testing.T) (*failoverFakeStore, *fakeRuntime, *Manager, domain.SessionID) {
 	t.Helper()
@@ -197,6 +242,942 @@ func TestContinueFailoverRequest_HasNoTargetField(t *testing.T) {
 	}
 	if typ.Field(0).Name != "IncidentID" {
 		t.Fatalf("field = %q, want IncidentID", typ.Field(0).Name)
+	}
+}
+
+func TestAutomaticFailoverFenceIsScopedToTheExactIncident(t *testing.T) {
+	m := New(Deps{})
+	id := domain.SessionID("mer-1")
+	if !m.beginAutomaticFailover(id, "inc-a") {
+		t.Fatal("first incident did not acquire its automatic fence")
+	}
+	defer m.endAutomaticFailover(id, "inc-a")
+	if m.beginAutomaticFailover(id, "inc-a") {
+		t.Fatal("duplicate delivery for the same incident acquired a second fence")
+	}
+	if !m.beginAutomaticFailover(id, "inc-b") {
+		t.Fatal("a newer incident was suppressed by the older incident's still-unwinding fence")
+	}
+	m.endAutomaticFailover(id, "inc-b")
+}
+
+func TestContinueAutomaticFailover_ManualModeWritesNothingAndKeepsPause(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	structuredLimitPauseAt(st, id, "inc-1")
+	m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = true
+		return c
+	}
+
+	res, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("automatic decision: %v", err)
+	}
+	if res.Enabled || res.Attempted {
+		t.Fatalf("manual mode result = %+v", res)
+	}
+	assertNothingDurable(t, st, id, "inc-1")
+	if rt.created != 0 || rt.destroyed != 0 {
+		t.Fatal("manual mode touched the runtime through the automatic entry")
+	}
+}
+
+func TestContinueAutomaticFailover_OperatorPauseNeverActs(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = true
+		return c
+	}
+
+	res, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("automatic decision: %v", err)
+	}
+	if res.Enabled || res.Attempted {
+		t.Fatalf("operator pause result = %+v", res)
+	}
+	assertNothingDurable(t, st, id, "inc-1")
+	if rt.created != 0 || rt.destroyed != 0 {
+		t.Fatal("an operator pause triggered automatic runtime work")
+	}
+}
+
+func TestContinueAutomaticFailover_UnpromotedCapabilitiesStayDormant(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	structuredLimitPauseAt(st, id, "inc-1")
+
+	res, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("automatic decision: %v", err)
+	}
+	if res.Enabled || res.Attempted {
+		t.Fatalf("unpromoted result = %+v", res)
+	}
+	assertNothingDurable(t, st, id, "inc-1")
+	if rt.created != 0 || rt.destroyed != 0 {
+		t.Fatal("unpromoted automatic mode touched the runtime")
+	}
+}
+
+func TestContinueAutomaticFailover_UnpromotedTargetRefusesBeforeAttempt(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	structuredLimitPauseAt(st, id, "inc-1")
+	m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = h == domain.HarnessClaudeCode
+		return c
+	}
+
+	res, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("automatic decision: %v", err)
+	}
+	if res.Enabled || res.Attempted {
+		t.Fatalf("unpromoted target result = %+v", res)
+	}
+	assertNothingDurable(t, st, id, "inc-1")
+	if rt.created != 0 || rt.destroyed != 0 {
+		t.Fatal("unpromoted target was reached before capability refusal")
+	}
+}
+
+func TestContinueAutomaticFailover_RequiresFullSourceAndTargetRuntimeCapabilities(t *testing.T) {
+	tests := []struct {
+		name    string
+		harness domain.AgentHarness
+		mutate  func(*capabilities.Caps)
+	}{
+		{"source spawn", domain.HarnessClaudeCode, func(c *capabilities.Caps) { c.SpawnSupported = false }},
+		{"source switch", domain.HarnessClaudeCode, func(c *capabilities.Caps) { c.SwitchSupported = false }},
+		{"source limit", domain.HarnessClaudeCode, func(c *capabilities.Caps) { c.LimitDetectionSupported = false }},
+		{"target spawn", domain.HarnessCodex, func(c *capabilities.Caps) { c.SpawnSupported = false }},
+		{"target switch", domain.HarnessCodex, func(c *capabilities.Caps) { c.SwitchSupported = false }},
+		{"target limit", domain.HarnessCodex, func(c *capabilities.Caps) { c.LimitDetectionSupported = false }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, rt, m, id := failoverFixture(t)
+			enableAutomaticFailover(t, st, m, id)
+			m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+				c := testSwitchCaps(h)
+				c.LimitDetectionSupported = true
+				if h == tc.harness {
+					tc.mutate(&c)
+				}
+				return c
+			}
+
+			res, err := m.ContinueAutomaticFailover(context.Background(), id,
+				AutomaticFailoverRequest{IncidentID: "inc-1"})
+			if err != nil {
+				t.Fatalf("automatic capability refusal: %v", err)
+			}
+			if res.Enabled || res.Attempted {
+				t.Fatalf("capability refusal result = %+v", res)
+			}
+			assertNothingDurable(t, st, id, "inc-1")
+			if rt.created != 0 || rt.destroyed != 0 {
+				t.Fatalf("capability refusal touched runtime: created=%d destroyed=%d", rt.created, rt.destroyed)
+			}
+		})
+	}
+}
+
+func TestContinueAutomaticFailover_RejectsMalformedStructuredHarnessProvenance(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*domain.SessionRecord)
+	}{
+		{
+			name: "envelope harness absent",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.Pause.EvidenceJSON = `{"version":1,"kind":"usage_limit","scope":"account","sourceKey":"window-1"}`
+			},
+		},
+		{
+			name: "envelope and pause disagree",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.Pause.EvidenceJSON = `{"version":1,"kind":"usage_limit","harness":"codex","scope":"account","sourceKey":"window-1"}`
+			},
+		},
+		{
+			name: "pause source and current session disagree",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.Pause.Harness = domain.HarnessCodex
+				rec.Metadata.Pause.EvidenceJSON = `{"version":1,"kind":"usage_limit","harness":"codex","scope":"account","sourceKey":"window-1"}`
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, rt, m, id := failoverFixture(t)
+			enableAutomaticFailover(t, st, m, id)
+			rec := st.sessions[id]
+			tc.mutate(&rec)
+			st.sessions[id] = rec
+
+			_, _ = m.ContinueAutomaticFailover(context.Background(), id,
+				AutomaticFailoverRequest{IncidentID: "inc-1"})
+			assertNothingDurable(t, st, id, "inc-1")
+			if rt.created != 0 || rt.destroyed != 0 {
+				t.Fatalf("malformed provenance touched runtime: created=%d destroyed=%d", rt.created, rt.destroyed)
+			}
+		})
+	}
+}
+
+func TestContinueAutomaticFailover_RecoveryRechecksFullDurableSourceAndTargetCapabilities(t *testing.T) {
+	tests := []struct {
+		name    string
+		harness domain.AgentHarness
+		mutate  func(*capabilities.Caps)
+	}{
+		{"source spawn", domain.HarnessClaudeCode, func(c *capabilities.Caps) { c.SpawnSupported = false }},
+		{"source switch", domain.HarnessClaudeCode, func(c *capabilities.Caps) { c.SwitchSupported = false }},
+		{"source limit", domain.HarnessClaudeCode, func(c *capabilities.Caps) { c.LimitDetectionSupported = false }},
+		{"target spawn", domain.HarnessCodex, func(c *capabilities.Caps) { c.SpawnSupported = false }},
+		{"target switch", domain.HarnessCodex, func(c *capabilities.Caps) { c.SwitchSupported = false }},
+		{"target limit", domain.HarnessCodex, func(c *capabilities.Caps) { c.LimitDetectionSupported = false }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, rt, m, id := failoverFixture(t)
+			enableAutomaticFailover(t, st, m, id)
+			now := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+			attempt := domain.FailoverAttempt{
+				ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+				IncidentID: "inc-1", Seq: 1, RoleID: "implementor",
+				FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+				RungIndex: 0, GenerationID: "gen-requested", State: domain.FailoverAttemptRequested,
+				CreatedAt: now, UpdatedAt: now,
+			}
+			if err := st.AppendSessionFailoverAttemptWithLedger(context.Background(), attempt,
+				m.failoverLedgerRecord(attempt, domain.LifecyclePhaseRequested)); err != nil {
+				t.Fatalf("seed attempt: %v", err)
+			}
+			m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+				c := testSwitchCaps(h)
+				c.LimitDetectionSupported = true
+				if h == tc.harness {
+					tc.mutate(&c)
+				}
+				return c
+			}
+
+			res, err := m.ContinueAutomaticFailover(context.Background(), id,
+				AutomaticFailoverRequest{IncidentID: "inc-1"})
+			if err != nil {
+				t.Fatalf("automatic recovery refusal: %v", err)
+			}
+			if res.Enabled || res.Attempted {
+				t.Fatalf("recovery capability refusal result = %+v", res)
+			}
+			if got := st.only(t); !reflect.DeepEqual(got, attempt) {
+				t.Fatalf("recovery capability refusal mutated attempt:\n got %+v\nwant %+v", got, attempt)
+			}
+			if st.sessions[id].Metadata.Pause == nil || rt.created != 0 || rt.destroyed != 0 {
+				t.Fatalf("recovery refusal state: pause=%+v created=%d destroyed=%d",
+					st.sessions[id].Metadata.Pause, rt.created, rt.destroyed)
+			}
+		})
+	}
+}
+
+func TestContinueAutomaticFailover_AckedUnpromotedRecoveryRechecksTargetCapabilities(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+	if _, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"}); !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("seed post-stop attempt: %v", err)
+	}
+	st.attempts[0].State = domain.FailoverAttemptAcked
+	beforeAttempt := st.attempts[0]
+	createdBefore := rt.created
+	m.lcm.(*fakeLCM).markSpawnedErr = nil
+	m.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = h != domain.HarnessCodex
+		return c
+	}
+
+	res, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("acked recovery capability refusal: %v", err)
+	}
+	if res.Enabled || res.Attempted {
+		t.Fatalf("acked recovery capability refusal result = %+v", res)
+	}
+	if got := st.only(t); !reflect.DeepEqual(got, beforeAttempt) {
+		t.Fatalf("acked recovery capability refusal mutated attempt: %+v -> %+v", beforeAttempt, got)
+	}
+	if rt.created != createdBefore || st.sessions[id].Metadata.Pause == nil ||
+		st.sessions[id].Metadata.SwitchPending == nil {
+		t.Fatalf("acked recovery ran under false target cap: created %d->%d pause=%+v pending=%+v",
+			createdBefore, rt.created, st.sessions[id].Metadata.Pause, st.sessions[id].Metadata.SwitchPending)
+	}
+}
+
+func TestContinueAutomaticFailover_FirstAttemptUsesAcceptedSaga(t *testing.T) {
+	st, _, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	before := st.sessions[id].Metadata.Role
+
+	res, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("automatic failover: %v", err)
+	}
+	if !res.Enabled || !res.Attempted {
+		t.Fatalf("result = %+v, want enabled+attempted", res)
+	}
+	if res.Continue.Target.Harness != domain.HarnessCodex || res.Continue.RungIndex != 0 ||
+		res.Continue.AttemptSeq != 1 {
+		t.Fatalf("continue result = %+v", res.Continue)
+	}
+	att := st.only(t)
+	if att.State != domain.FailoverAttemptAcked || att.GenerationID != res.Continue.GenerationID {
+		t.Fatalf("attempt/result mismatch: %+v / %+v", att, res.Continue)
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("automatic target ack did not clear the exact incident pin")
+	}
+	var phases []domain.LifecycleLedgerPhase
+	for _, event := range st.ledger {
+		if event.Kind != domain.LifecycleKindFailover {
+			continue
+		}
+		phases = append(phases, event.Phase)
+		if event.GenerationID != att.GenerationID {
+			t.Fatalf("automatic ledger generation %q != attempt %q", event.GenerationID, att.GenerationID)
+		}
+	}
+	if len(phases) != 2 || phases[0] != domain.LifecyclePhaseRequested ||
+		phases[1] != domain.LifecyclePhaseTargetAck {
+		t.Fatalf("automatic failover phases = %v, want [requested target_ack]", phases)
+	}
+	after := st.sessions[id].Metadata.Role
+	if after.RoleID != before.RoleID || after.TemplateArtifactID != before.TemplateArtifactID ||
+		after.TemplateSHA256 != before.TemplateSHA256 || after.ResolvedPermissions != before.ResolvedPermissions {
+		t.Fatalf("automatic failover changed role authority: %+v -> %+v", before, after)
+	}
+}
+
+func TestContinueAutomaticFailover_DuplicateAfterPreStopFailureDoesNotSpendSecondRung(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	failoverLadder(st,
+		domain.FailoverTarget{Harness: domain.HarnessCodex},
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode, Model: "fallback-model"},
+	)
+	enableAutomaticFailover(t, st, m, id)
+	rt.aliveByHandle = map[string]bool{"rt-1": true}
+
+	first, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err == nil || !first.Attempted {
+		t.Fatalf("first result=%+v err=%v, want failed attempted rung", first, err)
+	}
+	if st.only(t).State != domain.FailoverAttemptFailed {
+		t.Fatal("first automatic pre-stop failure was not terminal")
+	}
+
+	duplicate, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("duplicate automatic delivery: %v", err)
+	}
+	if !duplicate.Enabled || duplicate.Attempted {
+		t.Fatalf("duplicate result = %+v, want enabled no-op", duplicate)
+	}
+	if len(st.attempts) != 1 || rt.created != 0 {
+		t.Fatalf("duplicate spent another rung: attempts=%d target launches=%d", len(st.attempts), rt.created)
+	}
+
+	// The operator still owns recovery: explicit manual Continue may spend the
+	// next authorized rung after the automatic attempt failed safely pre-stop.
+	rt.aliveByHandle = map[string]bool{}
+	manual, err := m.ContinueFailover(context.Background(), id,
+		ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("manual Continue after automatic failure: %v", err)
+	}
+	if manual.Target.Harness != domain.HarnessClaudeCode || manual.Target.Model != "fallback-model" ||
+		manual.AttemptSeq != 2 {
+		t.Fatalf("manual result = %+v, want second rung/seq", manual)
+	}
+	if len(st.attempts) != 2 || st.sessions[id].Metadata.Pause != nil {
+		t.Fatalf("manual recovery state: attempts=%d pause=%+v", len(st.attempts), st.sessions[id].Metadata.Pause)
+	}
+}
+
+func TestContinueAutomaticFailover_AdoptsPostStopSameGeneration(t *testing.T) {
+	st, _, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+
+	first, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrSwitchPostStop) || !first.Attempted {
+		t.Fatalf("first result=%+v err=%v, want post-stop failure", first, err)
+	}
+	generation := st.only(t).GenerationID
+	m.lcm.(*fakeLCM).markSpawnedErr = nil
+
+	second, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatalf("automatic same-attempt recovery: %v", err)
+	}
+	if !second.Attempted || !second.Continue.Reused || second.Continue.GenerationID != generation {
+		t.Fatalf("recovery = %+v, want reused generation %q", second, generation)
+	}
+	if len(st.attempts) != 1 || st.sessions[id].Metadata.Pause != nil {
+		t.Fatalf("recovery spent another rung or kept pause: attempts=%d pause=%+v",
+			len(st.attempts), st.sessions[id].Metadata.Pause)
+	}
+}
+
+func TestContinueAutomaticFailover_ConcurrentDeliveryCreatesOneAttempt(t *testing.T) {
+	st, base, m, id := failoverFixture(t)
+	blocking := &blockingDestroyRuntime{
+		fakeRuntime: base,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	m.runtime = blocking
+	enableAutomaticFailover(t, st, m, id)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		done <- err
+	}()
+	<-blocking.entered
+
+	duplicate, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if err != nil || duplicate.Attempted {
+		t.Fatalf("concurrent duplicate = %+v err=%v", duplicate, err)
+	}
+	close(blocking.release)
+	if err := <-done; err != nil {
+		t.Fatalf("winning automatic call: %v", err)
+	}
+	if len(st.attempts) != 1 || base.created != 1 {
+		t.Fatalf("concurrent delivery created attempts/runtime = %d/%d, want 1/1", len(st.attempts), base.created)
+	}
+}
+
+func TestContinueAutomaticFailover_RacingManualAdopterOwnsSharedAttempt(t *testing.T) {
+	st, base, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	appended := make(chan struct{})
+	releaseAppend := make(chan struct{})
+	st.afterAppend = func() {
+		close(appended)
+		<-releaseAppend
+	}
+	blocking := &blockingDestroyRuntime{
+		fakeRuntime: base,
+		entered:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	m.runtime = blocking
+
+	type outcome struct {
+		res ContinueFailoverResult
+		err error
+	}
+	autoDone := make(chan error, 1)
+	go func() {
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		autoDone <- err
+	}()
+	select {
+	case <-appended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("automatic owner did not durably append the attempt")
+	}
+
+	manualDone := make(chan outcome, 1)
+	go func() {
+		res, err := m.ContinueFailover(context.Background(), id,
+			ContinueFailoverRequest{IncidentID: "inc-1"})
+		manualDone <- outcome{res: res, err: err}
+	}()
+	select {
+	case <-blocking.entered:
+	case <-time.After(3 * time.Second):
+		close(releaseAppend)
+		t.Fatal("manual adopter did not acquire switch ownership")
+	}
+	close(releaseAppend)
+	if err := <-autoDone; !errors.Is(err, ErrSwitchInProgress) {
+		close(blocking.release)
+		t.Fatalf("losing automatic owner error = %v, want ErrSwitchInProgress", err)
+	}
+	if state := st.only(t).State; state != domain.FailoverAttemptRequested {
+		close(blocking.release)
+		t.Fatalf("losing owner changed shared attempt to %q", state)
+	}
+	close(blocking.release)
+	manual := <-manualDone
+	if manual.err != nil {
+		t.Fatalf("manual adopter: %v", manual.err)
+	}
+	att := st.only(t)
+	if att.State != domain.FailoverAttemptAcked || manual.res.GenerationID != att.GenerationID {
+		t.Fatalf("manual result/attempt = %+v / %+v", manual.res, att)
+	}
+	if base.created != 1 || base.destroyed != 1 || st.sessions[id].Metadata.Pause != nil {
+		t.Fatalf("runtime/pause = created %d destroyed %d pause %+v", base.created, base.destroyed, st.sessions[id].Metadata.Pause)
+	}
+}
+
+func TestContinueAutomaticFailover_ManualAdopterCompletesBeforeOriginalResumes(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	appended := make(chan struct{})
+	releaseAppend := make(chan struct{})
+	st.afterAppend = func() {
+		close(appended)
+		<-releaseAppend
+	}
+
+	type automaticOutcome struct {
+		res AutomaticFailoverResult
+		err error
+	}
+	autoDone := make(chan automaticOutcome, 1)
+	go func() {
+		res, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		autoDone <- automaticOutcome{res: res, err: err}
+	}()
+	select {
+	case <-appended:
+	case <-time.After(3 * time.Second):
+		t.Fatal("automatic owner did not durably append the attempt")
+	}
+
+	manual, err := m.ContinueFailover(context.Background(), id,
+		ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		close(releaseAppend)
+		t.Fatalf("manual adopter: %v", err)
+	}
+	if !manual.Reused || st.only(t).State != domain.FailoverAttemptAcked ||
+		st.sessions[id].Metadata.Pause != nil {
+		close(releaseAppend)
+		t.Fatalf("manual completion = %+v attempt=%+v pause=%+v",
+			manual, st.only(t), st.sessions[id].Metadata.Pause)
+	}
+	close(releaseAppend)
+	auto := <-autoDone
+	if auto.err != nil {
+		t.Fatalf("original owner did not converge on the completed attempt: %v", auto.err)
+	}
+	if !auto.res.Continue.Reused || auto.res.Continue.GenerationID != manual.GenerationID {
+		t.Fatalf("original owner result = %+v, manual = %+v", auto.res, manual)
+	}
+	if rt.created != 1 || rt.destroyed != 1 || len(st.attempts) != 1 {
+		t.Fatalf("completion race runtime/attempts = %d/%d/%d", rt.created, rt.destroyed, len(st.attempts))
+	}
+	for _, event := range st.ledger {
+		if event.Kind == domain.LifecycleKindFailover && event.Phase == domain.LifecyclePhaseFailed {
+			t.Fatalf("completed shared attempt gained a contradictory failed ledger: %+v", event)
+		}
+	}
+}
+
+func TestContinueAutomaticFailover_ResumeAfterAppendRevokesSwitchAuthority(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	st.afterAppend = func() {
+		rec := st.sessions[id]
+		rec.Metadata.Pause = nil
+		st.sessions[id] = rec
+	}
+
+	_, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrSwitchPaused) {
+		t.Fatalf("automatic after Resume error = %v, want ErrSwitchPaused", err)
+	}
+	if rt.created != 0 || rt.destroyed != 0 {
+		t.Fatalf("revoked incident touched runtime: created=%d destroyed=%d", rt.created, rt.destroyed)
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("automatic failover recreated a pause that Resume cleared")
+	}
+	if att := st.only(t); att.State != domain.FailoverAttemptFailed {
+		t.Fatalf("revoked pre-stop attempt state = %q, want failed", att.State)
+	}
+	for _, event := range st.ledger {
+		if event.Kind == domain.LifecycleKindFailover && event.Phase == domain.LifecyclePhaseTargetAck {
+			t.Fatalf("revoked incident wrote a false target ack: %+v", event)
+		}
+	}
+}
+
+func TestContinueAutomaticFailover_ErrorPathSurfacesLatestStateFailure(t *testing.T) {
+	t.Run("read error", func(t *testing.T) {
+		st, _, m, id := failoverFixture(t)
+		enableAutomaticFailover(t, st, m, id)
+		st.afterAppend = func() {
+			rec := st.sessions[id]
+			rec.Metadata.Pause = nil
+			st.sessions[id] = rec
+		}
+		readErr := errors.New("latest state unavailable")
+		st.beforeUpdate = func() { st.getSessionErr = readErr }
+
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		if !errors.Is(err, ErrSwitchPaused) || !errors.Is(err, readErr) {
+			t.Fatalf("joined latest-state error = %v", err)
+		}
+	})
+
+	t.Run("missing session", func(t *testing.T) {
+		st, _, m, id := failoverFixture(t)
+		enableAutomaticFailover(t, st, m, id)
+		st.afterAppend = func() {
+			rec := st.sessions[id]
+			rec.Metadata.Pause = nil
+			st.sessions[id] = rec
+		}
+		st.beforeUpdate = func() { delete(st.sessions, id) }
+
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		if !errors.Is(err, ErrSwitchPaused) || !errors.Is(err, ErrNotFound) {
+			t.Fatalf("joined missing-state error = %v", err)
+		}
+	})
+}
+
+func TestContinueAutomaticFailover_FailureCASMissFailsLoudlyWithoutFalseLedger(t *testing.T) {
+	assertNoFailedLedger := func(t *testing.T, st *failoverFakeStore) {
+		t.Helper()
+		for _, event := range st.ledger {
+			if event.Kind == domain.LifecycleKindFailover && event.Phase == domain.LifecyclePhaseFailed {
+				t.Fatalf("failure CAS loser wrote failed ledger: %+v", event)
+			}
+		}
+	}
+
+	t.Run("attempt disappeared", func(t *testing.T) {
+		st, _, m, id := failoverFixture(t)
+		enableAutomaticFailover(t, st, m, id)
+		st.afterAppend = func() {
+			rec := st.sessions[id]
+			rec.Metadata.Pause = nil
+			st.sessions[id] = rec
+		}
+		st.beforeUpdate = func() { st.attempts = nil }
+
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		if !errors.Is(err, ErrSwitchPaused) || !errors.Is(err, ErrFailoverRecoveryRequired) {
+			t.Fatalf("missing attempt CAS-miss error = %v", err)
+		}
+		assertNoFailedLedger(t, st)
+	})
+
+	t.Run("attempt changed to unexpected non-acked state", func(t *testing.T) {
+		st, _, m, id := failoverFixture(t)
+		enableAutomaticFailover(t, st, m, id)
+		st.afterAppend = func() {
+			rec := st.sessions[id]
+			rec.Metadata.Pause = nil
+			st.sessions[id] = rec
+		}
+		st.beforeUpdate = func() { st.attempts[0].State = domain.FailoverAttemptPostStop }
+
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		if !errors.Is(err, ErrSwitchPaused) || !errors.Is(err, ErrFailoverRecoveryRequired) {
+			t.Fatalf("unexpected-state CAS-miss error = %v", err)
+		}
+		if got := st.only(t).State; got != domain.FailoverAttemptPostStop {
+			t.Fatalf("CAS loser changed unexpected state to %q", got)
+		}
+		assertNoFailedLedger(t, st)
+	})
+
+	t.Run("acked attempt latest read error", func(t *testing.T) {
+		st, _, m, id := failoverFixture(t)
+		enableAutomaticFailover(t, st, m, id)
+		st.afterAppend = func() {
+			rec := st.sessions[id]
+			rec.Metadata.Pause = nil
+			st.sessions[id] = rec
+		}
+		readErr := errors.New("latest session unavailable")
+		st.beforeUpdate = func() {
+			st.attempts[0].State = domain.FailoverAttemptAcked
+			st.getSessionErr = readErr
+		}
+
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		if !errors.Is(err, ErrSwitchPaused) || !errors.Is(err, readErr) {
+			t.Fatalf("acked/read-error CAS-miss error = %v", err)
+		}
+		assertNoFailedLedger(t, st)
+	})
+
+	t.Run("acked attempt latest session missing", func(t *testing.T) {
+		st, _, m, id := failoverFixture(t)
+		enableAutomaticFailover(t, st, m, id)
+		st.afterAppend = func() {
+			rec := st.sessions[id]
+			rec.Metadata.Pause = nil
+			st.sessions[id] = rec
+		}
+		st.beforeUpdate = func() {
+			st.attempts[0].State = domain.FailoverAttemptAcked
+			delete(st.sessions, id)
+		}
+
+		_, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		if !errors.Is(err, ErrSwitchPaused) || !errors.Is(err, ErrNotFound) {
+			t.Fatalf("acked/missing-session CAS-miss error = %v", err)
+		}
+		assertNoFailedLedger(t, st)
+	})
+}
+
+func TestReconcile_AutomaticFailoverClosesCrashAfterPauseBeforeAttempt(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	// The switch sees the old source as gone after Destroy; the later live pass
+	// sees the newly created deterministic fake handle as alive.
+	rt.aliveByHandle = map[string]bool{"h1": true}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	att := st.only(t)
+	if att.State != domain.FailoverAttemptAcked || rt.created != 1 {
+		t.Fatalf("boot attempt/runtime = %+v/%d", att, rt.created)
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("boot did not finish the exact opted-in automatic incident")
+	}
+}
+
+func TestReconcile_UnpromotedAutomaticStructuredPauseRemainsPassive(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	structuredLimitPauseAt(st, id, "inc-1")
+	rt.aliveByHandle = map[string]bool{"rt-1": true}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	if len(st.attempts) != 0 || rt.created != 0 || rt.destroyed != 0 {
+		t.Fatalf("unpromoted boot acted: attempts=%d created=%d destroyed=%d",
+			len(st.attempts), rt.created, rt.destroyed)
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("unpromoted boot cleared the structured pause")
+	}
+}
+
+func TestReconcile_AutomaticTerminalFailureNeverAdvancesAnotherRung(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	rt.aliveByHandle = map[string]bool{"rt-1": true}
+	if _, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"}); err == nil {
+		t.Fatal("expected the first pre-stop failure")
+	}
+	if st.only(t).State != domain.FailoverAttemptFailed {
+		t.Fatal("fixture did not reach a terminal failed attempt")
+	}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	if len(st.attempts) != 1 || rt.created != 0 {
+		t.Fatalf("boot advanced a terminal automatic incident: attempts=%d target launches=%d",
+			len(st.attempts), rt.created)
+	}
+	if st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("boot lifted the pause after a terminal automatic failure")
+	}
+}
+
+func TestReconcile_AutomaticPostStopRecoversTheSameGeneration(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	m.lcm.(*fakeLCM).markSpawnedErr = errors.New("database is locked")
+	if _, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"}); !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("first automatic attempt err = %v, want ErrSwitchPostStop", err)
+	}
+	generation := st.only(t).GenerationID
+	m.lcm.(*fakeLCM).markSpawnedErr = nil
+	rt.aliveByHandle = map[string]bool{"h1": true}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	att := st.only(t)
+	if att.GenerationID != generation || att.State != domain.FailoverAttemptAcked {
+		t.Fatalf("boot changed attempt identity/state: %+v, want generation %q acked", att, generation)
+	}
+	if len(st.attempts) != 1 || st.sessions[id].Metadata.Pause != nil {
+		t.Fatalf("boot spent another rung or kept the pin: attempts=%d pause=%+v",
+			len(st.attempts), st.sessions[id].Metadata.Pause)
+	}
+}
+
+func TestReconcile_AutomaticRequestedAttemptRedrivesTheSameGeneration(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	now := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	attempt := domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor",
+		FromHarness: domain.HarnessClaudeCode, FromModel: "claude-sonnet-source",
+		ToHarness: domain.HarnessCodex, RungIndex: 0, GenerationID: "gen-requested",
+		State: domain.FailoverAttemptRequested, CreatedAt: now, UpdatedAt: now,
+	}
+	if err := st.AppendSessionFailoverAttemptWithLedger(context.Background(), attempt,
+		m.failoverLedgerRecord(attempt, domain.LifecyclePhaseRequested)); err != nil {
+		t.Fatalf("seed requested attempt: %v", err)
+	}
+	rt.aliveByHandle = map[string]bool{"h1": true}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	att := st.only(t)
+	if att.GenerationID != "gen-requested" || att.State != domain.FailoverAttemptAcked {
+		t.Fatalf("boot changed requested attempt identity/state: %+v", att)
+	}
+	if len(st.attempts) != 1 || st.sessions[id].Metadata.Pause != nil {
+		t.Fatalf("boot selected a new rung or kept pause: attempts=%d pause=%+v",
+			len(st.attempts), st.sessions[id].Metadata.Pause)
+	}
+}
+
+func TestReconcile_AutomaticAckedPromotionOnlyClearsExactPause(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	now := time.Date(2026, 8, 9, 10, 0, 0, 0, time.UTC)
+	st.attempts = append(st.attempts, domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: "mer",
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor",
+		FromHarness: domain.HarnessClaudeCode, ToHarness: domain.HarnessCodex,
+		RungIndex: 0, GenerationID: "gen-acked", State: domain.FailoverAttemptAcked,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.Role.ResolvedModel = ""
+	rec.Metadata.RuntimeLaunchID = "gen-acked"
+	rec.Metadata.SwitchPending = nil
+	st.sessions[id] = rec
+	rt.aliveByHandle = map[string]bool{rec.Metadata.RuntimeHandleID: true}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	if st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("boot did not clear the exact pin after proven target promotion")
+	}
+	if rt.created != 0 || rt.destroyed != 0 || len(st.attempts) != 1 {
+		t.Fatalf("settled ack did runtime/new-rung work: created=%d destroyed=%d attempts=%d",
+			rt.created, rt.destroyed, len(st.attempts))
+	}
+}
+
+func TestReconcile_AutomaticTargetAckBeforePromotionConvergesSameGeneration(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	// SwitchWorker writes pending, clears the source, rotates credentials,
+	// re-pins the live target, then promotes. Fail only that final promotion so
+	// target_ack and the target generation are durable while the row still names
+	// the source harness.
+	st.updateFailAfter = 5
+	st.updateErr = errors.New("promotion write failed")
+	if _, err := m.ContinueAutomaticFailover(context.Background(), id,
+		AutomaticFailoverRequest{IncidentID: "inc-1"}); !errors.Is(err, ErrSwitchPostStop) {
+		t.Fatalf("seed ack-before-promotion crash: %v", err)
+	}
+	before := st.only(t)
+	if before.State != domain.FailoverAttemptPostStop {
+		t.Fatalf("seed attempt state = %q, want post_stop before ledger reconciliation", before.State)
+	}
+	rec := st.sessions[id]
+	if rec.Metadata.SwitchPending == nil || rec.Metadata.RuntimeLaunchID != before.GenerationID ||
+		rec.Harness != domain.HarnessClaudeCode {
+		t.Fatalf("seed crash facts = harness %q launch %q pending %+v", rec.Harness, rec.Metadata.RuntimeLaunchID, rec.Metadata.SwitchPending)
+	}
+	createdBefore := rt.created
+	rt.aliveByHandle = map[string]bool{rec.Metadata.RuntimeHandleID: true}
+	st.updateFailAfter = 0
+	st.updateErr = nil
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	after := st.only(t)
+	final := st.sessions[id]
+	if after.ID != before.ID || after.GenerationID != before.GenerationID ||
+		after.State != domain.FailoverAttemptAcked {
+		t.Fatalf("boot changed attempt identity/state: %+v -> %+v", before, after)
+	}
+	if len(st.attempts) != 1 || rt.created != createdBefore {
+		t.Fatalf("boot opened a second rung/runtime: attempts=%d created=%d->%d",
+			len(st.attempts), createdBefore, rt.created)
+	}
+	if final.Harness != domain.HarnessCodex || final.Metadata.RuntimeLaunchID != before.GenerationID ||
+		final.Metadata.SwitchPending != nil || final.Metadata.Pause != nil {
+		t.Fatalf("boot convergence = harness %q launch %q pending %+v pause %+v",
+			final.Harness, final.Metadata.RuntimeLaunchID, final.Metadata.SwitchPending, final.Metadata.Pause)
+	}
+}
+
+func TestReconcile_AutomaticModeChangedToManualRemainsPaused(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeManual
+	st.projects["mer"] = project
+	rt.aliveByHandle = map[string]bool{st.sessions[id].Metadata.RuntimeHandleID: true}
+
+	if err := m.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+	assertNothingDurable(t, st, id, "inc-1")
+	if rt.created != 0 || rt.destroyed != 0 {
+		t.Fatalf("manual-at-boot mode touched runtime: created=%d destroyed=%d", rt.created, rt.destroyed)
 	}
 }
 

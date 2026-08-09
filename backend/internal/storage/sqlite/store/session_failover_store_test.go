@@ -139,6 +139,55 @@ func TestFailoverAttempt_LedgerRolledBackWhenAttemptInsertFails(t *testing.T) {
 	}
 }
 
+func TestFailoverAttempt_ConcurrentSameIncidentSequenceHasOneAtomicWinner(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	id := newFailoverSession(t, s)
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+
+	for i := 1; i <= 2; i++ {
+		go func() {
+			<-start
+			att := failoverAttempt(id, "inc-1", 1, "gen-"+strconv.Itoa(i))
+			ledger := failoverLedger(id, "inc-1", "led-"+strconv.Itoa(i))
+			ledger.GenerationID = att.GenerationID
+			errs <- s.AppendSessionFailoverAttemptWithLedger(
+				ctx, att, ledger,
+			)
+		}()
+	}
+	close(start)
+
+	succeeded := 0
+	for i := 0; i < 2; i++ {
+		if err := <-errs; err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("successful concurrent appends = %d, want exactly 1", succeeded)
+	}
+
+	attempts, err := s.ListSessionFailoverAttemptsByIncident(ctx, id, "inc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(attempts) != 1 {
+		t.Fatalf("attempts = %d, want one winner", len(attempts))
+	}
+	events, err := s.ListLifecycleLedger(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 {
+		t.Fatalf("ledger rows = %d, want one row from the same atomic winner", len(events))
+	}
+	if events[0].GenerationID != attempts[0].GenerationID {
+		t.Fatalf("ledger generation %q != attempt generation %q", events[0].GenerationID, attempts[0].GenerationID)
+	}
+}
+
 func TestFailoverAttempt_UpdateStateIsCompareAndSet(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()

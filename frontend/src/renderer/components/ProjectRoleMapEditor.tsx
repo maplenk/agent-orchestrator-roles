@@ -46,6 +46,9 @@ export function validateRoleMapDraft(roleMap: RoleMap | undefined, t: TFunction)
 	if (roleMap.role_map_schema_version !== 1) {
 		return t("settings.roles.validation.unsupportedSchema", { schema: roleMap.role_map_schema_version });
 	}
+	if (roleMap.failover?.mode === "automatic") {
+		return t("settings.roles.validation.automaticUnavailable");
+	}
 	const roles = roleMap.roles ?? {};
 	const roleIDs = Object.keys(roles);
 	if (roleIDs.length === 0) return t("settings.roles.validation.addRole");
@@ -137,6 +140,7 @@ export function ProjectRoleMapEditor({
 	const roles = value.roles ?? {};
 	const roleIDs = Object.keys(roles);
 	const orchestratorRole = value.orchestratorRole?.trim() || "orchestrator";
+	const failoverMode = value.failover?.mode || "manual";
 	const harnessOptions = withCurrentHarnesses(harnesses, value);
 	const updateBinding = (roleID: string, patch: Partial<RoleBinding>) => {
 		const binding = roles[roleID];
@@ -249,9 +253,30 @@ export function ProjectRoleMapEditor({
 						))}
 					</select>
 				</SettingsRow>
-				<p className="px-1 text-xs leading-5 text-settings-muted">{t("settings.roles.newSessionsOnly")}</p>
-				{value.failover?.mode === "automatic" && (
-					<p className="px-1 text-xs text-warning">{t("settings.roles.automaticPreserved")}</p>
+				<SettingsRow label={t("settings.roles.failoverMode")}>
+					<span className="text-sm text-foreground">
+						{failoverMode === "automatic"
+							? t("settings.roles.automaticModeUnavailable")
+							: t("settings.roles.manualMode")}
+					</span>
+				</SettingsRow>
+				<p className="px-1 text-xs leading-5 text-settings-muted">{t("settings.roles.bindingPolicyNewSessions")}</p>
+				<p className="px-1 text-xs leading-5 text-settings-muted">{t("settings.roles.failoverCurrentPolicy")}</p>
+				{failoverMode === "automatic" && (
+					<div role="alert" className="mx-1 flex flex-col items-start gap-2 rounded-md border border-warning/40 bg-warning/10 p-3">
+						<p className="text-xs leading-5 text-warning">{t("settings.roles.automaticUnavailable")}</p>
+						<Button
+							type="button"
+							variant="outline"
+							size="sm"
+							onClick={() => onChange({
+								...value,
+								failover: { ...value.failover, mode: "manual", roles: value.failover?.roles ?? {} },
+							})}
+						>
+							{t("settings.roles.convertToManual")}
+						</Button>
+					</div>
 				)}
 			</SettingsSection>
 

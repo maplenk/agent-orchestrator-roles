@@ -17,13 +17,16 @@ import (
 // answer for EVERY production harness today and is not a fault.
 var ErrHarnessUnsupported = errors.New("limit detection unsupported for this harness")
 
-// Pauser is the durable pause command. Deliberately the existing
-// sessionmanager.PauseSession and nothing new: it is already idempotent per
-// incident, already writes its ledger row before the pin, and already refuses a
-// usage_limit without a structured envelope. A second pause path would be a
-// second set of those invariants to keep.
-type Pauser interface {
+// SessionController is the durable pause command plus the one-shot automatic
+// continuation decision. Both methods are implemented by sessionmanager.Manager:
+// the router never selects a rung, relaunches a runtime, or owns attempt state.
+type SessionController interface {
 	PauseSession(ctx context.Context, id domain.SessionID, req sessionmanager.PauseRequest) (domain.SessionRecord, error)
+	ContinueAutomaticFailover(
+		ctx context.Context,
+		id domain.SessionID,
+		req sessionmanager.AutomaticFailoverRequest,
+	) (sessionmanager.AutomaticFailoverResult, error)
 }
 
 // Router turns a structured adapter event into a durable pause, or into
@@ -32,7 +35,7 @@ type Pauser interface {
 // makes that converge.
 type Router struct {
 	registry *Registry
-	pauser   Pauser
+	sessions SessionController
 	logger   *slog.Logger
 	// caps is the capability lookup, injectable so a test can promote a
 	// harness without mutating the production registry.
@@ -40,11 +43,11 @@ type Router struct {
 }
 
 // NewRouter builds a Router. A nil logger falls back to slog.Default.
-func NewRouter(reg *Registry, pauser Pauser, logger *slog.Logger) *Router {
+func NewRouter(reg *Registry, sessions SessionController, logger *slog.Logger) *Router {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Router{registry: reg, pauser: pauser, logger: logger, caps: capabilities.For}
+	return &Router{registry: reg, sessions: sessions, logger: logger, caps: capabilities.For}
 }
 
 // Route validates an adapter event, asks that harness's detector whether it is
@@ -56,7 +59,7 @@ func (r *Router) Route(ctx context.Context, ev Event) (paused bool, err error) {
 	if err := ev.Validate(); err != nil {
 		return false, err
 	}
-	if r == nil || r.pauser == nil {
+	if r == nil || r.sessions == nil {
 		return false, fmt.Errorf("limit router: not wired")
 	}
 
@@ -108,7 +111,7 @@ func (r *Router) Route(ctx context.Context, ev Event) (paused bool, err error) {
 	}
 
 	incident := IncidentID(env)
-	rec, err := r.pauser.PauseSession(ctx, ev.SessionID, sessionmanager.PauseRequest{
+	rec, err := r.sessions.PauseSession(ctx, ev.SessionID, sessionmanager.PauseRequest{
 		IncidentID:   incident,
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
@@ -132,5 +135,26 @@ func (r *Router) Route(ctx context.Context, ev Event) (paused bool, err error) {
 	r.logger.Info("session paused by structured limit detection",
 		"sessionID", ev.SessionID, "harness", ev.Harness,
 		"incident", incident, "kind", env.Kind)
-	return rec.Metadata.Pause != nil, nil
+
+	// Automatic mode is a single immediate handoff to the accepted Continue
+	// transaction. The manager reads the current opt-in, suppresses every later
+	// automatic action for an incident with an attempt, and leaves failures
+	// paused for manual Continue. There is intentionally no retry-after timer or
+	// background worker here.
+	auto, err := r.sessions.ContinueAutomaticFailover(ctx, ev.SessionID,
+		sessionmanager.AutomaticFailoverRequest{IncidentID: incident})
+	if err != nil {
+		paused := rec.Metadata.Pause != nil
+		if auto.Session.ID != "" {
+			paused = auto.Session.Metadata.Pause != nil
+		}
+		return paused, fmt.Errorf("limit router: automatic failover %s: %w", ev.SessionID, err)
+	}
+	if auto.Enabled && auto.Attempted {
+		r.logger.Info("session continued by opt-in automatic failover",
+			"sessionID", ev.SessionID, "harness", ev.Harness,
+			"incident", incident, "targetHarness", auto.Continue.Target.Harness,
+			"targetModel", auto.Continue.Target.Model, "rung", auto.Continue.RungIndex)
+	}
+	return auto.Session.Metadata.Pause != nil, nil
 }

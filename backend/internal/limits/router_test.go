@@ -17,9 +17,30 @@ var ctx = context.Background()
 // fakePauser stands in for the real PauseSession and reproduces the property
 // the router depends on: idempotency per incident.
 type fakePauser struct {
-	calls    []sessionmanager.PauseRequest
-	incident string // whichever incident actually holds the session
-	err      error
+	calls                    []sessionmanager.PauseRequest
+	automaticCalls           []sessionmanager.AutomaticFailoverRequest
+	incident                 string // whichever incident actually holds the session
+	err                      error
+	automaticResult          sessionmanager.AutomaticFailoverResult
+	automaticErr             error
+	automaticSawDurablePause bool
+}
+
+func (p *fakePauser) ContinueAutomaticFailover(
+	_ context.Context,
+	id domain.SessionID,
+	req sessionmanager.AutomaticFailoverRequest,
+) (sessionmanager.AutomaticFailoverResult, error) {
+	p.automaticCalls = append(p.automaticCalls, req)
+	p.automaticSawDurablePause = len(p.calls) != 0 && p.incident == req.IncidentID
+	if p.automaticErr != nil {
+		return p.automaticResult, p.automaticErr
+	}
+	if p.automaticResult.Session.ID == "" {
+		p.automaticResult.Session = domain.SessionRecord{ID: id}
+		p.automaticResult.Session.Metadata.Pause = &domain.SessionPause{IncidentID: req.IncidentID}
+	}
+	return p.automaticResult, nil
 }
 
 func (p *fakePauser) PauseSession(_ context.Context, id domain.SessionID, req sessionmanager.PauseRequest) (domain.SessionRecord, error) {
@@ -74,7 +95,7 @@ func goodEvent() Event {
 
 // promoted builds a router with the harness capability flipped on, which is the
 // ONLY way a detector can act. Production has none.
-func promoted(t *testing.T, d Detector, p Pauser) *Router {
+func promoted(t *testing.T, d Detector, p SessionController) *Router {
 	t.Helper()
 	r := NewRouter(NewRegistry(d), p, nil)
 	r.caps = func(h domain.AgentHarness) capabilities.Caps {
@@ -110,6 +131,9 @@ func TestEveryProductionHarnessIsUnsupported(t *testing.T) {
 	if len(p.calls) != 0 {
 		t.Fatalf("%d pause calls with no detector anywhere", len(p.calls))
 	}
+	if len(p.automaticCalls) != 0 {
+		t.Fatalf("%d automatic calls with no promoted detector", len(p.automaticCalls))
+	}
 }
 
 // limit_detection_supported is the reviewed gate, and it must bind even when a
@@ -124,7 +148,7 @@ func TestCapabilityGateBindsEvenWithADetectorPresent(t *testing.T) {
 	if !errors.Is(err, ErrHarnessUnsupported) {
 		t.Fatalf("err = %v, want ErrHarnessUnsupported: an unpromoted detector must not pause", err)
 	}
-	if paused || len(p.calls) != 0 {
+	if paused || len(p.calls) != 0 || len(p.automaticCalls) != 0 {
 		t.Fatal("an unpromoted detector paused a session")
 	}
 	if capabilities.For(domain.HarnessCodex).LimitDetectionSupported {
@@ -250,6 +274,92 @@ func TestDuplicateDeliveryIsOneIncident(t *testing.T) {
 	}
 }
 
+func TestManualModeStaysPausedAfterStructuredDetection(t *testing.T) {
+	p := &fakePauser{}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent())
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	if !paused {
+		t.Fatal("manual mode did not retain the durable pause")
+	}
+	if len(p.automaticCalls) != 1 || p.automaticCalls[0].IncidentID != IncidentID(goodEnvelope()) {
+		t.Fatalf("automatic decision calls = %+v, want exact envelope incident", p.automaticCalls)
+	}
+}
+
+func TestAutomaticModeContinuesTheExactPinnedIncident(t *testing.T) {
+	p := &fakePauser{automaticResult: sessionmanager.AutomaticFailoverResult{
+		Enabled: true, Attempted: true,
+		Session: domain.SessionRecord{ID: "mer-1"},
+		Continue: sessionmanager.ContinueFailoverResult{
+			IncidentID: IncidentID(goodEnvelope()),
+			Target:     domain.FailoverTarget{Harness: domain.HarnessClaudeCode, Model: "sonnet"},
+			RungIndex:  0,
+		},
+	}}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent())
+	if err != nil {
+		t.Fatalf("route: %v", err)
+	}
+	if paused {
+		t.Fatal("successful opt-in automatic continuation left the incident reported as paused")
+	}
+	if len(p.calls) != 1 || len(p.automaticCalls) != 1 {
+		t.Fatalf("pause/automatic calls = %d/%d, want one each", len(p.calls), len(p.automaticCalls))
+	}
+	if !p.automaticSawDurablePause {
+		t.Fatal("automatic callback ran before the exact durable pause returned")
+	}
+	if got, want := p.automaticCalls[0].IncidentID, p.calls[0].IncidentID; got != want {
+		t.Fatalf("automatic incident = %q, pinned incident = %q", got, want)
+	}
+}
+
+func TestAutomaticFailureStaysPausedAndSurfaces(t *testing.T) {
+	p := &fakePauser{
+		automaticResult: sessionmanager.AutomaticFailoverResult{
+			Enabled: true, Attempted: true,
+			Session: domain.SessionRecord{ID: "mer-1", Metadata: domain.SessionMetadata{
+				Pause: &domain.SessionPause{IncidentID: IncidentID(goodEnvelope())},
+			}},
+		},
+		automaticErr: errors.New("target launch failed before source stop"),
+	}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent())
+	if err == nil || !paused {
+		t.Fatalf("paused=%v err=%v, want a durable pause plus surfaced automatic failure", paused, err)
+	}
+	if len(p.automaticCalls) != 1 {
+		t.Fatalf("automatic calls = %d, want 1", len(p.automaticCalls))
+	}
+}
+
+func TestAutomaticErrorReportsTheLatestUnpausedState(t *testing.T) {
+	p := &fakePauser{
+		automaticResult: sessionmanager.AutomaticFailoverResult{
+			Enabled: true, Attempted: true,
+			Session: domain.SessionRecord{ID: "mer-1"},
+		},
+		automaticErr: errors.New("lost the attempt transaction to a concurrent manual Continue"),
+	}
+	r := promoted(t, stubDetector{harness: domain.HarnessCodex, env: goodEnvelope(), isLimit: true}, p)
+
+	paused, err := r.Route(ctx, goodEvent())
+	if err == nil {
+		t.Fatal("automatic collision error was swallowed")
+	}
+	if paused {
+		t.Fatal("router reported the stale pre-automatic pause after the latest session had cleared it")
+	}
+}
+
 // The id must not drift with receipt time. Deriving it from the clock is the
 // specific mistake that would make every redelivery a new incident.
 func TestIncidentIDIsStableAndDoesNotUseReceiptTime(t *testing.T) {
@@ -327,16 +437,20 @@ func TestPauseConflictSurfaces(t *testing.T) {
 	if paused {
 		t.Fatal("reported a pause that did not happen")
 	}
+	if len(p.automaticCalls) != 0 {
+		t.Fatal("pause conflict still reached automatic failover")
+	}
 }
 
 // The package must not grow a scheduler. This is a structural assertion: the
-// value of "no automatic retry" is that it cannot be reintroduced quietly.
+// value of "one immediate automatic decision, no retry" is that a timer or
+// background loop cannot be reintroduced quietly.
 func TestNoSchedulingPrimitivesInThePackage(t *testing.T) {
 	// Router holds no timer, ticker, channel or goroutine state — it is
-	// registry + pauser + logger + caps. If a field is added here, this test
+	// registry + session controller + logger + caps. If a field is added here, this test
 	// is the place to argue for it.
 	r := NewRouter(NewRegistry(), &fakePauser{}, nil)
-	if r.registry == nil || r.pauser == nil || r.logger == nil || r.caps == nil {
+	if r.registry == nil || r.sessions == nil || r.logger == nil || r.caps == nil {
 		t.Fatal("router wiring changed")
 	}
 }
@@ -422,6 +536,16 @@ func (p *guardingPauser) PauseSession(_ context.Context, id domain.SessionID, re
 	rec := domain.SessionRecord{ID: id, Harness: p.harness}
 	rec.Metadata.Pause = &domain.SessionPause{IncidentID: req.IncidentID, Reason: req.Reason, DetectedBy: req.DetectedBy}
 	return rec, nil
+}
+
+func (p *guardingPauser) ContinueAutomaticFailover(
+	_ context.Context,
+	id domain.SessionID,
+	req sessionmanager.AutomaticFailoverRequest,
+) (sessionmanager.AutomaticFailoverResult, error) {
+	rec := domain.SessionRecord{ID: id, Harness: p.harness}
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: req.IncidentID}
+	return sessionmanager.AutomaticFailoverResult{Session: rec}, nil
 }
 
 // A promoted detector for one harness must not be able to pause a session that

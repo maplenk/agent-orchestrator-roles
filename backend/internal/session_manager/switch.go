@@ -146,7 +146,15 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	if rec.IsTerminated {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrTerminated)
 	}
-	if rec.Metadata.Pause != nil && strings.TrimSpace(req.PauseIncidentID) != rec.Metadata.Pause.IncidentID {
+	pauseIncident := strings.TrimSpace(req.PauseIncidentID)
+	if pauseIncident != "" {
+		// Continue owns an exact durable pause incident. A human Resume that
+		// clears it after Continue's first read revokes that authority; nil is
+		// not permission to continue an incident-bound switch.
+		if rec.Metadata.Pause == nil || pauseIncident != rec.Metadata.Pause.IncidentID {
+			return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchPaused)
+		}
+	} else if rec.Metadata.Pause != nil {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchPaused)
 	}
 	if rec.Metadata.SwitchPending != nil {
