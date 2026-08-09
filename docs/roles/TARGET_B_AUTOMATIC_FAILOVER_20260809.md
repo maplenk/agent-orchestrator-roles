@@ -9,6 +9,7 @@ failover engine`); the content-equivalent roles-trunk commit is `29becc6d`.
 **Historical dormant-product evidence:** `cbf47bf5`.
 **Promotion-blocker correction:** `72bca3e4` (`fix: bind automatic failover
 pauses to runtime generations`).
+**Correction evidence integration:** `4d8fddf`.
 
 ## Scope and result
 

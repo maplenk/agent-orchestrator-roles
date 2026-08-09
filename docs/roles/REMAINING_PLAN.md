@@ -13,7 +13,8 @@
 **Target B atomic role-map CAS API:** `54cdbdd8`
 **Target B desktop role-map editor:** `c7c1f565`
 **Target B dormant automatic-failover engine:** source `1c97c55e`,
-content-equivalent roles-trunk `29becc6d`; generation binding `72bca3e4`
+content-equivalent roles-trunk `29becc6d`; generation binding `72bca3e4`;
+correction evidence `4d8fddf`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
