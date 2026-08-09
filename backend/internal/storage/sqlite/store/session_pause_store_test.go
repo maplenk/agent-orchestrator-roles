@@ -10,12 +10,13 @@ import (
 
 func storePause(incident string) *domain.SessionPause {
 	return &domain.SessionPause{
-		IncidentID:   incident,
-		Reason:       domain.PauseReasonUsageLimit,
-		DetectedBy:   domain.PauseDetectionStructured,
-		Harness:      domain.HarnessCodex,
-		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1","resetsAt":"2026-08-06T18:00:00Z"}`,
-		PausedAt:     time.Now().UTC().Truncate(time.Second),
+		IncidentID:              incident,
+		Reason:                  domain.PauseReasonUsageLimit,
+		DetectedBy:              domain.PauseDetectionStructured,
+		Harness:                 domain.HarnessCodex,
+		ObservedRuntimeLaunchID: "launch-source-1",
+		EvidenceJSON:            `{"version":1,"kind":"usage_limit","sourceKey":"win-1","resetsAt":"2026-08-06T18:00:00Z"}`,
+		PausedAt:                time.Now().UTC().Truncate(time.Second),
 	}
 }
 
@@ -57,6 +58,10 @@ func TestSessionPausePersistsThroughRealStore(t *testing.T) {
 	if got.Metadata.Pause.EvidenceJSON != pause.EvidenceJSON {
 		t.Errorf("evidence lost: %q", got.Metadata.Pause.EvidenceJSON)
 	}
+	if got.Metadata.Pause.ObservedRuntimeLaunchID != pause.ObservedRuntimeLaunchID {
+		t.Errorf("observed generation = %q, want %q",
+			got.Metadata.Pause.ObservedRuntimeLaunchID, pause.ObservedRuntimeLaunchID)
+	}
 	if got.Metadata.Pause.RetryAfter == nil || !got.Metadata.Pause.RetryAfter.Equal(retry) {
 		t.Errorf("retryAfter = %v, want %v", got.Metadata.Pause.RetryAfter, retry)
 	}
@@ -76,6 +81,9 @@ func TestSessionPausePersistsThroughRealStore(t *testing.T) {
 		found = true
 		if l.Metadata.Pause == nil {
 			t.Error("ListSessions dropped the pause pin")
+		} else if l.Metadata.Pause.ObservedRuntimeLaunchID != pause.ObservedRuntimeLaunchID {
+			t.Errorf("ListSessions observed generation = %q, want %q",
+				l.Metadata.Pause.ObservedRuntimeLaunchID, pause.ObservedRuntimeLaunchID)
 		}
 	}
 	if !found {
@@ -123,9 +131,57 @@ func TestGenericUpdatePreservesThePausePin(t *testing.T) {
 	if after.Metadata.Pause == nil {
 		t.Fatal("a stale full-row update cleared the pause pin")
 	}
+	if after.Metadata.Pause.ObservedRuntimeLaunchID != "launch-source-1" {
+		t.Fatalf("a stale full-row update changed observed generation to %q",
+			after.Metadata.Pause.ObservedRuntimeLaunchID)
+	}
 	if after.Metadata.Prompt != "a field that writer legitimately owns" {
 		t.Error("the unrelated write was lost; column ownership must not block other writers")
 	}
+}
+
+func TestLegacyStructuredPauseWithoutObservedGenerationRemainsReadable(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+
+	rec, err := s.CreateSession(ctx, sampleRecord("mer"))
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	legacy := storePause("legacy-incident")
+	legacy.ObservedRuntimeLaunchID = ""
+	if ok, err := s.SetSessionPauseIfAbsent(ctx, rec.ID, legacy, domain.PauseGuard{}, time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("seed legacy pause: ok=%v err=%v", ok, err)
+	}
+
+	got, ok, err := s.GetSession(ctx, rec.ID)
+	if err != nil || !ok {
+		t.Fatalf("read legacy pause: ok=%v err=%v", ok, err)
+	}
+	if got.Metadata.Pause == nil {
+		t.Fatal("legacy structured pin read as not paused")
+	}
+	if got.Metadata.Pause.IncidentID != legacy.IncidentID ||
+		got.Metadata.Pause.ObservedRuntimeLaunchID != "" {
+		t.Fatalf("legacy pause = %+v, want original incident and no invented generation", got.Metadata.Pause)
+	}
+
+	listed, err := s.ListAllSessions(ctx)
+	if err != nil {
+		t.Fatalf("list all with legacy pause: %v", err)
+	}
+	for _, item := range listed {
+		if item.ID != rec.ID {
+			continue
+		}
+		if item.Metadata.Pause == nil || item.Metadata.Pause.IncidentID != legacy.IncidentID ||
+			item.Metadata.Pause.ObservedRuntimeLaunchID != "" {
+			t.Fatalf("boot listing changed legacy pause: %+v", item.Metadata.Pause)
+		}
+		return
+	}
+	t.Fatal("legacy-paused session missing from boot listing")
 }
 
 // Compare-and-set, not last-write-wins: a second detector reporting a different

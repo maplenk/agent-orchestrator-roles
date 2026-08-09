@@ -47,6 +47,10 @@ var (
 	// a switch saga now owns it. Pausing on evidence from a generation that is
 	// already gone would park a runtime that never hit the limit.
 	ErrPauseOwnershipChanged = errors.New("session ownership changed since the observation")
+	// ErrPauseOwnershipRequired means a structured detector tried to create a
+	// durable pause without the complete harness/generation/switch guard that
+	// binds the evidence to one runtime owner.
+	ErrPauseOwnershipRequired = errors.New("structured pause ownership guard required")
 )
 
 // PauseRequest is the input to PauseSession. It carries no free-text reason
@@ -83,6 +87,47 @@ type PauseRequest struct {
 	Guard domain.PauseGuard
 }
 
+func structuredPauseObservedGeneration(req PauseRequest) (string, error) {
+	if req.Reason != domain.PauseReasonUsageLimit ||
+		req.DetectedBy != domain.PauseDetectionStructured {
+		return "", nil
+	}
+	if strings.TrimSpace(string(req.Guard.ExpectHarness)) == "" {
+		return "", fmt.Errorf("%w: expected harness is required", ErrPauseOwnershipRequired)
+	}
+	generation := strings.TrimSpace(req.Guard.ExpectRuntimeLaunchID)
+	if generation == "" {
+		return "", fmt.Errorf("%w: expected runtime launch id is required", ErrPauseOwnershipRequired)
+	}
+	if !req.Guard.RequireNoSwitchPending {
+		return "", fmt.Errorf("%w: switch-pending exclusion is required", ErrPauseOwnershipRequired)
+	}
+	return generation, nil
+}
+
+func pauseGuardMatchesSession(rec domain.SessionRecord, guard domain.PauseGuard) bool {
+	if guard.ExpectHarness != "" && rec.Harness != guard.ExpectHarness {
+		return false
+	}
+	if expected := strings.TrimSpace(guard.ExpectRuntimeLaunchID); expected != "" &&
+		strings.TrimSpace(rec.Metadata.RuntimeLaunchID) != expected {
+		return false
+	}
+	return !guard.RequireNoSwitchPending || rec.Metadata.SwitchPending == nil
+}
+
+func sameStructuredPauseOwnership(
+	rec domain.SessionRecord,
+	pause *domain.SessionPause,
+	guard domain.PauseGuard,
+	observedGeneration string,
+) bool {
+	return pause != nil &&
+		pauseGuardMatchesSession(rec, guard) &&
+		pause.Harness == guard.ExpectHarness &&
+		strings.TrimSpace(pause.ObservedRuntimeLaunchID) == observedGeneration
+}
+
 // PauseSession durably pins a session as paused and records a pause ledger
 // event. It does NOT stop the runtime: the agent process and its pane stay
 // exactly as they are, because the point of pause is to stop AO acting, not to
@@ -95,6 +140,10 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 	incident := strings.TrimSpace(req.IncidentID)
 	if err := domain.ValidateIncidentID(incident); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w: %w", id, ErrIncidentRequired, err)
+	}
+	observedGeneration, err := structuredPauseObservedGeneration(req)
+	if err != nil {
+		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, err)
 	}
 
 	rec, ok, err := m.store.GetSession(ctx, id)
@@ -109,19 +158,31 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 	}
 	if existing := rec.Metadata.Pause; existing != nil {
 		if existing.IncidentID == incident {
+			// Idempotence cannot bypass the ownership proof. A duplicate event
+			// from source generation A may arrive after Restart Agent has created
+			// generation B while deliberately preserving the pause. The existing
+			// pin stays bound to A; it never re-authorizes itself against B.
+			if observedGeneration != "" &&
+				!sameStructuredPauseOwnership(rec, existing, req.Guard, observedGeneration) {
+				return domain.SessionRecord{}, fmt.Errorf(
+					"pause %s: %w: incident %s observed generation %q, current generation %q, stored generation %q",
+					id, ErrPauseOwnershipChanged, incident, observedGeneration,
+					rec.Metadata.RuntimeLaunchID, existing.ObservedRuntimeLaunchID)
+			}
 			return rec, nil // already recorded
 		}
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w (incident %s)", id, ErrAlreadyPaused, existing.IncidentID)
 	}
 
 	pause := &domain.SessionPause{
-		IncidentID:   incident,
-		Reason:       req.Reason,
-		DetectedBy:   req.DetectedBy,
-		Harness:      rec.Harness,
-		EvidenceJSON: req.EvidenceJSON,
-		RetryAfter:   req.RetryAfter,
-		PausedAt:     m.clock(),
+		IncidentID:              incident,
+		Reason:                  req.Reason,
+		DetectedBy:              req.DetectedBy,
+		Harness:                 rec.Harness,
+		ObservedRuntimeLaunchID: observedGeneration,
+		EvidenceJSON:            req.EvidenceJSON,
+		RetryAfter:              req.RetryAfter,
+		PausedAt:                m.clock(),
 	}
 	if err := pause.Validate(); err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w", id, err)
@@ -144,7 +205,7 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 		// The compare-and-set lost. Re-read to say WHY rather than guess: it is
 		// the same incident (converged, fine), a different one, or the session
 		// stopped being pausable while we worked.
-		return m.explainLostPauseRace(ctx, id, incident, req.Guard)
+		return m.explainLostPauseRace(ctx, id, incident, req.Guard, observedGeneration)
 	}
 
 	rec.Metadata.Pause = pause
@@ -154,7 +215,13 @@ func (m *Manager) PauseSession(ctx context.Context, id domain.SessionID, req Pau
 }
 
 // explainLostPauseRace turns a failed compare-and-set into a specific answer.
-func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID, incident string, guard domain.PauseGuard) (domain.SessionRecord, error) {
+func (m *Manager) explainLostPauseRace(
+	ctx context.Context,
+	id domain.SessionID,
+	incident string,
+	guard domain.PauseGuard,
+	observedGeneration string,
+) (domain.SessionRecord, error) {
 	rec, ok, err := m.store.GetSession(ctx, id)
 	if err != nil {
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: re-read after contended write: %w", id, err)
@@ -164,6 +231,13 @@ func (m *Manager) explainLostPauseRace(ctx context.Context, id domain.SessionID,
 	}
 	if rec.Metadata.Pause != nil {
 		if rec.Metadata.Pause.IncidentID == incident {
+			if observedGeneration != "" &&
+				!sameStructuredPauseOwnership(rec, rec.Metadata.Pause, guard, observedGeneration) {
+				return domain.SessionRecord{}, fmt.Errorf(
+					"pause %s: %w: incident %s observed generation %q, current generation %q, stored generation %q",
+					id, ErrPauseOwnershipChanged, incident, observedGeneration,
+					rec.Metadata.RuntimeLaunchID, rec.Metadata.Pause.ObservedRuntimeLaunchID)
+			}
 			return rec, nil // a concurrent report of the same incident won; converged
 		}
 		return domain.SessionRecord{}, fmt.Errorf("pause %s: %w (incident %s)",

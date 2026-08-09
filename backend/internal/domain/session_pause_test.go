@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -91,6 +92,51 @@ func TestSessionPauseValidateNil(t *testing.T) {
 	var p *SessionPause
 	if err := p.Validate(); err == nil {
 		t.Fatal("nil validated successfully")
+	}
+}
+
+func TestSessionPauseObservedRuntimeLaunchIDJSONCompatibility(t *testing.T) {
+	current := SessionPause{
+		IncidentID:              "inc-current",
+		Reason:                  PauseReasonUsageLimit,
+		DetectedBy:              PauseDetectionStructured,
+		Harness:                 HarnessCodex,
+		ObservedRuntimeLaunchID: "launch-source-a",
+		EvidenceJSON:            `{"version":1,"kind":"usage_limit","sourceKey":"win-current"}`,
+		PausedAt:                time.Date(2026, 8, 9, 10, 30, 0, 0, time.UTC),
+	}
+	raw, err := json.Marshal(current)
+	if err != nil {
+		t.Fatalf("marshal current pause: %v", err)
+	}
+	if !strings.Contains(string(raw), `"observedRuntimeLaunchId":"launch-source-a"`) {
+		t.Fatalf("current pause JSON lost observed generation: %s", raw)
+	}
+	var roundTrip SessionPause
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatalf("unmarshal current pause: %v", err)
+	}
+	if err := roundTrip.Validate(); err != nil {
+		t.Fatalf("round-tripped current pause is invalid: %v", err)
+	}
+	if roundTrip.ObservedRuntimeLaunchID != current.ObservedRuntimeLaunchID {
+		t.Fatalf("observed generation = %q, want %q",
+			roundTrip.ObservedRuntimeLaunchID, current.ObservedRuntimeLaunchID)
+	}
+
+	// Pins written before generation binding have no field. They must remain
+	// readable so the session stays visibly paused; absence is interpreted by
+	// automatic policy as manual-only, not by persistence as corrupt state.
+	legacyRaw := []byte(`{"incidentId":"inc-legacy","reason":"usage_limit","detectedBy":"structured_envelope","harness":"codex","evidenceJson":"{\"version\":1,\"kind\":\"usage_limit\",\"sourceKey\":\"win-legacy\"}","pausedAt":"2026-08-09T10:30:00Z"}`)
+	var legacy SessionPause
+	if err := json.Unmarshal(legacyRaw, &legacy); err != nil {
+		t.Fatalf("unmarshal legacy pause: %v", err)
+	}
+	if err := legacy.Validate(); err != nil {
+		t.Fatalf("legacy structured pause became unreadable: %v", err)
+	}
+	if legacy.ObservedRuntimeLaunchID != "" {
+		t.Fatalf("legacy pause invented observed generation %q", legacy.ObservedRuntimeLaunchID)
 	}
 }
 

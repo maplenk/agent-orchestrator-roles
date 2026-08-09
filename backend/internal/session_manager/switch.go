@@ -45,6 +45,12 @@ type SwitchRequest struct {
 	// The value is compared with the durable pin inside beginSwitch; it is never
 	// exposed as a free-form switch API field.
 	PauseIncidentID string
+	// ExpectedSourceRuntimeLaunchID is an internal defense-in-depth guard for
+	// the first automatic failover attempt. When set, the authoritative read
+	// under beginSwitch must still name the detector-observed source generation
+	// before this saga may touch the runtime. Manual Continue and durable
+	// requested/post_stop recovery leave it empty.
+	ExpectedSourceRuntimeLaunchID string
 	// AdoptRoleID is manager-internal authorization for an unpinned legacy
 	// orchestrator to adopt the project orchestrator role at this switch's
 	// fenced relaunch boundary. SwitchOrchestrator recomputes it under the
@@ -156,6 +162,14 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		}
 	} else if rec.Metadata.Pause != nil {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchPaused)
+	}
+	if expected := strings.TrimSpace(req.ExpectedSourceRuntimeLaunchID); expected != "" {
+		current := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+		if current != expected {
+			return SwitchResult{}, fmt.Errorf(
+				"switch %s: %w: observed generation %q, current generation %q",
+				req.SessionID, ErrPauseOwnershipChanged, expected, current)
+		}
 	}
 	if rec.Metadata.SwitchPending != nil {
 		// In-flight saga: only recovery may continue (do not start a nested switch).

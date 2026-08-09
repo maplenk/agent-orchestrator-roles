@@ -64,8 +64,9 @@ func (m *Manager) ContinueAutomaticFailover(
 	}
 
 	// Duplicate structured deliveries can race in the same daemon. Serialize
-	// their read-before-first-attempt window; the durable attempt row handles
-	// every later delivery and survives a restart.
+	// their read-before-first-attempt window and exclude Restart Agent across
+	// the generation check, durable append, and switch ownership handoff. The
+	// durable attempt row handles every later delivery and survives a restart.
 	if !m.beginAutomaticFailover(id, incident) {
 		rec, ok, err := m.store.GetSession(ctx, id)
 		if err != nil {
@@ -178,6 +179,12 @@ func (m *Manager) automaticFailoverCaps(h domain.AgentHarness) capabilities.Caps
 func (m *Manager) beginAutomaticFailover(id domain.SessionID, incident string) bool {
 	m.ownershipMu.Lock()
 	defer m.ownershipMu.Unlock()
+	if _, exists := m.resuming[id]; exists {
+		return false
+	}
+	if _, exists := m.switching[id]; exists {
+		return false
+	}
 	if m.automaticFailovers == nil {
 		m.automaticFailovers = make(map[automaticFailoverKey]struct{})
 	}

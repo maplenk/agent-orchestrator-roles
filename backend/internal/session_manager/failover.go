@@ -184,6 +184,19 @@ func (m *Manager) continueFailover(
 		return m.convergeUnpromotedAck(ctx, store, rec, latest)
 	}
 
+	// A structured limit belongs to the runtime generation that reported it,
+	// not to whichever same-harness process happens to hold the session later.
+	// This gate applies only before the FIRST automatic attempt: once an attempt
+	// is durable, requested/post_stop/acked recovery follows that attempt's own
+	// target and switch generation instead of reinterpreting the source pin.
+	if automatic && len(attempts) == 0 {
+		observed := strings.TrimSpace(paused.ObservedRuntimeLaunchID)
+		current := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+		if observed == "" || current == "" || observed != current {
+			return ContinueFailoverResult{}, errAutomaticFailoverDisabled
+		}
+	}
+
 	// Automatic mode gets exactly one new rung selection per stable incident.
 	// Any prior terminal attempt means a first automatic action already ran; a
 	// failed rung stays paused for explicit manual Continue. Active attempts and
@@ -267,6 +280,16 @@ func (m *Manager) continueFailover(
 		TargetModel:       target.Model,
 		ForceGenerationID: generation,
 		PauseIncidentID:   incident,
+		// Defense in depth under beginSwitch. The automatic ownership fence
+		// excludes Restart Agent across the earlier check and durable append;
+		// this authoritative re-read refuses any other path that nevertheless
+		// replaced the source before runtime work.
+		ExpectedSourceRuntimeLaunchID: func() string {
+			if automatic {
+				return paused.ObservedRuntimeLaunchID
+			}
+			return ""
+		}(),
 		Semantic: domain.SemanticHandoffV1{
 			SchemaVersion:    domain.SemanticHandoffSchemaVersion,
 			SourceGeneration: strings.TrimSpace(rec.Metadata.RuntimeLaunchID),

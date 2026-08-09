@@ -54,9 +54,16 @@ type SessionPause struct {
 	// Harness that hit the limit, recorded at pause time because a later
 	// failover changes the session's current harness.
 	Harness AgentHarness `json:"harness,omitempty"`
+	// ObservedRuntimeLaunchID is the exact source runtime generation that
+	// produced a structured limit. It is optional only for backward
+	// compatibility with pause pins written before generation binding existed;
+	// those legacy pins remain readable but cannot start a new automatic
+	// failover attempt.
+	ObservedRuntimeLaunchID string `json:"observedRuntimeLaunchId,omitempty"`
 	// EvidenceJSON is the structured envelope exactly as the adapter reported
-	// it, kept for audit. It is NOT parsed for control flow: 3A pauses on the
-	// fact of a structured report, not on its contents.
+	// it, kept for audit. The automatic failover policy parses the typed
+	// envelope again to re-establish its source provenance; free text is never
+	// interpreted as authority.
 	EvidenceJSON string `json:"evidenceJson,omitempty"`
 	// RetryAfter is what the provider said, when it said anything. Advisory
 	// only — see the type comment.

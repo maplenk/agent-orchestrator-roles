@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -39,6 +40,11 @@ func limitPause() PauseRequest {
 		Reason:       domain.PauseReasonUsageLimit,
 		DetectedBy:   domain.PauseDetectionStructured,
 		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1","scope":"account"}`,
+		Guard: domain.PauseGuard{
+			ExpectHarness:          domain.HarnessCodex,
+			ExpectRuntimeLaunchID:  "src-gen",
+			RequireNoSwitchPending: true,
+		},
 	}
 }
 
@@ -61,6 +67,10 @@ func TestPauseSession_DurableAndLedgered(t *testing.T) {
 	if stored.Metadata.Pause.Harness != domain.HarnessCodex {
 		t.Errorf("harness = %q, want the harness that hit the limit", stored.Metadata.Pause.Harness)
 	}
+	if stored.Metadata.Pause.ObservedRuntimeLaunchID != "src-gen" {
+		t.Errorf("observed runtime launch id = %q, want exact detector generation src-gen",
+			stored.Metadata.Pause.ObservedRuntimeLaunchID)
+	}
 
 	var pauses int
 	for _, e := range st.ledger {
@@ -73,6 +83,126 @@ func TestPauseSession_DurableAndLedgered(t *testing.T) {
 	}
 	if pauses != 1 {
 		t.Fatalf("pause ledger rows = %d, want 1", pauses)
+	}
+}
+
+func TestPauseSession_StructuredPauseRequiresCompleteOwnershipGuard(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*PauseRequest)
+	}{
+		{
+			name: "missing harness",
+			mutate: func(req *PauseRequest) {
+				req.Guard.ExpectHarness = ""
+			},
+		},
+		{
+			name: "missing runtime launch id",
+			mutate: func(req *PauseRequest) {
+				req.Guard.ExpectRuntimeLaunchID = ""
+			},
+		},
+		{
+			name: "switch pending is not excluded",
+			mutate: func(req *PauseRequest) {
+				req.Guard.RequireNoSwitchPending = false
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, st, id := pausedWorker(t)
+			req := limitPause()
+			tc.mutate(&req)
+
+			_, err := m.PauseSession(ctx, id, req)
+			if !errors.Is(err, ErrPauseOwnershipRequired) {
+				t.Fatalf("err = %v, want ErrPauseOwnershipRequired", err)
+			}
+			if st.sessions[id].Metadata.Pause != nil {
+				t.Fatal("an ownership-unbound structured event persisted a pause")
+			}
+			if got := countLedger(st, domain.LifecycleKindPause); got != 0 {
+				t.Fatalf("ownership-unbound structured event wrote %d pause ledger rows, want zero", got)
+			}
+		})
+	}
+}
+
+func TestPauseSession_OperatorPauseDoesNotRequireRuntimeOwnership(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	req := PauseRequest{
+		IncidentID: "operator-1",
+		Reason:     domain.PauseReasonOperator,
+		DetectedBy: domain.PauseDetectionOperator,
+	}
+
+	rec, err := m.PauseSession(ctx, id, req)
+	if err != nil {
+		t.Fatalf("operator pause: %v", err)
+	}
+	if rec.Metadata.Pause == nil || st.sessions[id].Metadata.Pause == nil {
+		t.Fatal("operator pause was not persisted")
+	}
+	if got := st.sessions[id].Metadata.Pause.ObservedRuntimeLaunchID; got != "" {
+		t.Fatalf("operator pause persisted detector generation %q, want empty", got)
+	}
+	if got := countLedger(st, domain.LifecycleKindPause); got != 1 {
+		t.Fatalf("operator pause ledger rows = %d, want 1", got)
+	}
+}
+
+func TestPauseSession_SameIncidentFromSupersededGenerationRefusesWithoutMutation(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	if _, err := m.PauseSession(ctx, id, limitPause()); err != nil {
+		t.Fatalf("initial pause: %v", err)
+	}
+	beforePause := *st.sessions[id].Metadata.Pause
+	beforeLedger := append([]domain.LifecycleLedgerRecord(nil), st.ledger...)
+
+	// Restart Agent intentionally preserves the durable pin while rotating the
+	// live runtime generation. A delayed duplicate from the old process must not
+	// use same-incident idempotence to authorize the replacement process.
+	rec := st.sessions[id]
+	rec.Metadata.RuntimeLaunchID = "src-gen-after-restart"
+	st.sessions[id] = rec
+
+	_, err := m.PauseSession(ctx, id, limitPause())
+	if !errors.Is(err, ErrPauseOwnershipChanged) {
+		t.Fatalf("stale duplicate err = %v, want ErrPauseOwnershipChanged", err)
+	}
+	afterPause := st.sessions[id].Metadata.Pause
+	if afterPause == nil || !reflect.DeepEqual(*afterPause, beforePause) {
+		t.Fatalf("stale duplicate changed the durable pin:\n before=%+v\n  after=%+v", beforePause, afterPause)
+	}
+	if !reflect.DeepEqual(st.ledger, beforeLedger) {
+		t.Fatalf("stale duplicate changed the append-only ledger:\n before=%+v\n  after=%+v", beforeLedger, st.ledger)
+	}
+}
+
+func TestPauseSession_SameIncidentNeverUpgradesLegacyPinGeneration(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	rec := st.sessions[id]
+	rec.Metadata.Pause = &domain.SessionPause{
+		IncidentID:   "incident-1",
+		Reason:       domain.PauseReasonUsageLimit,
+		DetectedBy:   domain.PauseDetectionStructured,
+		Harness:      domain.HarnessCodex,
+		EvidenceJSON: limitPause().EvidenceJSON,
+		PausedAt:     time.Date(2026, 8, 9, 9, 0, 0, 0, time.UTC),
+	}
+	st.sessions[id] = rec
+	before := *rec.Metadata.Pause
+
+	_, err := m.PauseSession(ctx, id, limitPause())
+	if !errors.Is(err, ErrPauseOwnershipChanged) {
+		t.Fatalf("legacy duplicate err = %v, want ErrPauseOwnershipChanged", err)
+	}
+	if got := st.sessions[id].Metadata.Pause; got == nil || !reflect.DeepEqual(*got, before) {
+		t.Fatalf("same-incident delivery upgraded legacy pin:\n before=%+v\n  after=%+v", before, got)
+	}
+	if got := countLedger(st, domain.LifecycleKindPause); got != 0 {
+		t.Fatalf("legacy same-incident refusal wrote %d pause ledger rows, want zero", got)
 	}
 }
 
@@ -204,6 +334,31 @@ func TestResumeSession_ClearsAndLedgers(t *testing.T) {
 	}
 	if resumes != 1 {
 		t.Fatalf("resume ledger rows = %d, want 1", resumes)
+	}
+}
+
+func TestResumeSession_LegacyUnboundStructuredPinRemainsExplicitlyResumable(t *testing.T) {
+	m, st, id := pausedWorker(t)
+	rec := st.sessions[id]
+	rec.Metadata.Pause = &domain.SessionPause{
+		IncidentID:   "legacy-incident",
+		Reason:       domain.PauseReasonUsageLimit,
+		DetectedBy:   domain.PauseDetectionStructured,
+		Harness:      domain.HarnessCodex,
+		EvidenceJSON: limitPause().EvidenceJSON,
+		PausedAt:     time.Date(2026, 8, 9, 9, 0, 0, 0, time.UTC),
+	}
+	st.sessions[id] = rec
+
+	got, err := m.ResumeSession(ctx, id, "legacy-incident")
+	if err != nil {
+		t.Fatalf("resume legacy pin: %v", err)
+	}
+	if got.Metadata.Pause != nil || st.sessions[id].Metadata.Pause != nil {
+		t.Fatal("explicit Resume did not clear the legacy pin")
+	}
+	if got := countLedger(st, domain.LifecycleKindResume); got != 1 {
+		t.Fatalf("legacy Resume ledger rows = %d, want 1", got)
 	}
 }
 
@@ -537,11 +692,13 @@ func TestPauseSession_LosingTheCASToTheSameIncidentSucceeds(t *testing.T) {
 	st.beforePauseCAS = func() {
 		rec := st.sessions[id]
 		rec.Metadata.Pause = &domain.SessionPause{
-			IncidentID:   "incident-1", // the same one this caller is reporting
-			Reason:       domain.PauseReasonUsageLimit,
-			DetectedBy:   domain.PauseDetectionStructured,
-			EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1"}`,
-			PausedAt:     time.Now().UTC(),
+			IncidentID:              "incident-1", // the same one this caller is reporting
+			Reason:                  domain.PauseReasonUsageLimit,
+			DetectedBy:              domain.PauseDetectionStructured,
+			Harness:                 domain.HarnessCodex,
+			ObservedRuntimeLaunchID: "src-gen",
+			EvidenceJSON:            `{"version":1,"kind":"usage_limit","sourceKey":"win-1"}`,
+			PausedAt:                time.Now().UTC(),
 		}
 		st.sessions[id] = rec
 	}
@@ -552,6 +709,53 @@ func TestPauseSession_LosingTheCASToTheSameIncidentSucceeds(t *testing.T) {
 	}
 	if rec.Metadata.Pause == nil || rec.Metadata.Pause.IncidentID != "incident-1" {
 		t.Fatalf("returned record = %+v, want the converged pause", rec.Metadata.Pause)
+	}
+}
+
+func TestPauseSession_LosingTheCASToSameIncidentStillRequiresExactOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		generation string
+		legacy     bool
+	}{
+		{name: "legacy winner has no generation", generation: "src-gen", legacy: true},
+		{name: "replacement generation won", generation: "src-gen-after-restart"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, st, id := pausedWorker(t)
+			var winner domain.SessionPause
+			var ledgerAtWin []domain.LifecycleLedgerRecord
+			st.beforePauseCAS = func() {
+				rec := st.sessions[id]
+				rec.Metadata.RuntimeLaunchID = tc.generation
+				winner = domain.SessionPause{
+					IncidentID:   "incident-1",
+					Reason:       domain.PauseReasonUsageLimit,
+					DetectedBy:   domain.PauseDetectionStructured,
+					Harness:      domain.HarnessCodex,
+					EvidenceJSON: limitPause().EvidenceJSON,
+					PausedAt:     time.Date(2026, 8, 9, 9, 0, 0, 0, time.UTC),
+				}
+				if !tc.legacy {
+					winner.ObservedRuntimeLaunchID = tc.generation
+				}
+				rec.Metadata.Pause = &winner
+				st.sessions[id] = rec
+				ledgerAtWin = append([]domain.LifecycleLedgerRecord(nil), st.ledger...)
+			}
+
+			_, err := m.PauseSession(ctx, id, limitPause())
+			if !errors.Is(err, ErrPauseOwnershipChanged) {
+				t.Fatalf("CAS loser err = %v, want ErrPauseOwnershipChanged", err)
+			}
+			got := st.sessions[id]
+			if got.Metadata.Pause == nil || !reflect.DeepEqual(*got.Metadata.Pause, winner) {
+				t.Fatalf("CAS loser changed winning pin:\n got=%+v\nwant=%+v", got.Metadata.Pause, winner)
+			}
+			if !reflect.DeepEqual(st.ledger, ledgerAtWin) {
+				t.Fatalf("CAS loser changed ledger after winner:\n got=%+v\nwant=%+v", st.ledger, ledgerAtWin)
+			}
+		})
 	}
 }
 

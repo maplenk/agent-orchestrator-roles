@@ -276,56 +276,77 @@ func TestRestartContract_LaunchTimeDeathIsNotOverwrittenAsIdle(t *testing.T) {
 }
 
 func TestRestartContract_PausedDeadRestartPreservesPauseAndDeliversAssignment(t *testing.T) {
-	const assignment = "resume the paused assignment"
-	pause := &domain.SessionPause{
-		IncidentID: "incident-1", Reason: domain.PauseReasonUsageLimit,
-		DetectedBy: domain.PauseDetectionStructured, Harness: domain.HarnessCodex,
-		PausedAt: time.Now().Add(-time.Minute),
-	}
-	st := newFakeStore()
-	st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
-	st.sessions["mer-1"] = domain.SessionRecord{
-		ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker,
-		Harness:  domain.HarnessCodex,
-		Activity: domain.Activity{State: domain.ActivityExited},
-		Metadata: domain.SessionMetadata{
-			WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1",
-			RuntimeHandleID: "tmux-mer-1", RuntimeLaunchID: "launch-old",
-			Prompt: assignment, Pause: pause,
-		},
-	}
-	base := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}, outputs: []string{"ready>"}}
-	rt := &fakeRestartRuntime{fakeRuntime: base}
-	msg := &fakeMessenger{}
-	recorder := &recordingAgent{}
-	m := New(Deps{
-		Runtime: rt,
-		Agents: singleAgent{agent: readinessAgent{
-			afterStartAgent: afterStartAgent{recordingAgent: recorder},
-			hints:           ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second},
-		}},
-		Workspace: &fakeWorkspace{}, Store: st, Messenger: msg,
-		Lifecycle: &fakeLCM{store: st}, DataDir: t.TempDir(),
-		LookPath:    func(string) (string, error) { return "/bin/true", nil },
-		NewLaunchID: func() string { return "launch-new" },
-	})
+	for _, tc := range []struct {
+		name       string
+		observedID string
+	}{
+		{name: "generation bound", observedID: "launch-old"},
+		{name: "legacy unbound"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const assignment = "resume the paused assignment"
+			pause := &domain.SessionPause{
+				IncidentID: "incident-1", Reason: domain.PauseReasonUsageLimit,
+				DetectedBy: domain.PauseDetectionStructured, Harness: domain.HarnessCodex,
+				ObservedRuntimeLaunchID: tc.observedID,
+				EvidenceJSON: `{"version":1,"kind":"usage_limit","harness":"codex",` +
+					`"scope":"account","sourceKey":"window-1"}`,
+				PausedAt: time.Now().Add(-time.Minute),
+			}
+			if err := pause.Validate(); err != nil {
+				t.Fatalf("fixture pause is invalid: %v", err)
+			}
+			st := newFakeStore()
+			st.projects["mer"] = domain.ProjectRecord{ID: "mer"}
+			st.sessions["mer-1"] = domain.SessionRecord{
+				ID: "mer-1", ProjectID: "mer", Kind: domain.KindWorker,
+				Harness:  domain.HarnessCodex,
+				Activity: domain.Activity{State: domain.ActivityExited},
+				Metadata: domain.SessionMetadata{
+					WorkspacePath: "/ws/mer-1", Branch: "ao/mer-1",
+					RuntimeHandleID: "tmux-mer-1", RuntimeLaunchID: "launch-old",
+					Prompt: assignment, Pause: pause,
+				},
+			}
+			base := &fakeRuntime{aliveByHandle: map[string]bool{"tmux-mer-1": true}, outputs: []string{"ready>"}}
+			rt := &fakeRestartRuntime{fakeRuntime: base}
+			msg := &fakeMessenger{}
+			recorder := &recordingAgent{}
+			m := New(Deps{
+				Runtime: rt,
+				Agents: singleAgent{agent: readinessAgent{
+					afterStartAgent: afterStartAgent{recordingAgent: recorder},
+					hints:           ports.PromptReadinessHints{Patterns: []string{"ready>"}, Timeout: time.Second},
+				}},
+				Workspace: &fakeWorkspace{}, Store: st, Messenger: msg,
+				Lifecycle: &fakeLCM{store: st}, DataDir: t.TempDir(),
+				LookPath:    func(string) (string, error) { return "/bin/true", nil },
+				NewLaunchID: func() string { return "launch-new" },
+			})
 
-	result, err := m.ResumeAgentWithMode(ctx, "mer-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Mode != RestoreModeSavedPrompt {
-		t.Fatalf("restart mode = %q, want %q", result.Mode, RestoreModeSavedPrompt)
-	}
-	if recorder.lastLaunch.Prompt != "" || len(msg.msgs) != 1 || msg.msgs[0] != assignment {
-		t.Fatalf("paused restart launchPrompt=%q messages=%#v, want one host delivery", recorder.lastLaunch.Prompt, msg.msgs)
-	}
-	got := st.sessions["mer-1"]
-	if got.IsTerminated || got.Activity.State != domain.ActivityIdle {
-		t.Fatalf("paused restart session = %+v, want live restarted agent", got)
-	}
-	if got.Metadata.Pause == nil || got.Metadata.Pause.IncidentID != pause.IncidentID {
-		t.Fatalf("restart cleared or changed pause: got=%+v want=%+v", got.Metadata.Pause, pause)
+			result, err := m.ResumeAgentWithMode(ctx, "mer-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Mode != RestoreModeSavedPrompt {
+				t.Fatalf("restart mode = %q, want %q", result.Mode, RestoreModeSavedPrompt)
+			}
+			if recorder.lastLaunch.Prompt != "" || len(msg.msgs) != 1 || msg.msgs[0] != assignment {
+				t.Fatalf("paused restart launchPrompt=%q messages=%#v, want one host delivery", recorder.lastLaunch.Prompt, msg.msgs)
+			}
+			got := st.sessions["mer-1"]
+			if got.IsTerminated || got.Activity.State != domain.ActivityIdle {
+				t.Fatalf("paused restart session = %+v, want live restarted agent", got)
+			}
+			if got.Metadata.Pause == nil || got.Metadata.Pause.IncidentID != pause.IncidentID {
+				t.Fatalf("restart cleared or changed pause: got=%+v want=%+v", got.Metadata.Pause, pause)
+			}
+			if got.Metadata.RuntimeLaunchID != "launch-new" ||
+				got.Metadata.Pause.ObservedRuntimeLaunchID != tc.observedID {
+				t.Fatalf("restart rebound pause provenance: current=%q observed=%q want observed=%q",
+					got.Metadata.RuntimeLaunchID, got.Metadata.Pause.ObservedRuntimeLaunchID, tc.observedID)
+			}
+		})
 	}
 }
 

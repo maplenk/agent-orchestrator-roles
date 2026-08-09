@@ -166,10 +166,11 @@ func pauseSessionAt(st *failoverFakeStore, id domain.SessionID, incident string)
 func structuredLimitPauseAt(st *failoverFakeStore, id domain.SessionID, incident string) {
 	rec := st.sessions[id]
 	rec.Metadata.Pause = &domain.SessionPause{
-		IncidentID: incident,
-		Reason:     domain.PauseReasonUsageLimit,
-		DetectedBy: domain.PauseDetectionStructured,
-		Harness:    rec.Harness,
+		IncidentID:              incident,
+		Reason:                  domain.PauseReasonUsageLimit,
+		DetectedBy:              domain.PauseDetectionStructured,
+		Harness:                 rec.Harness,
+		ObservedRuntimeLaunchID: rec.Metadata.RuntimeLaunchID,
 		EvidenceJSON: `{"version":1,"kind":"usage_limit","harness":"claude-code",` +
 			`"scope":"account","sourceKey":"window-1"}`,
 		PausedAt: time.Date(2026, 8, 9, 9, 0, 0, 0, time.UTC),
@@ -261,6 +262,46 @@ func TestAutomaticFailoverFenceIsScopedToTheExactIncident(t *testing.T) {
 	m.endAutomaticFailover(id, "inc-b")
 }
 
+func TestContinueAutomaticFailover_OwnershipRefusesRealRestartAcrossFirstAttemptWindow(t *testing.T) {
+	st, _, m, id := failoverFixture(t)
+	enableAutomaticFailover(t, st, m, id)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	st.afterAppend = func() {
+		close(entered)
+		<-release
+	}
+	type automaticOutcome struct {
+		result AutomaticFailoverResult
+		err    error
+	}
+	done := make(chan automaticOutcome, 1)
+	go func() {
+		result, err := m.ContinueAutomaticFailover(context.Background(), id,
+			AutomaticFailoverRequest{IncidentID: "inc-1"})
+		done <- automaticOutcome{result: result, err: err}
+	}()
+	<-entered
+
+	if _, err := m.ResumeAgentWithMode(context.Background(), id); !errors.Is(err, ErrResumeInProgress) {
+		close(release)
+		t.Fatalf("restart during automatic ownership err = %v, want ErrResumeInProgress", err)
+	}
+	if rec := st.sessions[id]; rec.Metadata.RuntimeLaunchID != "src-gen" {
+		close(release)
+		t.Fatalf("refused restart changed source generation to %q", rec.Metadata.RuntimeLaunchID)
+	}
+	close(release)
+	outcome := <-done
+	if outcome.err != nil {
+		t.Fatalf("automatic continuation after refused restart: %v", outcome.err)
+	}
+	if !outcome.result.Attempted || st.only(t).State != domain.FailoverAttemptAcked {
+		t.Fatalf("automatic continuation did not converge: result=%+v attempt=%+v",
+			outcome.result, st.only(t))
+	}
+}
+
 func TestContinueAutomaticFailover_ManualModeWritesNothingAndKeepsPause(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	structuredLimitPauseAt(st, id, "inc-1")
@@ -306,6 +347,96 @@ func TestContinueAutomaticFailover_OperatorPauseNeverActs(t *testing.T) {
 	assertNothingDurable(t, st, id, "inc-1")
 	if rt.created != 0 || rt.destroyed != 0 {
 		t.Fatal("an operator pause triggered automatic runtime work")
+	}
+}
+
+func TestContinueAutomaticFailover_FirstAttemptRequiresObservedSourceGeneration(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*domain.SessionRecord)
+	}{
+		{
+			name: "legacy structured pin has no generation binding",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.Pause.ObservedRuntimeLaunchID = ""
+			},
+		},
+		{
+			name: "restart replaced the observed source generation",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.RuntimeLaunchID = "src-restarted"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, rt, m, id := failoverFixture(t)
+			enableAutomaticFailover(t, st, m, id)
+			rec := st.sessions[id]
+			tc.mutate(&rec)
+			st.sessions[id] = rec
+			before := rec
+
+			res, err := m.ContinueAutomaticFailover(context.Background(), id,
+				AutomaticFailoverRequest{IncidentID: "inc-1"})
+			if err != nil {
+				t.Fatalf("automatic generation refusal: %v", err)
+			}
+			if res.Enabled || res.Attempted {
+				t.Fatalf("generation refusal result = %+v", res)
+			}
+			assertNothingDurable(t, st, id, "inc-1")
+			if got := st.sessions[id]; !reflect.DeepEqual(got, before) {
+				t.Fatalf("generation refusal mutated session:\n got %+v\nwant %+v", got, before)
+			}
+			if rt.created != 0 || rt.destroyed != 0 {
+				t.Fatalf("generation refusal touched runtime: created=%d destroyed=%d", rt.created, rt.destroyed)
+			}
+		})
+	}
+}
+
+func TestContinueFailover_ManualContinueAcceptsLegacyOrRestartedStructuredPin(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*domain.SessionRecord)
+	}{
+		{
+			name: "legacy unbound",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.Pause.ObservedRuntimeLaunchID = ""
+			},
+		},
+		{
+			name: "human restarted generation",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.RuntimeLaunchID = "src-restarted"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, _, m, id := failoverFixture(t)
+			structuredLimitPauseAt(st, id, "inc-1")
+			rec := st.sessions[id]
+			tc.mutate(&rec)
+			st.sessions[id] = rec
+
+			res, err := m.ContinueFailover(context.Background(), id,
+				ContinueFailoverRequest{IncidentID: "inc-1"})
+			if err != nil {
+				t.Fatalf("manual continue: %v", err)
+			}
+			if res.AttemptSeq != 1 || res.Target.Harness != domain.HarnessCodex {
+				t.Fatalf("manual continue result = %+v", res)
+			}
+			if got := st.only(t); got.State != domain.FailoverAttemptAcked {
+				t.Fatalf("manual attempt = %+v, want acked", got)
+			}
+			if st.sessions[id].Metadata.Pause != nil {
+				t.Fatal("manual continue did not clear the exact legacy/restarted pin")
+			}
+		})
 	}
 }
 
@@ -987,6 +1118,103 @@ func TestReconcile_AutomaticFailoverClosesCrashAfterPauseBeforeAttempt(t *testin
 	}
 }
 
+func TestReconcile_AutomaticFirstAttemptDoesNotReinterpretLegacyOrRestartedPin(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*domain.SessionRecord)
+	}{
+		{
+			name: "legacy structured pin",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.Pause.ObservedRuntimeLaunchID = ""
+			},
+		},
+		{
+			name: "restart created a new current generation",
+			mutate: func(rec *domain.SessionRecord) {
+				rec.Metadata.RuntimeLaunchID = "src-restarted"
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, rt, m, id := failoverFixture(t)
+			enableAutomaticFailover(t, st, m, id)
+			rec := st.sessions[id]
+			tc.mutate(&rec)
+			st.sessions[id] = rec
+			before := rec
+			rt.aliveByHandle = map[string]bool{rec.Metadata.RuntimeHandleID: true}
+
+			if err := m.Reconcile(context.Background()); err != nil {
+				t.Fatalf("boot reconcile: %v", err)
+			}
+			assertNothingDurable(t, st, id, "inc-1")
+			if got := st.sessions[id]; !reflect.DeepEqual(got, before) {
+				t.Fatalf("boot generation refusal mutated session:\n got %+v\nwant %+v", got, before)
+			}
+			if rt.created != 0 || rt.destroyed != 0 {
+				t.Fatalf("boot generation refusal touched runtime: created=%d destroyed=%d", rt.created, rt.destroyed)
+			}
+		})
+	}
+}
+
+func TestReconcile_AutomaticBoundPauseDoesNotSwitchHumanRestartGeneration(t *testing.T) {
+	st, _, _, id := failoverFixture(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap.Failover.Mode = domain.FailoverModeAutomatic
+	st.projects["mer"] = project
+	structuredLimitPauseAt(st, id, "inc-1")
+	rec := st.sessions[id]
+	rec.Activity = domain.Activity{State: domain.ActivityExited}
+	st.sessions[id] = rec
+
+	baseRuntime := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+	restartRuntime := &fakeRestartRuntime{fakeRuntime: baseRuntime}
+	restartManager := New(Deps{
+		Runtime: restartRuntime, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st.fakeStore},
+		DataDir: t.TempDir(), LookPath: func(string) (string, error) { return "/bin/true", nil },
+		NewLaunchID: func() string { return "src-restarted" },
+	})
+	if _, err := restartManager.ResumeAgentWithMode(context.Background(), id); err != nil {
+		t.Fatalf("restart agent: %v", err)
+	}
+	restarted := st.sessions[id]
+	if restarted.Metadata.RuntimeLaunchID != "src-restarted" ||
+		restarted.Metadata.Pause == nil ||
+		restarted.Metadata.Pause.ObservedRuntimeLaunchID != "src-gen" {
+		t.Fatalf("restart did not preserve the old pause binding: %+v", restarted.Metadata)
+	}
+
+	bootManager := New(Deps{
+		Runtime: restartRuntime, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st.fakeStore},
+		DataDir: t.TempDir(), LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	bootManager.switchCapsOverride = testSwitchCaps
+	bootManager.automaticFailoverCapsOverride = func(h domain.AgentHarness) capabilities.Caps {
+		c := testSwitchCaps(h)
+		c.LimitDetectionSupported = true
+		return c
+	}
+	if err := bootManager.Reconcile(context.Background()); err != nil {
+		t.Fatalf("boot reconcile: %v", err)
+	}
+
+	got := st.sessions[id]
+	if len(st.attempts) != 0 || baseRuntime.created != 0 || baseRuntime.destroyed != 0 {
+		t.Fatalf("boot acted on replacement generation: attempts=%d created=%d destroyed=%d",
+			len(st.attempts), baseRuntime.created, baseRuntime.destroyed)
+	}
+	if restartRuntime.restarted != 1 || got.Metadata.RuntimeLaunchID != "src-restarted" ||
+		got.Metadata.Pause == nil || got.Metadata.Pause.ObservedRuntimeLaunchID != "src-gen" {
+		t.Fatalf("boot changed restarted runtime/pause: restarts=%d session=%+v",
+			restartRuntime.restarted, got)
+	}
+}
+
 func TestReconcile_UnpromotedAutomaticStructuredPauseRemainsPassive(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	project := st.projects["mer"]
@@ -1041,6 +1269,11 @@ func TestReconcile_AutomaticPostStopRecoversTheSameGeneration(t *testing.T) {
 	}
 	generation := st.only(t).GenerationID
 	m.lcm.(*fakeLCM).markSpawnedErr = nil
+	// Once the attempt is durable, recovery follows its target/generation even
+	// if this is a legacy pin without the newly added source-generation field.
+	rec := st.sessions[id]
+	rec.Metadata.Pause.ObservedRuntimeLaunchID = ""
+	st.sessions[id] = rec
 	rt.aliveByHandle = map[string]bool{"h1": true}
 
 	if err := m.Reconcile(context.Background()); err != nil {
@@ -1071,6 +1304,12 @@ func TestReconcile_AutomaticRequestedAttemptRedrivesTheSameGeneration(t *testing
 		m.failoverLedgerRecord(attempt, domain.LifecyclePhaseRequested)); err != nil {
 		t.Fatalf("seed requested attempt: %v", err)
 	}
+	// Requested recovery is authorized by the durable attempt identity. A
+	// mismatch here must not reinterpret the pin to select a new rung, but it
+	// also must not strand the already-selected generation.
+	rec := st.sessions[id]
+	rec.Metadata.Pause.ObservedRuntimeLaunchID = "older-source-generation"
+	st.sessions[id] = rec
 	rt.aliveByHandle = map[string]bool{"h1": true}
 
 	if err := m.Reconcile(context.Background()); err != nil {

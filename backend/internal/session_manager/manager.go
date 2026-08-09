@@ -2070,6 +2070,11 @@ func (m *Manager) beginAgentResume(id domain.SessionID) bool {
 	if _, switching := m.switching[id]; switching {
 		return false
 	}
+	for key := range m.automaticFailovers {
+		if key.SessionID == id {
+			return false
+		}
+	}
 	m.resuming[id] = struct{}{}
 	return true
 }

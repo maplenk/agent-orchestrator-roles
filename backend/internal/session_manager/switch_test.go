@@ -1,6 +1,7 @@
 package sessionmanager
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -43,6 +44,26 @@ func workerSession(st *fakeStore, id domain.SessionID, harness domain.AgentHarne
 			},
 		},
 	}
+}
+
+// generationSwapStore simulates Restart Agent winning immediately before the
+// switch saga's authoritative session read. The request was prepared against
+// the old generation, while the read under beginSwitch observes the replacement.
+type generationSwapStore struct {
+	*fakeStore
+	id         domain.SessionID
+	generation string
+	swapped    bool
+}
+
+func (s *generationSwapStore) GetSession(ctx context.Context, id domain.SessionID) (domain.SessionRecord, bool, error) {
+	if id == s.id && !s.swapped {
+		rec := s.sessions[id]
+		rec.Metadata.RuntimeLaunchID = s.generation
+		s.sessions[id] = rec
+		s.swapped = true
+	}
+	return s.fakeStore.GetSession(ctx, id)
 }
 
 // testSwitchCaps is a unit-test helper that pins switch_supported for the
@@ -132,6 +153,55 @@ func TestSwitchWorker_PausedSessionRefusesBeforeEffects(t *testing.T) {
 	if runtime.created != 0 || runtime.destroyed != 0 || len(st.ledger) != 0 || st.updateCount != 0 {
 		t.Fatalf("paused refusal had effects: created=%d destroyed=%d ledger=%d updates=%d",
 			runtime.created, runtime.destroyed, len(st.ledger), st.updateCount)
+	}
+}
+
+func TestSwitchWorker_ExpectedSourceGenerationRefusesAuthoritativeMismatchBeforeEffects(t *testing.T) {
+	base := newFakeStore()
+	ws := t.TempDir()
+	art, sha := pinImplementorTemplate(t, base)
+	id := domain.SessionID("mer-1")
+	workerSession(base, id, domain.HarnessClaudeCode, ws, art, sha)
+	rec := base.sessions[id]
+	rec.Metadata.Pause = &domain.SessionPause{IncidentID: "limit-1"}
+	base.sessions[id] = rec
+
+	st := &generationSwapStore{
+		fakeStore:  base,
+		id:         id,
+		generation: "restart-gen",
+	}
+	runtime := &fakeRuntime{}
+	m := New(Deps{
+		Runtime: runtime, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
+		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: base},
+		LookPath: func(string) (string, error) { return "/bin/true", nil },
+	})
+	m.switchCapsOverride = testSwitchCaps
+
+	_, err := m.SwitchWorker(ctx, SwitchRequest{
+		SessionID:                     id,
+		TargetHarness:                 domain.HarnessCodex,
+		PauseIncidentID:               "limit-1",
+		ExpectedSourceRuntimeLaunchID: "src-gen",
+	})
+	if !errors.Is(err, ErrPauseOwnershipChanged) {
+		t.Fatalf("err = %v, want ErrPauseOwnershipChanged", err)
+	}
+	if !st.swapped {
+		t.Fatal("test did not replace the generation at the authoritative read")
+	}
+	got := base.sessions[id]
+	if got.Metadata.RuntimeLaunchID != "restart-gen" || got.Harness != domain.HarnessClaudeCode ||
+		got.Metadata.RuntimeHandleID != "rt-1" || got.Metadata.SwitchPending != nil {
+		t.Fatalf("guarded refusal changed durable switch state: %+v", got)
+	}
+	if got.Metadata.Pause == nil || got.Metadata.Pause.IncidentID != "limit-1" {
+		t.Fatalf("guarded refusal changed pause pin: %+v", got.Metadata.Pause)
+	}
+	if runtime.created != 0 || runtime.destroyed != 0 || len(base.ledger) != 0 || base.updateCount != 0 {
+		t.Fatalf("generation refusal had effects: created=%d destroyed=%d ledger=%d updates=%d",
+			runtime.created, runtime.destroyed, len(base.ledger), base.updateCount)
 	}
 }
 
@@ -709,6 +779,44 @@ func TestOwnershipMutex_NoDeadlock(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("deadlock: ownership mutex test timed out")
 	}
+}
+
+func TestAutomaticFailoverAndAgentResumeOwnershipAreMutuallyExclusive(t *testing.T) {
+	m := New(Deps{})
+	id := domain.SessionID("mer-1")
+	otherID := domain.SessionID("mer-2")
+
+	t.Run("automatic excludes resume", func(t *testing.T) {
+		if !m.beginAutomaticFailover(id, "limit-1") {
+			t.Fatal("automatic failover did not acquire ownership")
+		}
+		defer m.endAutomaticFailover(id, "limit-1")
+
+		if m.beginAgentResume(id) {
+			m.endAgentResume(id)
+			t.Fatal("resume acquired ownership during automatic failover")
+		}
+		if !m.beginAgentResume(otherID) {
+			t.Fatal("automatic failover blocked resume for a different session")
+		}
+		m.endAgentResume(otherID)
+	})
+
+	t.Run("resume excludes automatic", func(t *testing.T) {
+		if !m.beginAgentResume(id) {
+			t.Fatal("resume did not acquire ownership")
+		}
+		defer m.endAgentResume(id)
+
+		if m.beginAutomaticFailover(id, "limit-2") {
+			m.endAutomaticFailover(id, "limit-2")
+			t.Fatal("automatic failover acquired ownership during resume")
+		}
+		if !m.beginAutomaticFailover(otherID, "limit-2") {
+			t.Fatal("resume blocked automatic failover for a different session")
+		}
+		m.endAutomaticFailover(otherID, "limit-2")
+	})
 }
 
 func TestLedgerPhaseIdsAreStable(t *testing.T) {

@@ -10,12 +10,13 @@ import (
 
 func validPause() *domain.SessionPause {
 	return &domain.SessionPause{
-		IncidentID:   "inc-1",
-		Reason:       domain.PauseReasonUsageLimit,
-		DetectedBy:   domain.PauseDetectionStructured,
-		Harness:      domain.HarnessCodex,
-		EvidenceJSON: `{"version":1,"kind":"usage_limit","sourceKey":"win-1","scope":"account"}`,
-		PausedAt:     time.Now().UTC().Truncate(time.Second),
+		IncidentID:              "inc-1",
+		Reason:                  domain.PauseReasonUsageLimit,
+		DetectedBy:              domain.PauseDetectionStructured,
+		Harness:                 domain.HarnessCodex,
+		ObservedRuntimeLaunchID: "launch-source-1",
+		EvidenceJSON:            `{"version":1,"kind":"usage_limit","sourceKey":"win-1","scope":"account"}`,
+		PausedAt:                time.Now().UTC().Truncate(time.Second),
 	}
 }
 
@@ -69,6 +70,20 @@ func TestDecodePauseEmptyIsNotPaused(t *testing.T) {
 	}
 }
 
+func TestDecodePauseLegacyStructuredWithoutObservedGeneration(t *testing.T) {
+	raw := `{"incidentId":"inc-legacy","reason":"usage_limit","detectedBy":"structured_envelope","harness":"codex","evidenceJson":"{\"version\":1,\"kind\":\"usage_limit\",\"sourceKey\":\"win-legacy\"}","pausedAt":"2026-08-09T10:30:00Z"}`
+	p, err := decodePause(raw)
+	if err != nil {
+		t.Fatalf("legacy structured pause became unreadable: %v", err)
+	}
+	if p == nil {
+		t.Fatal("legacy structured pin decoded as not paused")
+	}
+	if p.IncidentID != "inc-legacy" || p.ObservedRuntimeLaunchID != "" {
+		t.Fatalf("legacy pause = %+v, want original incident and no invented generation", p)
+	}
+}
+
 func TestEncodePauseRoundTrips(t *testing.T) {
 	in := validPause()
 	raw, err := encodePause(in)
@@ -81,6 +96,7 @@ func TestEncodePauseRoundTrips(t *testing.T) {
 	}
 	if out.IncidentID != in.IncidentID || out.Reason != in.Reason ||
 		out.DetectedBy != in.DetectedBy || out.Harness != in.Harness ||
+		out.ObservedRuntimeLaunchID != in.ObservedRuntimeLaunchID ||
 		out.EvidenceJSON != in.EvidenceJSON || !out.PausedAt.Equal(in.PausedAt) {
 		t.Fatalf("round trip lost fields:\n in=%+v\nout=%+v", in, out)
 	}
