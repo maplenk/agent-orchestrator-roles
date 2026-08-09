@@ -9,6 +9,7 @@
 **Target B config-containment hardening:** `8bb1e3af`
 **Target B migration-history hardening:** `586d1156`
 **Target B adapter test hygiene:** `66d65e4e`
+**Target B vendor-limit fixture research:** `11d12414`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
@@ -18,9 +19,11 @@
 default-data-dir runtime replay on `3c3aef51` are complete; independent combined
 review approves integration `72f274a7` with no remaining P1/P2. Target B test
 hygiene removes the fake/Kilocode/OpenCode wall-clock trio without changing
-production deadlines or classifier behavior; the ordinary full backend run now
-passes 4,724 tests across 132 packages. Static checks, typecheck, API drift, and
-the authoritative full frontend gate also pass.
+production deadlines or classifier behavior. Vendor research at `11d12414`
+captures positive sanitized Claude refusal projections and negative Codex quota
+snapshots without adding a production detector or promoting a capability; the
+ordinary full backend run now passes 4,737 tests across 132 packages. Static
+checks, typecheck, API drift, and the authoritative full frontend gate also pass.
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -41,14 +44,15 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 2B-3 | **Implemented and live-accepted on `166e9e63`.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets and same-generation recovery. Post-review, Chat orchestrators expose no switch/fresh target or desktop control; the service also rejects direct calls before authorization/manager dispatch with `SWITCH_CHAT_UNSUPPORTED`. |
 | Phase 3A pause core and operator surface | **Landed and accepted.** Durable pause, ledger-before-pin, zero automatic restart/send, pause/resume API+CLI, ownership CAS and pause-aware lifecycle are present. |
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
-| Phase 3A-2b detector boundary | **Landed; no harness promoted.** `internal/limits` is the only ingress, but the detector registry is empty and `limit_detection_supported=false` everywhere pending captured vendor fixtures. |
+| Phase 3A-2b detector boundary | **Landed; fixture research captured; no harness promoted.** `internal/limits` remains the only production ingress and the detector registry is empty. Claude has real structured 429 refusal projections, but those records expose only a per-request ID—not a stable quota-window occurrence key—so no safe durable `SourceKey` is proven. Codex has real structured quota-state snapshots but no reached/refused frame. `limit_detection_supported=false` remains universal. |
 | Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
 | Installed strict role pipeline | **Accepted.** The replaced real app completed Claude orchestrator → Grok implementor → read-only Codex verifier, native Browser play, and final orchestration. `f4b28012` then proved terminal-only verifier retrieval with no host nudge. `762ae160` additionally upgraded an existing unconfigured repo in place and completed Claude→Codex→Claude from the native Switch menu. See `ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md` and `ROLE_PIPELINE_LIVE_TEST_20260809.md`. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
 | Target B durability hardening A | **Implemented, independently reviewed, gated, and isolated-dogfooded at `8bb1e3af`.** Malformed, empty, null, unknown-field, and forward-role-schema project config is contained to one degraded row; other projects remain listable; raw bytes are preserved; all row mutations and dev import are fenced. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
 | Target B durability hardening B | **Implemented, independently reviewed, gated, and isolated-daemon dogfooded at `586d1156`.** A complete on-entry ledger/schema snapshot retains a genuine lone Muse 53, still clears the complete stale 53–60 block, preserves already-repaired rows, refuses partial/incomplete ambiguity before writes, and rolls back mid-rewrite failures exactly. No migration was added or edited. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
 | Target B adapter test hygiene | **Implemented, independently reviewed, and gated at `66d65e4e`.** Fake lifecycle cadence is asserted structurally; Kilocode interactive-shell avoidance and CLI parsing are tested independently; OpenCode CLI classification is a pure, behavior-preserving helper with a load-bearing command-error case. Production three-second deadlines are unchanged. See `TARGET_B_TEST_HYGIENE_20260809.md`. |
-| CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. After `66d65e4e`, focused normal and race checks each pass 105/105 and the ordinary full backend run passes 4,724 tests across 132 packages on its first run. |
+| Target B vendor-limit fixtures | **Captured, sanitized, independently reviewed, and gated at `11d12414`; research-only.** Two real Claude Code 2.1.224 structured 429 refusal projections and two real Codex 0.146/0.147 quota frames are adapter-local, byte-bound, and replayed by test-only classifiers/normalizers. Claude proves refusal but not stable incident identity; Codex proves structured state but not refusal. See `TARGET_B_VENDOR_LIMIT_FIXTURES_20260809.md`. |
+| CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. Fixture-focused normal and race checks each pass 302/302, and the ordinary full backend run passes 4,737 tests across 132 packages on its first run. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
 > Claude Code because strictness enforces role/routing/delegation policy, not a
@@ -57,9 +61,10 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 
 **Next engineering actions:** none gate the MVP. Both Target B durability
 hardening slices and the isolated adapter test-hygiene slice are complete.
-Next capture real vendor limit fixtures without promoting any capability.
-The desktop role-map editor and opt-in automatic failover follow. Do not rewrite
-or rerun the accepted MVP matrices merely to replace historical evidence.
+Vendor fixture capture is complete as a non-promoting research slice. Next
+implement the desktop role-map editor, followed by opt-in automatic failover.
+Do not rewrite or rerun the accepted MVP matrices merely to replace historical
+evidence.
 
 ---
 
@@ -207,12 +212,12 @@ roles but no longer blocks cross-harness orchestrator switch.
 
 | Task | Detail | Status |
 |------|--------|--------|
-| Structured/reviewed limit envelopes only | Never free-text “I hit a limit” | **Boundary done; vendor adapters open.** Closed envelope and event discriminators, size bounds, ownership guard and stable `SourceKey` incident identity are enforced. No detector is registered without captured vendor evidence |
+| Structured/reviewed limit envelopes only | Never free-text “I hit a limit” | **Boundary done; research fixtures captured; vendor adapters still open.** Claude's structured positive refusal is proven, but its request ID cannot be treated as a stable incident key. Codex's structured state is proven, but not a reached/refused event. No production detector is registered. |
 | Durable pause | Zero automatic send/restart | **Done** (3A-1): migration 9007 pin; TUI and Chat automatic sends plus boot relaunch are fenced. No scheduler/timer/auto-resume exists; `RetryAfter` is advisory only |
 | Ledger events | pause / resume | **Done** (3A-1): idempotent per incident, written *before* the pin |
 | Operator/service surface | pause + resume through service/API/CLI | **Done** (3A-2a): operator/LAN only; agent principals explicitly refused; expected incident required |
 | Desktop surface | paused/alive state + Resume + Restart agent + strict role composer | **Done and live-dogfooded.** Resume clears only the displayed incident; Restart is a separate operation. Role-map editing remains API/CLI-only |
-| Detector registry | Promote `limit_detection_supported` only after structured-limit tests | **Boundary landed; registry empty and every harness remains false** |
+| Detector registry | Promote `limit_detection_supported` only after structured-limit tests | **Boundary landed; registry empty and every harness remains false.** Fixture capture alone is explicitly non-promoting. |
 
 **3A-1 design decisions worth keeping:** the fence keys on write *origin*, not
 method, because the send-confirm Enter re-send borrows `Deliver`'s activity
@@ -263,7 +268,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 | Task | Detail |
 |------|--------|
-| Clean full gate | **Green for the current backend:** zero races; SQLite exact 5/5 and package race pass; Chat test race fixed; adapter hygiene focused normal/race each 105/105; ordinary full passes 4,724 tests across 132 packages. Historical accepted evidence remains unchanged. |
+| Clean full gate | **Green for the current backend:** zero races; SQLite exact 5/5 and package race pass; Chat test race fixed; fixture-focused normal/race each 302/302; ordinary full passes 4,737 tests across 132 packages. Historical accepted evidence remains unchanged. |
 | Worker dogfood | **Complete:** all 12 records passed on `166e9e63`; evidence `322f9c18` |
 | Orchestrator dogfood | **Complete:** Codex→Claude→Codex, fencing, unauthorized refusal, Fresh and same-generation recovery passed |
 | Post-review default-path replay | **Complete on `3c3aef51`:** actual default tmux socket; Restart, boot live reconcile, and boot reap/restore each converged to one active row/runtime; focused tmux/session-manager/reaper race tests passed |
@@ -288,7 +293,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 | ~~Phase 2B-0a/0b/1/2~~ | **Done** | 2A patterns; ≈6–11 d actual, not the 3–5 first estimated |
 | ~~Phase 2B-3 (cross-harness orch)~~ | **Implemented and live-accepted** | Final MVP strict-policy amendment |
 | ~~Phase 3B manual Continue~~ | **Implemented and live-accepted** | Final probe review |
-| Final repository gate | current backend and authoritative frontend green | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; current full backend passes 4,724 tests across 132 packages |
+| Final repository gate | current backend and authoritative frontend green | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; current full backend passes 4,737 tests across 132 packages |
 
 ### Sequencing sketch
 
@@ -301,12 +306,13 @@ Sync 2 acceptance ──► DONE (2026-08-07)
 Final MVP core + surface ──► IMPLEMENTED / REVIEW FIXES INTEGRATED
 Live matrix @ 166e9e63 ──► ACCEPTED (evidence 322f9c18)
 Race close-out ──► Chat test fixed; SQLite exact 5/5 + package PASS; zero races
-Ordinary backend ──► PASS, 4,724 tests / 132 packages after isolated wall-clock hygiene
+Ordinary backend ──► PASS, 4,737 tests / 132 packages after vendor-fixture research
 Static/typecheck ──► PASS on exact head f8883529
 API drift ──► PASS (two identical regenerations; clean diff)
 Frontend classification ──► deterministic pre-MVP failure (0/20 isolated; full file 27/28)
 Frontend fix @ 6473b134 ──► 20/20 exact + 28/28 file PASS; negative mutation retained
-Now ──► capture real vendor limit fixtures; keep capability promotion separate
+Vendor fixture research ──► DONE, Claude positive / Codex negative, no promotion
+Now ──► desktop role-map editor
      ║
      ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
 ```
@@ -362,7 +368,7 @@ Still open or partial:
     Codex↔Claude switch, gated same-generation recovery, and durable replacement
     recovery are implemented and live-accepted.
     Successor-session handoff and live-worker rebind remain deferred
-17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Still missing: a harness detector (needs captured vendor fixtures) and any **desktop role-map editor** — the composer *consumes* a role map, but adding or editing roles remains API/CLI-only
+17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Real Claude/Codex research fixtures are captured at `11d12414`, but neither proves all inputs for a stable production incident key, so capabilities remain false. A **desktop role-map editor** is also still missing — the composer *consumes* a role map, but adding or editing roles remains API/CLI-only
 18. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
     post-MVP
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
@@ -385,7 +391,7 @@ Still open or partial:
 The MVP has no remaining implementation or live-acceptance action. Preserve
 the distinct evidence sets (`166e9e63`/`322f9c18`, `3c3aef51`, and installed
 role-pipeline `f4b28012`) and promote no capability. Per-project config
-containment is complete at `8bb1e3af` and mixed-history migration repair at
-`586d1156`; the immediate Target B slice is the three-test wall-clock hygiene
-repair. Detector fixtures, the desktop editor, and opt-in automatic failover
-follow.
+containment is complete at `8bb1e3af`, mixed-history migration repair at
+`586d1156`, adapter wall-clock hygiene at `66d65e4e`, and non-promoting vendor
+fixture research at `11d12414`. The immediate Target B slice is the desktop
+role-map editor; opt-in automatic failover follows.

@@ -28,7 +28,14 @@ and race validation found zero data races. Target B adapter test hygiene at
 `66d65e4e` replaces the known fake/Kilocode/OpenCode real-time assertions with
 structural or pure-classifier coverage while preserving production deadlines
 and behavior. Focused normal/race checks each pass 105/105 and the ordinary
-full backend run passes 4,724 tests across 132 packages. On exact integration head
+full backend run passes 4,724 tests across 132 packages. Target B vendor-fixture
+research at `11d12414` then captures two sanitized real Claude Code 2.1.224
+structured 429 refusal projections and two real Codex 0.146/0.147 quota-state
+frames in adapter-local testdata. Claude proves a positive provider refusal but
+not a stable quota-occurrence identity; Codex proves structured state but not a
+reached/refused event. No production detector or registry wiring was added,
+`limit_detection_supported` remains false everywhere, and the current ordinary
+full backend run passes 4,737 tests across 132 packages. On exact integration head
 `f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
 before the test fix, full Vitest was 2039/2040. Its sole `SessionFilesView`
 failure is deterministic (0/20 exact-test passes, full file 27/28) and
@@ -52,9 +59,9 @@ dogfood are recorded in `TARGET_B_DURABILITY_HARDENING_20260809.md`. Hardening
 B is complete at `586d1156`: a pre-write block classifier preserves a genuine
 lone Muse 53, retains complete stale 53–60 cleanup, refuses ambiguous histories
 loudly, and proves transactional rollback. Neither slice added a migration or
-promoted a capability cell. The fake/Kilocode/OpenCode wall-clock slice is now
-complete at `66d65e4e`; real vendor fixture capture is next and remains
-non-promoting.
+promoted a capability cell. The fake/Kilocode/OpenCode wall-clock slice is
+complete at `66d65e4e`, and non-promoting vendor fixture research is complete
+at `11d12414`; the desktop role-map editor is next.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -419,6 +426,10 @@ Zai and Kimi validated **separately** on Pi.
 19. [x] Remove fake/Kilocode/OpenCode wall-clock dependencies with structural
     cadence and pure classifier tests, leaving production timeouts unchanged
     (`66d65e4e`)
+20. [x] Capture adapter-local real vendor limit research fixtures without
+    production detector wiring or capability promotion. Claude has structured
+    positive refusal evidence but no stable occurrence key; Codex has structured
+    negative quota-state evidence but no reached/refused frame (`11d12414`)
 
 ---
 
