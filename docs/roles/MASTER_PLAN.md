@@ -43,6 +43,13 @@ legacy worker behavior while making desktop-created orchestrators role-pinned
 and allowing an exact provider-default legacy orchestrator to adopt the role at
 an explicit Switch boundary; the real app completed Claude→Codex→Claude on the
 existing `qbapi` session.
+Target B durability hardening A is complete at `8bb1e3af`: unreadable or
+forward-versioned stored project config is contained per project, remains
+byte-preserved and visible as degraded, and is mutation-fenced without taking
+healthy projects offline. Focused normal/race gates and native Electron
+dogfood are recorded in `TARGET_B_DURABILITY_HARDENING_20260809.md`. The next
+durability slice is the mixed original 42–49 plus lone Muse 53 ledger repair;
+no capability cell was promoted.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -397,6 +404,12 @@ Zai and Kimi validated **separately** on Pi.
     matrix is promoted at `322f9c18`; vendor limit detection remains outside
     this MVP and unpromoted. The repository-wide gate is still open on the
     full-suite distinction named above
+17. [x] Contain unreadable stored project config per project; preserve raw
+    bytes, keep healthy projects listable, surface the broken row as degraded,
+    and reject every mutation/import targeting it (`8bb1e3af`)
+18. [ ] Repair mixed migration histories with a block-level on-entry
+    discriminator that retains a genuine lone Muse 53, preserves complete
+    stale 53–60 cleanup, and refuses ambiguous upstream schema loudly
 
 ---
 

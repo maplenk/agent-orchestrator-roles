@@ -6,6 +6,7 @@
 **Post-evidence review integration:** `72f274a7`
 **Installed-app role-pipeline close-out:** `f4b28012`
 **Existing-project starter-role close-out:** `762ae160`
+**Target B config-containment hardening:** `8bb1e3af`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
@@ -41,6 +42,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
 | Installed strict role pipeline | **Accepted.** The replaced real app completed Claude orchestrator → Grok implementor → read-only Codex verifier, native Browser play, and final orchestration. `f4b28012` then proved terminal-only verifier retrieval with no host nudge. `762ae160` additionally upgraded an existing unconfigured repo in place and completed Claude→Codex→Claude from the native Switch menu. See `ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md` and `ROLE_PIPELINE_LIVE_TEST_20260809.md`. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
+| Target B durability hardening A | **Implemented, independently reviewed, gated, and isolated-dogfooded at `8bb1e3af`.** Malformed, empty, null, unknown-field, and forward-role-schema project config is contained to one degraded row; other projects remain listable; raw bytes are preserved; all row mutations and dev import are fenced. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
 | CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. The ordinary full backend run fails only the known untouched fake/kilocode/opencode wall-clock trio; all other packages, including the MVP packages, pass. The full repository gate is therefore **not fully green**. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
@@ -48,12 +50,13 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 > filesystem sandbox. Claude-only installs still cannot configure an explicit
 > `workspaceWrites:false` role; Claude remains `read_only_enforced=false`.
 
-**Next engineering actions:** none gate the MVP. Keep the full repository gate
-explicitly non-green while the three pre-existing wall-clock tests fail; do not
-rewrite or rerun the accepted matrices merely to make that separate gate look
-green. Post-MVP candidates are per-project containment for unreadable stored
-config, technical Claude read-only for roles that truly require it, and the
-deferred detector/automation work.
+**Next engineering actions:** none gate the MVP. Target B hardening A is now
+complete; next repair the mixed 42–49 plus lone Muse 53 history with an
+on-entry block discriminator and fail-loud ambiguity handling. Keep the full
+repository gate explicitly non-green while the three pre-existing wall-clock
+tests fail; do not rewrite or rerun the accepted matrices merely to make that
+separate gate look green. Detector, editor, and opt-in automation work follows
+the two durability slices.
 
 ---
 
@@ -78,7 +81,7 @@ deferred detector/automation work.
 | ProjectConfig.roleMap + Validate (domain) | **Done** | `domain/projectconfig.go` |
 | CLI / API roleMap round-trip | **Done** | CLI `roleMap` mirror + set-config; live dogfood set roleMap via CLI |
 | Strict role JSON + durable read safety | **Done** | HTTP/CLI require both permission booleans and reject unknown binding fields; `663f9339` makes malformed persisted bindings fail reads without rewriting their bytes while valid semantics/SHA/bytes remain stable |
-| Per-project unreadable-config containment | **Deferred follow-up** | `ListProjects` currently fails the whole list when any one stored `ProjectConfig` cannot be decoded. This is fail-safe for writes but turns one corrupt or forward-versioned row into an app-wide availability failure, including rollback/mixed-version use. Required contract: keep other projects listable; expose the affected project as config-unreadable; preserve its raw bytes; and refuse config mutations for that row until repaired. Do not restore silent zero-config degradation. |
+| Per-project unreadable-config containment | **Done (`8bb1e3af`)** | Reads now contain malformed or forward-versioned config to one degraded project entry while preserving its raw SQLite bytes. Healthy projects remain listable. Strict one-row reads and every project-row mutation, workspace import, and dev-import path refuse the unreadable row with a typed error / stable `PROJECT_CONFIG_UNREADABLE` 409. Boot seeding and tracker intake skip the bad config without treating it as zero. Native Electron dogfood proved the visible disabled mutation surface. |
 | Mixed-history migration ambiguity | **Deferred follow-up** | A database with the complete original fork block 42–49, the fork fingerprints, and a lone upstream Muse row 53 is indistinguishable per migration from a stale fork 53. Current repair follows the reviewed baseline's fail-loud bias and may delete the Muse ledger row, causing goose to attempt Muse again at boot. Do not weaken `a62b2ee7`: a complete 42–49 + 53–60 block must still free 53–60, while a 9000 entry already present on function entry must preserve a later Muse 53. The follow-up needs a block-level discriminator and tests for both populations; if still ambiguous, prefer a loud refusal over silently skipping upstream schema. |
 | Host-authoritative `ao spawn --role` | **Done** | CLI + HTTP `roleId`; Resolve rejects free-form harness with role |
 | Strict: role required for workers; no harness override | **Done** | `roles/resolve.go` |
@@ -367,7 +370,7 @@ Still open or partial:
 
 - **After each slice / phase land:** update **this file** (status, HEAD, next action, checklist).
 - **Codex review packs** + accept before promoting capability cells.
-- **Migrations:** never edit merged SQL; fork migrations use the reserved `9000+` range and the next number is **9008+**. Do not re-enter upstream's sequential range.
+- **Migrations:** never edit merged SQL; fork migrations use the reserved `9000+` range and the next number is **9009+**. Do not re-enter upstream's sequential range.
 - **Upstream:** keep `upstream` remote; avoid colliding migration IDs.
 - **Dogfood:** isolated `AO_DATA_DIR` for risky runs.
 - **Promotion:** never flip `switch_supported` / `limit_detection_supported` in the same change as large feature work when possible — separate final CL. (2A switch promote followed this rule.)
@@ -378,7 +381,8 @@ Still open or partial:
 
 The MVP has no remaining implementation or live-acceptance action. Preserve
 the distinct evidence sets (`166e9e63`/`322f9c18`, `3c3aef51`, and installed
-role-pipeline `f4b28012`) and promote no capability. Any next slice is
-post-MVP: address the three known wall-clock tests, contain unreadable project
-config per row, resolve the documented mixed-history migration ambiguity, or
-pursue a deliberately scoped deferred capability.
+role-pipeline `f4b28012`) and promote no capability. Per-project config
+containment is complete at `8bb1e3af`; the immediate Target B slice is the
+documented mixed-history migration repair. After that, address the three known
+wall-clock tests before detector fixtures, the desktop editor, and opt-in
+automatic failover.
