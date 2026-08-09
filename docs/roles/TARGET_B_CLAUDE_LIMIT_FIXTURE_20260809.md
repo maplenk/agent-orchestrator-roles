@@ -8,7 +8,7 @@ through an adapter-local, test-only classifier. It does **not** add a production
 detector, register a detector, connect an event stream to the Router, or promote
 any capability.
 
-**Fixture/test commit:** `899c7bc`
+**Fixture/test commit:** source `899c7bc`; roles-trunk integration `14ce328d`
 
 The captured event proves that Claude Code 2.1.159 emitted a structured
 `rate_limit_event` with `status=rejected`, `rateLimitType=seven_day`, and

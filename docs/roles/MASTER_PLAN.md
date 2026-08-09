@@ -40,7 +40,8 @@ public Claude Code 2.1.159 `rate_limit_event` fixture proves that the structured
 rejected limit. That print-stream-json surface is not AO's accepted interactive
 Claude surface: no interactive ingress carries the event together with its AO
 runtime generation, and no production Router caller or detector composition was
-added. Codex still proves structured state but not a reached/refused event.
+added. That fixture is integrated on the roles trunk at `14ce328d`. Codex still
+proves structured state but not a reached/refused event.
 `limit_detection_supported` remains false everywhere, and the `11d12414`
 fixture-era ordinary full backend run passed 4,737 tests across 132 packages. On exact integration head
 `f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
@@ -472,8 +473,8 @@ Zai and Kimi validated **separately** on Pi.
     production detector wiring or capability promotion. The original Claude
     refusal projections and Codex negative quota-state frames landed at
     `11d12414`; the later byte-complete public Claude `rate_limit_event` fixture
-    proves a stable `rateLimitType` + `resetsAt` reset-cycle candidate on the
-    print-stream-json surface. Codex still has no reached/refused frame, and the
+    at `14ce328d` proves a stable `rateLimitType` + `resetsAt` reset-cycle
+    candidate on the print-stream-json surface. Codex still has no reached/refused frame, and the
     Claude fixture does not prove an AO interactive ingress or runtime-generation
     channel
 21. [x] Ship the desktop role-map editor with deterministic target validation,
