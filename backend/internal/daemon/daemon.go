@@ -447,23 +447,6 @@ func Run() error {
 		prActions = prsvc.NewActionService(prsvc.ActionDeps{Store: store, Merger: mergeProvider, Reader: mergeProvider})
 	}
 
-	// Durable agent-switch reconciliation is a startup safety boundary. The
-	// in-memory input fence disappeared with the previous daemon; if AO cannot
-	// prove and recover every active saga, do not bind a usable API with user
-	// input accidentally reopened. This runs after session-scoped shell wiring
-	// (ordinary recovery may tear down a worktree) but before HTTP is bound.
-	if reconcileErr := sessMgr.Reconcile(ctx); reconcileErr != nil {
-		stop()
-		managedPreview.Close()
-		lcStack.Stop()
-		if cdcErr := cdcPipe.Stop(); cdcErr != nil {
-			log.Error("cdc pipeline shutdown", "err", cdcErr)
-		}
-		return fmt.Errorf("reconcile sessions on boot: %w", reconcileErr)
-	}
-	if reconcileErr := lcStack.ReconcileRuntime(ctx); reconcileErr != nil {
-		log.Error("reconcile agent processes on boot failed", "err", reconcileErr)
-	}
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
 	// to start the daemon. pushRegistry (interface) is assigned only when load

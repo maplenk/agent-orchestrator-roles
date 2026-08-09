@@ -312,7 +312,7 @@ func newSessionFreshCommand(ctx *commandContext) *cobra.Command {
 	var opts sessionFreshOptions
 	cmd := &cobra.Command{
 		Use:   "fresh",
-		Short: "Start a same-harness fresh conversation with host-compiled handoff",
+		Short: "Start a same-harness fresh conversation with host-compiled context",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return ctx.freshSession(cmd.Context(), cmd, opts)

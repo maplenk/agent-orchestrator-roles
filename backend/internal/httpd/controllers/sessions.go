@@ -116,9 +116,15 @@ type workspaceCacheInvalidator interface {
 	InvalidateWorkspaceCache(id domain.SessionID)
 }
 
-type agentSwitchSessionService interface {
+type agentSwitchInitiationService interface {
 	SwitchAgent(ctx context.Context, id domain.SessionID, in sessionsvc.SwitchAgentInput) (domain.AgentSwitch, error)
+}
+
+type agentSwitchHistoryService interface {
 	ListAgentSwitches(ctx context.Context, id domain.SessionID) ([]domain.AgentSwitch, error)
+}
+
+type agentSwitchHandoffService interface {
 	SubmitAgentHandoff(ctx context.Context, id domain.SessionID, switchID domain.AgentSwitchID, sourceGenerationID domain.AgentGenerationID, handoff json.RawMessage) (domain.AgentSwitch, error)
 }
 
@@ -1172,7 +1178,7 @@ func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request)
 }
 
 func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request) {
-	svc, ok := c.Svc.(agentSwitchSessionService)
+	svc, ok := c.Svc.(agentSwitchInitiationService)
 	if !ok {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/switch-agent")
 		return
@@ -1210,7 +1216,7 @@ func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request)
 }
 
 func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Request) {
-	svc, ok := c.Svc.(agentSwitchSessionService)
+	svc, ok := c.Svc.(agentSwitchHistoryService)
 	if !ok {
 		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/agent-switches")
 		return
@@ -1224,7 +1230,7 @@ func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Re
 }
 
 func (c *SessionsController) submitAgentHandoff(w http.ResponseWriter, r *http.Request) {
-	svc, ok := c.Svc.(agentSwitchSessionService)
+	svc, ok := c.Svc.(agentSwitchHandoffService)
 	if !ok {
 		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/handoff")
 		return
