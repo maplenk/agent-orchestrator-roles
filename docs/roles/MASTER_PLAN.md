@@ -1,8 +1,9 @@
 # Master plan: Multi-sub harness orchestration on AO
 
 **Status:** canonical Target B design; implementation is active and tracked in
-[`REMAINING_PLAN.md`](REMAINING_PLAN.md). The current MVP boundary and
-integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
+[`REMAINING_PLAN.md`](REMAINING_PLAN.md). Desktop role-map editing is complete;
+opt-in automatic failover is the next product slice. The current MVP boundary
+and integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
 If this long-range design conflicts with the final MVP boundary or current
 execution state, `MVP_FINAL_SPEC.md` and then `REMAINING_PLAN.md` control.
 **Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
@@ -61,7 +62,14 @@ lone Muse 53, retains complete stale 53–60 cleanup, refuses ambiguous historie
 loudly, and proves transactional rollback. Neither slice added a migration or
 promoted a capability cell. The fake/Kilocode/OpenCode wall-clock slice is
 complete at `66d65e4e`, and non-promoting vendor fixture research is complete
-at `11d12414`; the desktop role-map editor is next.
+at `11d12414`. The desktop role-map editor is complete across `54cdbdd8` and
+`c7c1f565`, with its review and acceptance record in
+[`TARGET_B_ROLE_MAP_EDITOR_20260809.md`](TARGET_B_ROLE_MAP_EDITOR_20260809.md).
+It uses a role-map-only compare-and-swap mutation, sends the loaded role-map
+SHA with full-config mutations, preserves deterministic ordered failover
+targets, and rejects duplicate current or earlier effective targets. It added
+no migration and promoted no capability cell. Opt-in automatic failover is
+next.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -367,7 +375,7 @@ Zai and Kimi validated **separately** on Pi.
 | **2A** | Worker switch saga Claude↔Codex + fresh-conversation + lifecycle ledger | 5–8 d |
 | **2B** | Orchestrator ownership transfer | 3–5 d |
 | **3A** | Limit detect + durable pause + zero re-nudge | 4–6 d |
-| **3B** | Manual continue; opt-in auto-failover | 3–5 d |
+| **3B** | Manual continue (complete); opt-in auto-failover (next) | 3–5 d |
 | **Integration** | UI, dogfood, crash, multi-platform | 3–5 d |
 
 **Total: ~4–6 weeks**
@@ -411,7 +419,7 @@ Zai and Kimi validated **separately** on Pi.
     acceptance are complete
 14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
 15. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
-    post-MVP
+    the next Target B product slice
 16. [~] Dogfood against all DoD invariants — the final MVP worker/orchestrator
     matrix is promoted at `322f9c18`; vendor limit detection remains outside
     this MVP and unpromoted. The repository-wide gate is still open on the
@@ -430,6 +438,13 @@ Zai and Kimi validated **separately** on Pi.
     production detector wiring or capability promotion. Claude has structured
     positive refusal evidence but no stable occurrence key; Codex has structured
     negative quota-state evidence but no reached/refused frame (`11d12414`)
+21. [x] Ship the desktop role-map editor with deterministic target validation,
+    role-map-only CAS, stale-revision conflict/reload behavior, unreadable-row
+    mutation fencing, and full-config role-map SHA protection (`54cdbdd8`,
+    `c7c1f565`). See
+    [`TARGET_B_ROLE_MAP_EDITOR_20260809.md`](TARGET_B_ROLE_MAP_EDITOR_20260809.md).
+    This slice added no migration and promoted no capability cell
+22. [ ] Implement opt-in automatic failover; manual remains the default
 
 ---
 

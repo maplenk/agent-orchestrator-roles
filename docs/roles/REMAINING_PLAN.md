@@ -10,6 +10,8 @@
 **Target B migration-history hardening:** `586d1156`
 **Target B adapter test hygiene:** `66d65e4e`
 **Target B vendor-limit fixture research:** `11d12414`
+**Target B atomic role-map CAS API:** `54cdbdd8`
+**Target B desktop role-map editor:** `c7c1f565`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
@@ -24,6 +26,9 @@ captures positive sanitized Claude refusal projections and negative Codex quota
 snapshots without adding a production detector or promoting a capability; the
 ordinary full backend run now passes 4,737 tests across 132 packages. Static
 checks, typecheck, API drift, and the authoritative full frontend gate also pass.
+The desktop role-map editor is implemented at `c7c1f565` on the atomic role-map
+CAS boundary from `54cdbdd8`, independently reviewed, fully gated, and accepted
+in the real native Forge Electron app; see `TARGET_B_ROLE_MAP_EDITOR_20260809.md`.
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -43,7 +48,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 2B-0/1/2 | **Landed and dogfooded.** Coordinator uniqueness, fail-closed boot, in-place orchestrator fresh conversation and replacement recoverability are present. |
 | Phase 2B-3 | **Implemented and live-accepted on `166e9e63`.** Gated in-place Codex↔Claude orchestrator switching uses exact role-map targets and same-generation recovery. Post-review, Chat orchestrators expose no switch/fresh target or desktop control; the service also rejects direct calls before authorization/manager dispatch with `SWITCH_CHAT_UNSUPPORTED`. |
 | Phase 3A pause core and operator surface | **Landed and accepted.** Durable pause, ledger-before-pin, zero automatic restart/send, pause/resume API+CLI, ownership CAS and pause-aware lifecycle are present. |
-| Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. A desktop role-map editor is still absent. |
+| Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. The desktop role-map editor is implemented, independently reviewed, fully gated, and accepted in the real native Forge Electron app at `c7c1f565`. |
 | Phase 3A-2b detector boundary | **Landed; fixture research captured; no harness promoted.** `internal/limits` remains the only production ingress and the detector registry is empty. Claude has real structured 429 refusal projections, but those records expose only a per-request ID—not a stable quota-window occurrence key—so no safe durable `SourceKey` is proven. Codex has real structured quota-state snapshots but no reached/refused frame. `limit_detection_supported=false` remains universal. |
 | Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
 | Installed strict role pipeline | **Accepted.** The replaced real app completed Claude orchestrator → Grok implementor → read-only Codex verifier, native Browser play, and final orchestration. `f4b28012` then proved terminal-only verifier retrieval with no host nudge. `762ae160` additionally upgraded an existing unconfigured repo in place and completed Claude→Codex→Claude from the native Switch menu. See `ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md` and `ROLE_PIPELINE_LIVE_TEST_20260809.md`. |
@@ -52,6 +57,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Target B durability hardening B | **Implemented, independently reviewed, gated, and isolated-daemon dogfooded at `586d1156`.** A complete on-entry ledger/schema snapshot retains a genuine lone Muse 53, still clears the complete stale 53–60 block, preserves already-repaired rows, refuses partial/incomplete ambiguity before writes, and rolls back mid-rewrite failures exactly. No migration was added or edited. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
 | Target B adapter test hygiene | **Implemented, independently reviewed, and gated at `66d65e4e`.** Fake lifecycle cadence is asserted structurally; Kilocode interactive-shell avoidance and CLI parsing are tested independently; OpenCode CLI classification is a pure, behavior-preserving helper with a load-bearing command-error case. Production three-second deadlines are unchanged. See `TARGET_B_TEST_HYGIENE_20260809.md`. |
 | Target B vendor-limit fixtures | **Captured, sanitized, independently reviewed, and gated at `11d12414`; research-only.** Two real Claude Code 2.1.224 structured 429 refusal projections and two real Codex 0.146/0.147 quota frames are adapter-local, byte-bound, and replayed by test-only classifiers/normalizers. Claude proves refusal but not stable incident identity; Codex proves structured state but not refusal. See `TARGET_B_VENDOR_LIMIT_FIXTURES_20260809.md`. |
+| Target B desktop role-map editor | **Implemented, independently reviewed, fully gated, and native-Electron accepted at `54cdbdd8` + `c7c1f565`.** Healthy project reads carry a required `roleMapSha256`. The role-only atomic patch compares that revision while preserving the latest unrelated config, and full-settings saves use the inverse CAS so a stale whole-config writer cannot restore an older role map. Degraded projects remain identity-only and read-only in the desktop. The editor covers strict mode, orchestrator role, role bindings/policy, and failover ladders without a migration or capability promotion. See `TARGET_B_ROLE_MAP_EDITOR_20260809.md`. |
 | CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. Fixture-focused normal and race checks each pass 302/302, and the ordinary full backend run passes 4,737 tests across 132 packages on its first run. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
@@ -61,8 +67,9 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 
 **Next engineering actions:** none gate the MVP. Both Target B durability
 hardening slices and the isolated adapter test-hygiene slice are complete.
-Vendor fixture capture is complete as a non-promoting research slice. Next
-implement the desktop role-map editor, followed by opt-in automatic failover.
+Vendor fixture capture is complete as a non-promoting research slice, and the
+desktop role-map editor is implemented and native-Electron accepted. Next is
+opt-in automatic failover.
 Do not rewrite or rerun the accepted MVP matrices merely to replace historical
 evidence.
 
@@ -176,7 +183,7 @@ orchestration is independently usable:
 | 1-A RO contract doc | **Partial** | `READ_ONLY_CONTRACT.md` exists; tighten if needed |
 | 1-B Claude RO (+ negative runtime) | **Open** | Codex done; Claude stays false |
 | 1-C registry | **Done** for Phase 1 + 2A switch cells | Limit promote later |
-| 1-D role-map surface | **Done** | CLI/API round-trip used in live dogfood |
+| 1-D role-map surface | **Done** | CLI/API round-trip used in live dogfood; atomic role-only CAS API at `54cdbdd8` and installed desktop editor at `c7c1f565` |
 | 1-E template authority | **Done** | Option A |
 | 1-F full verification + strict dogfood | **Open** | Full `go test ./...`; writable strict orchestrator plus explicit RO-role coverage; Claude RO when ready |
 
@@ -312,7 +319,8 @@ API drift ──► PASS (two identical regenerations; clean diff)
 Frontend classification ──► deterministic pre-MVP failure (0/20 isolated; full file 27/28)
 Frontend fix @ 6473b134 ──► 20/20 exact + 28/28 file PASS; negative mutation retained
 Vendor fixture research ──► DONE, Claude positive / Codex negative, no promotion
-Now ──► desktop role-map editor
+Desktop role-map editor ──► IMPLEMENTED + REVIEWED + NATIVE-ELECTRON ACCEPTED
+Now ──► opt-in automatic failover
      ║
      ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
 ```
@@ -368,7 +376,7 @@ Still open or partial:
     Codex↔Claude switch, gated same-generation recovery, and durable replacement
     recovery are implemented and live-accepted.
     Successor-session handoff and live-worker rebind remain deferred
-17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Real Claude/Codex research fixtures are captured at `11d12414`, but neither proves all inputs for a stable production incident key, so capabilities remain false. A **desktop role-map editor** is also still missing — the composer *consumes* a role map, but adding or editing roles remains API/CLI-only
+17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Real Claude/Codex research fixtures are captured at `11d12414`, but neither proves all inputs for a stable production incident key, so capabilities remain false. The desktop now authors and atomically saves the project role map at `54cdbdd8` + `c7c1f565`; installed-app evidence is in `TARGET_B_ROLE_MAP_EDITOR_20260809.md`
 18. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
     post-MVP
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
@@ -393,5 +401,7 @@ the distinct evidence sets (`166e9e63`/`322f9c18`, `3c3aef51`, and installed
 role-pipeline `f4b28012`) and promote no capability. Per-project config
 containment is complete at `8bb1e3af`, mixed-history migration repair at
 `586d1156`, adapter wall-clock hygiene at `66d65e4e`, and non-promoting vendor
-fixture research at `11d12414`. The immediate Target B slice is the desktop
-role-map editor; opt-in automatic failover follows.
+fixture research at `11d12414`. The atomic role-map CAS API at `54cdbdd8` and
+desktop editor at `c7c1f565` are implemented, independently reviewed, fully
+gated, and accepted in the installed native Electron app without a migration or
+capability promotion. The immediate Target B slice is opt-in automatic failover.
