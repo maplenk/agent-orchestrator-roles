@@ -167,6 +167,44 @@ func TestCreate_RegistersSession(t *testing.T) {
 	hosts["sess-abc"].cleanup(t)
 }
 
+func TestCreatePassesExactAgentArgvWithoutPostAgentInterpreter(t *testing.T) {
+	isolateRegistry(t)
+	wantArgv := []string{"agent.exe", "--prompt", "value with spaces", `quote"and\\slash`}
+	var gotArgv []string
+	var host *inProcHost
+	spawner := func(_ context.Context, sessionID, _ string, argv []string, _ map[string]string) (string, int, error) {
+		gotArgv = append([]string(nil), argv...)
+		host = startInProcHost(t, sessionID, livePID())
+		return host.addr, host.pid, nil
+	}
+	rt := New(Options{Spawner: spawner})
+
+	if _, err := rt.Create(context.Background(), ports.RuntimeConfig{
+		SessionID:     "sess-argv",
+		WorkspacePath: `C:\workspace with spaces`,
+		Argv:          wantArgv,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer host.cleanup(t)
+
+	if len(gotArgv) != len(wantArgv) {
+		t.Fatalf("spawner argv = %#v, want exact argv %#v", gotArgv, wantArgv)
+	}
+	for i := range wantArgv {
+		if gotArgv[i] != wantArgv[i] {
+			t.Fatalf("spawner argv[%d] = %q, want %q (full argv %#v)", i, gotArgv[i], wantArgv[i], gotArgv)
+		}
+	}
+	for _, interpreter := range []string{"cmd.exe", "powershell.exe", "pwsh.exe"} {
+		for _, arg := range gotArgv[1:] {
+			if strings.EqualFold(arg, interpreter) {
+				t.Fatalf("Create appended post-agent interpreter %q to argv %#v", interpreter, gotArgv)
+			}
+		}
+	}
+}
+
 // TestCreate_DuplicateErrors verifies a second Create for the same session id fails.
 func TestCreate_DuplicateErrors(t *testing.T) {
 	isolateRegistry(t)
