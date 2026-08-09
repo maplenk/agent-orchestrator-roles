@@ -7,24 +7,26 @@ import { expect, test } from "@playwright/test";
 
 test("renders the orchestrator-first workbench shell", async ({ page }) => {
 	await page.goto("/");
-	// The single pinned Orchestrator anchor + the Projects group + a name-only worker row.
-	await expect(page.getByRole("button", { name: "Orchestrator", exact: true })).toBeVisible();
+	// The global board anchor + the Projects group + a worker row.
+	await expect(page.getByRole("button", { name: "Orchestrator board" })).toBeVisible();
 	await expect(page.getByText("Projects")).toBeVisible();
-	await expect(page.getByRole("button", { name: "fix-webgl-fallback", exact: true })).toBeVisible();
-	// Orchestrator side rail = the quiet Workers list.
-	await expect(page.getByText("Workers", { exact: true })).toBeVisible();
+	await expect(page.getByRole("button", { name: "Open Build screenshot-ready dashboard data" })).toBeVisible();
+	await expect(page.getByRole("region", { name: "Working sessions", exact: true })).toBeVisible();
 });
 
 test("deep-links into a worker session", async ({ page }) => {
-	await page.goto("/#/workspaces/api-gateway/sessions/refactor-mux");
-	// Worker view = three-pane with the Git review rail.
-	await expect(page.getByText("Changed")).toBeVisible();
-	await expect(page.getByRole("button", { name: /Commit & Push/ })).toBeVisible();
+	await page.goto("/#/projects/ao-demo/sessions/demo-working");
+	// Worker view = persistent project sidebar, terminal, and inspector rail.
+	await expect(page.getByTestId("session-detail")).toBeVisible();
+	await expect(page.getByTestId("session-terminal")).toBeVisible();
+	await expect(page.locator("#inspector")).toBeVisible();
 });
 
-test("drilling into a worker opens its Git review rail", async ({ page }) => {
+test("drilling into a worker opens its inspector rail", async ({ page }) => {
 	await page.goto("/");
-	await page.getByRole("button", { name: "refactor-mux", exact: true }).click();
-	await expect(page.getByRole("button", { name: /Commit & Push/ })).toBeVisible();
-	await expect(page.getByText("internal/mux/terminal_mux.go")).toBeVisible();
+	await page.getByRole("button", { name: "Open Build screenshot-ready dashboard data" }).click();
+	await expect(page).toHaveURL(/sessions\/demo-working/);
+	const inspector = page.locator("#inspector");
+	await expect(inspector).toBeVisible();
+	await expect(inspector.getByRole("tab", { name: "Summary" })).toHaveAttribute("aria-selected", "true");
 });
