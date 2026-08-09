@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { emitFakeNewShellTerminalShortcut, installFakeBridge } from "./support/fake-bridge";
 
 // Standalone shell terminals (#2822): shells the user opens by hand, with no
 // agent session behind them. They render as tabs beside the session's own pane.
@@ -17,32 +18,33 @@ test("opens, selects, and closes standalone shell terminals from the tab strip",
 	await page.getByRole("button", { name: "New terminal" }).click();
 	await expect(page.getByRole("menu")).toHaveCount(0);
 	await expect(closeButtons).toHaveCount(initialCount + 1);
+	const shellTab = page.getByRole("tab", { name: "ao-demo", exact: true });
+	await expect(shellTab).toHaveAttribute("aria-selected", "true");
 
 	// Selecting the session tab hands the pane back to the agent. Matched by the
 	// session's own title: the tab's accessible name is that title, and its
 	// title attribute falls back to the label once the strip truncates it.
-	// Scoped to the terminal panel: the sidebar carries the same session name.
-	const sessionTab = page
-		.getByTestId("terminal")
-		.getByRole("tab", { name: /^Build screenshot-ready dashboard data/ });
+	// The sidebar carries the same session name as a button; the terminal strip's
+	// role keeps this locator specific without relying on its layout wrapper.
+	const sessionTab = page.getByRole("tab", { name: /^Build screenshot-ready dashboard data/ });
 	await sessionTab.click();
 	await expect(sessionTab).toHaveAttribute("aria-selected", "true");
 
-	// Closing a shell removes exactly its own tab.
+	// Inactive shell tabs collapse their close control until hover. Reveal the
+	// control through the same interaction a user needs, then close that shell.
+	await shellTab.hover();
 	await closeButtons.last().click();
 	await expect(closeButtons).toHaveCount(initialCount);
 });
 
-// Regression: the open request used to be consumed by the session view, which
-// only mounts on a session route — so on the board (or any project with no
-// sessions yet) the topbar button and Ctrl+` raised the signal and nothing was
-// listening. Both silently did nothing. The shell layout owns it now, and
-// routes to the standalone terminals view when there is no session on screen.
-test("opens a terminal from the board, where no session view is mounted", async ({ page }) => {
+// Regression: the application shortcut signal used to be consumed by the
+// session view, which only mounts on a session route. The shell layout owns it
+// now and routes to the standalone terminals view when no session is on screen.
+test("opens a terminal from the board through the app shortcut", async ({ page }) => {
+	await installFakeBridge(page);
 	await page.goto("/#/projects/ao-demo");
-	await expect(page.getByRole("button", { name: "New terminal" })).toBeVisible();
 
-	await page.getByRole("button", { name: "New terminal" }).click();
+	await emitFakeNewShellTerminalShortcut(page);
 
 	await expect(page).toHaveURL(/#\/terminals$/);
 	await expect(page.getByRole("button", { name: /^Close terminal / })).not.toHaveCount(0);

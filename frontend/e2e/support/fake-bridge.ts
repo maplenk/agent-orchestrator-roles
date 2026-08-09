@@ -35,6 +35,26 @@ export type FakeBridgeOptions = {
 	daemonPort?: number;
 };
 
+export async function emitFakeNewShellTerminalShortcut(page: Page): Promise<void> {
+	await page.waitForFunction(
+		() =>
+			(
+				window as unknown as {
+					__aoFakeBridge?: { hasNewShellTerminalShortcutListener: () => boolean };
+				}
+			).__aoFakeBridge?.hasNewShellTerminalShortcutListener() === true,
+	);
+	await page.evaluate(() => {
+		const controller = (
+			window as unknown as {
+				__aoFakeBridge?: { emitNewShellTerminalShortcut: () => void };
+			}
+		).__aoFakeBridge;
+		if (!controller) throw new Error("Fake AO bridge is not installed");
+		controller.emitNewShellTerminalShortcut();
+	});
+}
+
 export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}): Promise<void> {
 	const version = opts.version ?? "9.9.9-test";
 	const daemonState = opts.daemonState ?? "ready";
@@ -43,6 +63,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 	await page.addInitScript(
 		({ version, daemonState, daemonPort }) => {
 			const unsubscribe = () => () => undefined;
+			const newShellTerminalListeners = new Set<() => void>();
 			const status: DaemonStatus =
 				daemonState === "ready" ? { state: "ready", port: daemonPort } : { state: daemonState };
 			const navState = (viewId: string) => ({
@@ -66,7 +87,12 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					checkAncestorRepo: async () => undefined,
 					onNewSessionShortcut: unsubscribe,
 					onKeyboardShortcutsHelp: unsubscribe,
-					onNewShellTerminalShortcut: unsubscribe,
+					onNewShellTerminalShortcut: (listener: () => void) => {
+						newShellTerminalListeners.add(listener);
+						return () => {
+							newShellTerminalListeners.delete(listener);
+						};
+					},
 					onCloseShellTerminalShortcut: unsubscribe,
 					setCloseShellTerminalShortcutEnabled: () => undefined,
 					onOpenSettingsShortcut: unsubscribe,
@@ -184,6 +210,19 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 				},
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;
+			(
+				window as unknown as {
+					__aoFakeBridge: {
+						emitNewShellTerminalShortcut: () => void;
+						hasNewShellTerminalShortcutListener: () => boolean;
+					};
+				}
+			).__aoFakeBridge = {
+				emitNewShellTerminalShortcut: () => {
+					for (const listener of newShellTerminalListeners) listener();
+				},
+				hasNewShellTerminalShortcutListener: () => newShellTerminalListeners.size > 0,
+			};
 		},
 		{ version, daemonState, daemonPort },
 	);
