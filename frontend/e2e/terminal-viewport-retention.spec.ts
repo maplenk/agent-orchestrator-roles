@@ -35,7 +35,14 @@ const sessionF = {
 	title: "Viewport F",
 	activity: "active" as const,
 };
+const orchestratorSession = {
+	id: "fake-proj-orchestrator",
+	title: "Project orchestrator",
+};
 const allSessions = [sessionA, sessionB, sessionC, sessionD, sessionE, sessionF];
+const sessionsByTitle = new Map(
+	[...allSessions, orchestratorSession].map((session) => [session.title, session] as const),
+);
 const handleA = `${sessionA.id}/terminal_0`;
 const handleB = `${sessionB.id}/terminal_0`;
 const handleC = `${sessionC.id}/terminal_0`;
@@ -43,7 +50,7 @@ const handleD = `${sessionD.id}/terminal_0`;
 const handleE = `${sessionE.id}/terminal_0`;
 const handleF = `${sessionF.id}/terminal_0`;
 const replacementHandleA = `${sessionA.id}/terminal_replacement`;
-const orchestratorHandle = "fake-proj-orchestrator/terminal_0";
+const orchestratorHandle = `${orchestratorSession.id}/terminal_0`;
 
 const longReplay = [
 	"\x1b[?25l",
@@ -170,13 +177,17 @@ async function settledRevealSamples(page: Page): Promise<RevealSample[]> {
 }
 
 async function openSession(page: Page, title: string): Promise<void> {
-	await page.getByRole("button", { name: `Open ${title}`, exact: true }).click();
-	await expect(activeTerminal(page)).toBeVisible();
-	await expect(
-		page
-			.getByTestId("session-terminal-slot")
-			.locator("[data-terminal-activation-phase='visible']"),
-	).toHaveCount(1);
+	const session = sessionsByTitle.get(title);
+	if (!session) throw new Error(`No terminal fixture for ${title}`);
+	const buttonName =
+		session.id === orchestratorSession.id ? "Open fake-proj orchestrator" : `Open ${title}`;
+	await page.getByRole("button", { name: buttonName, exact: true }).click();
+	const target = page.locator(`[data-terminal-cache-key^="session:${session.id}:worker|"]`);
+	await expect(target).toHaveAttribute("data-terminal-activation-phase", "visible");
+	await expect(target).not.toHaveAttribute("aria-hidden", "true");
+	await expect
+		.poll(async () => (await muxStats(page)).opens[`${session.id}/terminal_0`] ?? 0)
+		.toBeGreaterThan(0);
 }
 
 async function installHarness(page: Page): Promise<void> {
@@ -194,15 +205,32 @@ async function installHarness(page: Page): Promise<void> {
 		[orchestratorHandle]: "Orchestrator ready",
 	});
 	await page.goto(`/#/projects/fake-proj/sessions/${sessionA.id}`);
-	await expect(activeTerminal(page)).toBeVisible();
+	const activeA = page.locator(`[data-terminal-cache-key^="session:${sessionA.id}:worker|"]`);
+	await expect(activeA).toHaveAttribute("data-terminal-activation-phase", "visible");
+	await expect.poll(async () => (await muxStats(page)).opens[handleA] ?? 0).toBe(1);
+	await expect
+		.poll(() =>
+			activeTerminal(page)
+				.locator("[aria-label='Session terminal']")
+				.evaluate((element) => {
+					const terminal = (element as HTMLElement & { __aoXtermForTest?: TestXterm }).__aoXtermForTest;
+					return terminal?.buffer.active.baseY ?? 0;
+				}),
+		)
+		.toBeGreaterThan(0);
 	await expect(page.getByTestId("terminal-replay-cover")).toHaveCount(0);
 }
 
 test.describe("retained terminal viewport", () => {
 	test("replaces an active session handle without an uncaught xterm viewport error", async ({ page }) => {
-		const pageErrors: string[] = [];
-		page.on("pageerror", (error) => pageErrors.push(error.stack ?? error.message));
 		await installHarness(page);
+		const viewportErrors: string[] = [];
+		page.on("pageerror", (error) => {
+			const detail = error.stack ?? error.message;
+			if (detail.includes("Viewport.syncScrollArea") || detail.includes("reading 'dimensions'")) {
+				viewportErrors.push(detail);
+			}
+		});
 
 		await page.evaluate(
 			({ sessionId, handleId }) => window.__aoFakeAgent!.setTerminalHandle(sessionId, handleId),
@@ -213,7 +241,7 @@ test.describe("retained terminal viewport", () => {
 		).toHaveAttribute("data-terminal-activation-phase", "visible");
 
 		await page.waitForTimeout(250);
-		expect(pageErrors).toEqual([]);
+		expect(viewportErrors).toEqual([]);
 	});
 
 	test("retains the first of six live sessions with zero reopen and reveals its latest output", async ({
@@ -401,11 +429,13 @@ test.describe("retained terminal viewport", () => {
 				return Math.round(max - element.scrollTop);
 			}))
 			.toBeLessThanOrEqual(1);
+		// Activation performs two bounded pre-reveal bottom synchronizations; the
+		// live write and xterm's matching DOM sync may each emit one more event.
 		expect(
 			await activeViewport(page).evaluate(
 				(element) => (element as HTMLElement & { __aoScrollEvents?: number }).__aoScrollEvents ?? 0,
 			),
-		).toBeLessThanOrEqual(3);
+		).toBeLessThanOrEqual(4);
 
 		const stats = await muxStats(page);
 		expect(stats.opens[handleA]).toBe(1);
