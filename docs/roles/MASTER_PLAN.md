@@ -2,8 +2,10 @@
 
 **Status:** canonical Target B design; implementation is active and tracked in
 [`REMAINING_PLAN.md`](REMAINING_PLAN.md). Desktop role-map editing is complete;
-opt-in automatic failover is the next product slice. The current MVP boundary
-and integration acceptance are tracked in [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
+the dormant host engine for opt-in automatic failover has landed, but automatic
+failover is still only partial and is not a product-active capability. The
+current MVP boundary and integration acceptance are tracked in
+[`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md).
 If this long-range design conflicts with the final MVP boundary or current
 execution state, `MVP_FINAL_SPEC.md` and then `REMAINING_PLAN.md` control.
 **Base:** fork **Agent Orchestrator (AO)** — Electron UI + Go daemon + worktrees
@@ -68,8 +70,25 @@ at `11d12414`. The desktop role-map editor is complete across `54cdbdd8` and
 It uses a role-map-only compare-and-swap mutation, sends the loaded role-map
 SHA with full-config mutations, preserves deterministic ordered failover
 targets, and rejects duplicate current or earlier effective targets. It added
-no migration and promoted no capability cell. Opt-in automatic failover is
-next.
+no migration and promoted no capability cell. The dormant automatic-failover
+host engine then landed at `1c97c55e`: it reuses the accepted Continue saga for
+one capability-gated action, converges pause-before-attempt and
+requested/post-stop/acked crash windows on the same durable generation, keeps
+manual as the default, rejects unpromoted automatic configuration, and gives
+legacy desktop maps an explicit conversion to manual. See
+[`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
+This slice added no migration or public API, changed no host prompt contract,
+and promoted no capability cell; `limit_detection_supported` remains false for
+every harness, Claude `read_only_enforced` remains false, and **9009+** remains
+the next fork migration.
+
+**Next required action:** capture a real structured positive detector fixture
+that proves a stable incident identity, wire its reviewed production ingress,
+then land capability promotion in a separate final change only after review and
+positive live acceptance. Until all three gates close, the host engine remains
+dormant and checklist item 22 remains partial. Claude technical read-only,
+successor-orchestrator/live-worker rebinding, and Pi/Muse switching remain
+clearly optional later work; none gates the required Target B detector close-out.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -375,7 +394,7 @@ Zai and Kimi validated **separately** on Pi.
 | **2A** | Worker switch saga Claude↔Codex + fresh-conversation + lifecycle ledger | 5–8 d |
 | **2B** | Orchestrator ownership transfer | 3–5 d |
 | **3A** | Limit detect + durable pause + zero re-nudge | 4–6 d |
-| **3B** | Manual continue (complete); opt-in auto-failover (next) | 3–5 d |
+| **3B** | Manual continue (complete); dormant opt-in auto-failover host engine landed, detector/promotion/live acceptance remain | 3–5 d |
 | **Integration** | UI, dogfood, crash, multi-platform | 3–5 d |
 
 **Total: ~4–6 weeks**
@@ -418,8 +437,7 @@ Zai and Kimi validated **separately** on Pi.
     gated same-generation recovery, replacement recovery, and final live
     acceptance are complete
 14. [~] Limit pause — durable pause, API/CLI, desktop UX and detector boundary landed; no vendor detector is promoted
-15. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
-    the next Target B product slice
+15. [x] Manual Continue implemented and live-accepted
 16. [~] Dogfood against all DoD invariants — the final MVP worker/orchestrator
     matrix is promoted at `322f9c18`; vendor limit detection remains outside
     this MVP and unpromoted. The repository-wide gate is still open on the
@@ -444,7 +462,16 @@ Zai and Kimi validated **separately** on Pi.
     `c7c1f565`). See
     [`TARGET_B_ROLE_MAP_EDITOR_20260809.md`](TARGET_B_ROLE_MAP_EDITOR_20260809.md).
     This slice added no migration and promoted no capability cell
-22. [ ] Implement opt-in automatic failover; manual remains the default
+22. [~] Implement opt-in automatic failover; manual remains the default. The
+    dormant one-shot host engine, exact-incident crash convergence, fail-closed
+    automatic-config rejection, and explicit legacy-map conversion landed at
+    `1c97c55e`; see
+    [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
+    Product completion still requires a real structured positive detector
+    fixture with stable incident identity, production ingress, and a separate
+    reviewed capability-promotion commit plus positive live acceptance. This
+    implementation slice added no migration/API/prompt change or capability
+    promotion, and **9009+** remains the next fork migration
 
 ---
 

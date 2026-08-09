@@ -12,6 +12,7 @@
 **Target B vendor-limit fixture research:** `11d12414`
 **Target B atomic role-map CAS API:** `54cdbdd8`
 **Target B desktop role-map editor:** `c7c1f565`
+**Target B dormant automatic-failover engine:** `1c97c55e`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
@@ -29,6 +30,14 @@ checks, typecheck, API drift, and the authoritative full frontend gate also pass
 The desktop role-map editor is implemented at `c7c1f565` on the atomic role-map
 CAS boundary from `54cdbdd8`, independently reviewed, fully gated, and accepted
 in the real native Forge Electron app; see `TARGET_B_ROLE_MAP_EDITOR_20260809.md`.
+The one-shot automatic-failover engine, fail-closed config gate, exact-incident
+concurrency fence, and boot recovery are implemented and independently reviewed
+at `1c97c55e`; see
+[`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
+This is dormant infrastructure, not an operational vendor feature: every
+production `limit_detection_supported` cell is false, the detector registry is
+empty, `limits.Router` has no production caller, and no real positive detector
+with a stable incident key has been accepted.
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -50,7 +59,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Phase 3A pause core and operator surface | **Landed and accepted.** Durable pause, ledger-before-pin, zero automatic restart/send, pause/resume API+CLI, ownership CAS and pause-aware lifecycle are present. |
 | Phase 3A desktop | **Landed and live-dogfooded.** The inspector distinguishes paused-live from paused-dead and Resume from Restart agent; the strict composer sends role-only requests. The desktop role-map editor is implemented, independently reviewed, fully gated, and accepted in the real native Forge Electron app at `c7c1f565`. |
 | Phase 3A-2b detector boundary | **Landed; fixture research captured; no harness promoted.** `internal/limits` remains the only production ingress and the detector registry is empty. Claude has real structured 429 refusal projections, but those records expose only a per-request ID—not a stable quota-window occurrence key—so no safe durable `SourceKey` is proven. Codex has real structured quota-state snapshots but no reached/refused frame. `limit_detection_supported=false` remains universal. |
-| Phase 3B | **Manual Continue implemented, reviewed, and live-accepted.** All 12 final records passed on `166e9e63`; automatic failover is post-MVP. |
+| Phase 3B | **Manual Continue remains implemented, reviewed, and live-accepted; dormant automatic engine implemented and reviewed.** All 12 final manual records passed on `166e9e63`. `1c97c55e` reuses that exact transaction for one opt-in automatic attempt and same-generation recovery without changing manual Continue or pause/switch ownership. Full product automatic failover remains partial because no production detector/caller/capability exists. |
 | Installed strict role pipeline | **Accepted.** The replaced real app completed Claude orchestrator → Grok implementor → read-only Codex verifier, native Browser play, and final orchestration. `f4b28012` then proved terminal-only verifier retrieval with no host nudge. `762ae160` additionally upgraded an existing unconfigured repo in place and completed Claude→Codex→Claude from the native Switch menu. See `ROLE_PIPELINE_LIVE_TEST_20260808_FINAL.md` and `ROLE_PIPELINE_LIVE_TEST_20260809.md`. |
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
 | Target B durability hardening A | **Implemented, independently reviewed, gated, and isolated-dogfooded at `8bb1e3af`.** Malformed, empty, null, unknown-field, and forward-role-schema project config is contained to one degraded row; other projects remain listable; raw bytes are preserved; all row mutations and dev import are fenced. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
@@ -58,6 +67,7 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Target B adapter test hygiene | **Implemented, independently reviewed, and gated at `66d65e4e`.** Fake lifecycle cadence is asserted structurally; Kilocode interactive-shell avoidance and CLI parsing are tested independently; OpenCode CLI classification is a pure, behavior-preserving helper with a load-bearing command-error case. Production three-second deadlines are unchanged. See `TARGET_B_TEST_HYGIENE_20260809.md`. |
 | Target B vendor-limit fixtures | **Captured, sanitized, independently reviewed, and gated at `11d12414`; research-only.** Two real Claude Code 2.1.224 structured 429 refusal projections and two real Codex 0.146/0.147 quota frames are adapter-local, byte-bound, and replayed by test-only classifiers/normalizers. Claude proves refusal but not stable incident identity; Codex proves structured state but not refusal. See `TARGET_B_VENDOR_LIMIT_FIXTURES_20260809.md`. |
 | Target B desktop role-map editor | **Implemented, independently reviewed, fully gated, and native-Electron accepted at `54cdbdd8` + `c7c1f565`.** Healthy project reads carry a required `roleMapSha256`. The role-only atomic patch compares that revision while preserving the latest unrelated config, and full-settings saves use the inverse CAS so a stale whole-config writer cannot restore an older role map. Degraded projects remain identity-only and read-only in the desktop. The editor covers strict mode, orchestrator role, role bindings/policy, and failover ladders without a migration or capability promotion. See `TARGET_B_ROLE_MAP_EDITOR_20260809.md`. |
+| Target B automatic failover | **Dormant engine implemented and independently reviewed at `1c97c55e`; full product remains partial.** A structured limit is durably paused before the manager makes one exact-incident automatic decision; the accepted Continue transaction owns the attempt ledger, target selection, switch generation, failure accounting, pin clear, and boot convergence. Duplicate delivery cannot spend a second rung, and boot recovery reuses the same generation only after the board-wide safety gate. Config save fails closed while limit detection is unpromoted; legacy automatic maps must be explicitly **Convert to manual** before desktop save. No migration, API, prompt, or capability cell changed, and manual Continue/ownership semantics remain intact. The registry is empty, every production `limit_detection_supported` cell is false, `limits.Router` has no production caller, and no real positive detector is accepted, so this is not operational vendor automatic failover. See [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md). |
 | CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. Fixture-focused normal and race checks each pass 302/302, and the ordinary full backend run passes 4,737 tests across 132 packages on its first run. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
@@ -68,8 +78,12 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 **Next engineering actions:** none gate the MVP. Both Target B durability
 hardening slices and the isolated adapter test-hygiene slice are complete.
 Vendor fixture capture is complete as a non-promoting research slice, and the
-desktop role-map editor is implemented and native-Electron accepted. Next is
-opt-in automatic failover.
+desktop role-map editor is implemented and native-Electron accepted. The
+dormant automatic engine is also implemented and reviewed, but the Master Plan's
+full automatic product trigger remains partial until a real positive detector,
+production Router caller, and separate capability promotion are accepted. The
+next optional engineering slice is Claude technical read-only; successor-
+orchestrator/live-worker rebinding and Pi/Muse switching remain later options.
 Do not rewrite or rerun the accepted MVP matrices merely to replace historical
 evidence.
 
@@ -260,14 +274,14 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 ---
 
-### Phase 3B — Manual Continue implemented; automatic failover deferred
+### Phase 3B — Manual Continue accepted; dormant automatic engine implemented
 
 | Task | Detail |
 |------|--------|
 | Manual continue on next ladder rung | **Implemented, reviewed, and live-accepted.** Default mode is manual; all 12 final records passed on `166e9e63` |
 | Failover preserves `role_id` | **Implemented.** Only harness/model/generation and rotated credential change |
 | `maxFailoversPerIncident` | **Implemented** as the frozen host bound; exhaustion stays paused |
-| `failover.mode=automatic` | **Deferred post-MVP.** No scheduler, retry loop, timer, or automatic trigger ships |
+| `failover.mode=automatic` | **Dormant engine implemented and reviewed at `1c97c55e`; full product partial.** It performs at most one immediate, exact-incident handoff through the accepted Continue transaction and recovers only the same durable generation. It adds no scheduler, retry loop, timer, or automatic resume. Config save refuses automatic mode while production limit detection is unpromoted; legacy stored automatic maps require an explicit desktop **Convert to manual** before save. With every production capability false, an empty detector registry, no production `limits.Router` caller, and no accepted real positive detector, no vendor can trigger it in production. See [`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md). |
 
 ---
 
@@ -320,9 +334,11 @@ Frontend classification ──► deterministic pre-MVP failure (0/20 isolated; 
 Frontend fix @ 6473b134 ──► 20/20 exact + 28/28 file PASS; negative mutation retained
 Vendor fixture research ──► DONE, Claude positive / Codex negative, no promotion
 Desktop role-map editor ──► IMPLEMENTED + REVIEWED + NATIVE-ELECTRON ACCEPTED
-Now ──► opt-in automatic failover
+Dormant automatic engine @ 1c97c55e ──► IMPLEMENTED + REVIEWED; PRODUCT TRIGGER PARTIAL
+Now ──► Claude technical RO / Phase 1-F (optional, explicit read-only roles only)
      ║
-     ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
+     ╠═ later: successor-orchestrator / live-worker rebinding
+     ╚═ later: Pi / Muse switching
 ```
 
 ---
@@ -349,9 +365,15 @@ Already satisfied (re-verify on regressions):
 
 Still open or partial:
 
-7. **Partial:** durable pause and zero automatic send/restart are enforced; no harness yet produces a promoted structured limit event
+7. **Partial:** durable pause and zero unowned automatic send/restart are
+   enforced, and the opt-in one-shot engine plus exact-generation recovery are
+   implemented at `1c97c55e`; no harness yet produces a promoted structured
+   limit event, the registry is empty, and `limits.Router` has no production
+   caller
 8. **Satisfied for the final MVP:** failover preserves `role_id`, respects the
-   incident bound, and passed the promoted live matrix
+   incident bound, and passed the promoted live matrix. **Partial for the full
+   Master Plan:** dormant automatic execution is implemented, but the accepted
+   positive detector/product trigger and capability promotion do not exist
 
 ---
 
@@ -377,8 +399,12 @@ Still open or partial:
     recovery are implemented and live-accepted.
     Successor-session handoff and live-worker rebind remain deferred
 17. [~] Limit pause — **backend/API and the desktop surface landed; no harness detector.** Durable pin + boot fencing (3A-1), operator pause/resume endpoints (3A-2a), the structured detection seam with every harness unsupported (3A-2b), and the renderer paused panel + strict delegation composer (3A-2 UI, live-dogfooded in `PHASE3A2_UI_DOGFOOD.md`). Real Claude/Codex research fixtures are captured at `11d12414`, but neither proves all inputs for a stable production incident key, so capabilities remain false. The desktop now authors and atomically saves the project role map at `54cdbdd8` + `c7c1f565`; installed-app evidence is in `TARGET_B_ROLE_MAP_EDITOR_20260809.md`
-18. [x] Manual Continue implemented and live-accepted. Opt-in auto-failover is
-    post-MVP
+18. [~] Manual Continue is implemented and live-accepted. The dormant opt-in
+    automatic engine, fail-closed config/runtime gates, one-attempt incident
+    accounting, and boot convergence are implemented and reviewed at
+    `1c97c55e`, with no migration/API/prompt/capability promotion. Operational
+    automatic failover remains partial until a real positive detector,
+    production Router caller, and separate capability promotion are accepted
 19. [x] Dogfood against switch DoD — manager + live evidence; Claude/Codex `switch_supported` promoted
 
 ---
@@ -404,4 +430,16 @@ containment is complete at `8bb1e3af`, mixed-history migration repair at
 fixture research at `11d12414`. The atomic role-map CAS API at `54cdbdd8` and
 desktop editor at `c7c1f565` are implemented, independently reviewed, fully
 gated, and accepted in the installed native Electron app without a migration or
-capability promotion. The immediate Target B slice is opt-in automatic failover.
+capability promotion. The dormant automatic engine at `1c97c55e` is also
+implemented and independently reviewed: it reuses manual Continue, preserves
+ownership, and adds no migration, API, prompt, or capability promotion. It does
+not complete the Master Plan's product trigger while the detector registry is
+empty, every production `limit_detection_supported` cell is false,
+`limits.Router` has no production caller, and no real positive detector is
+accepted. See
+[`TARGET_B_AUTOMATIC_FAILOVER_20260809.md`](TARGET_B_AUTOMATIC_FAILOVER_20260809.md).
+
+The next optional engineering slice is Claude technical read-only for explicit
+read-only roles. Successor-orchestrator/live-worker rebinding and Pi/Muse
+switching remain later optional slices. No fork migration is needed for the
+automatic engine; **9009+ remains the next available fork migration number**.
