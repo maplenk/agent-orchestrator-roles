@@ -77,3 +77,27 @@ func TestCanonicalAgentSwitchAdversarialOrchestratorNeverEntersWorkerEngine(t *t
 		t.Fatalf("orchestrator refusal mutated session:\nbefore: %+v\nafter:  %+v", before, got)
 	}
 }
+
+func TestRecoverAgentSwitchDelegatesExactFenceAndMapsTypedError(t *testing.T) {
+	manager := &fakeCommander{
+		recoverResult: domain.AgentSwitch{ID: "switch-7", SessionID: "mer-1", State: domain.AgentSwitchFailed},
+	}
+	service := NewWithDeps(Deps{Manager: manager, Store: newFakeStore()})
+
+	got, err := service.RecoverAgentSwitch(context.Background(), "mer-1", "switch-7")
+	if err != nil {
+		t.Fatalf("RecoverAgentSwitch: %v", err)
+	}
+	if got.ID != "switch-7" || manager.recoverSession != "mer-1" || manager.recoverSwitch != "switch-7" {
+		t.Fatalf("recovery = %+v fence=%s/%s", got, manager.recoverSession, manager.recoverSwitch)
+	}
+
+	manager.recoverErr = &sessionmanager.AgentSwitchRecoveryError{
+		SessionID: "mer-1", SwitchID: "switch-7", State: domain.AgentSwitchStartingTarget,
+	}
+	_, err = service.RecoverAgentSwitch(context.Background(), "mer-1", "switch-7")
+	var apiError *apierr.Error
+	if !errors.As(err, &apiError) || apiError.Code != "AGENT_SWITCH_RECOVERY_REQUIRED" {
+		t.Fatalf("recovery error = %v, want AGENT_SWITCH_RECOVERY_REQUIRED", err)
+	}
+}

@@ -1057,6 +1057,15 @@ func toAPIError(err error) error {
 	case errors.Is(err, sessionmanager.ErrAlreadyUsingHarness):
 		return apierr.Conflict("ALREADY_USING_HARNESS",
 			"The session is already using the requested harness", nil)
+	case errors.Is(err, sessionmanager.ErrAgentSwitchInitiationDisabled):
+		return apierr.Conflict("AGENT_SWITCH_INITIATION_DISABLED",
+			"New agent switches are disabled while recovery of existing switches remains available", nil)
+	case errors.Is(err, sessionmanager.ErrActiveAgentSwitchRequiresEngine):
+		return apierr.Conflict("ACTIVE_AGENT_SWITCH_REQUIRES_ENGINE",
+			"This build cannot recover the session's active agent switch", nil)
+	case errors.Is(err, sessionmanager.ErrSwitchUnavailable):
+		return apierr.Conflict("AGENT_SWITCH_UNAVAILABLE",
+			"This build does not provide the agent-switch engine", nil)
 	case errors.Is(err, sessionmanager.ErrSwitchNotFound):
 		return apierr.NotFound("AGENT_SWITCH_NOT_FOUND", "Unknown agent switch")
 	case errors.Is(err, sessionmanager.ErrStaleHandoff):

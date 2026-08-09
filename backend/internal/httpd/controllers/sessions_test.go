@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -60,7 +61,13 @@ type fakeSessionService struct {
 	outputCalls      int
 	outputLines      int
 	agentSwitches    map[domain.AgentSwitchID]domain.AgentSwitch
+	switchOptions    sessionsvc.AgentSwitchOptions
+	switchOptionsErr error
+	switchOptionIDs  []domain.SessionID
 	switchConfig     sessionsvc.SwitchAgentInput
+	recoveryErr      error
+	recoverySession  domain.SessionID
+	recoverySwitch   domain.AgentSwitchID
 	handoff          json.RawMessage
 	handoffSource    domain.AgentGenerationID
 }
@@ -323,6 +330,7 @@ func (f *fakeSessionService) SwitchAgent(_ context.Context, id domain.SessionID,
 	record := domain.AgentSwitch{
 		ID: "switch-1", SessionID: id, IdempotencyKey: "private-retry-key", RequestFingerprint: "v1:private-fingerprint",
 		FromHarness: domain.HarnessClaudeCode, TargetHarness: cfg.TargetHarness,
+		TargetModel:            cfg.TargetModel,
 		TargetNativeSessionRef: &targetRef,
 		TargetStartMode:        domain.AgentSwitchTargetStartFresh, State: domain.AgentSwitchCompleted,
 		AgentHandoffStatus:      domain.AgentHandoffReceived,
@@ -351,6 +359,34 @@ func (f *fakeSessionService) ListAgentSwitches(_ context.Context, id domain.Sess
 		}
 	}
 	return out, nil
+}
+
+func (f *fakeSessionService) AgentSwitchOptions(_ context.Context, id domain.SessionID) (sessionsvc.AgentSwitchOptions, error) {
+	f.switchOptionIDs = append(f.switchOptionIDs, id)
+	if f.switchOptionsErr != nil {
+		return sessionsvc.AgentSwitchOptions{}, f.switchOptionsErr
+	}
+	return f.switchOptions, nil
+}
+
+func (f *fakeSessionService) RecoverAgentSwitch(
+	_ context.Context,
+	id domain.SessionID,
+	switchID domain.AgentSwitchID,
+) (domain.AgentSwitch, error) {
+	f.recoverySession = id
+	f.recoverySwitch = switchID
+	if f.recoveryErr != nil {
+		return domain.AgentSwitch{}, f.recoveryErr
+	}
+	record, ok := f.agentSwitches[switchID]
+	if !ok || record.SessionID != id {
+		return domain.AgentSwitch{}, apierr.NotFound("AGENT_SWITCH_NOT_FOUND", "Unknown agent switch")
+	}
+	record.State = domain.AgentSwitchFailed
+	record.ErrorCode = domain.AgentSwitchErrorDeliveryUnconfirmed
+	f.agentSwitches[switchID] = record
+	return record, nil
 }
 
 func (f *fakeSessionService) SubmitAgentHandoff(
@@ -555,8 +591,9 @@ func TestSessionsAPI_AgentSwitchLifecycle(t *testing.T) {
 	svc := newFakeSessionService()
 	srv := newSessionTestServer(t, svc)
 
-	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/switch-agent", `{
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches", `{
 		"targetHarness":"codex",
+		"targetModel":"o3",
 		"note":" continue the review ",
 		"idempotencyKey":"retry-1"
 	}`)
@@ -566,7 +603,7 @@ func TestSessionsAPI_AgentSwitchLifecycle(t *testing.T) {
 	assertAgentSwitchResponseRedacted(t, body)
 	var switched controllers.AgentSwitchResponse
 	mustJSON(t, body, &switched)
-	if switched.Switch.ID != "switch-1" || switched.Switch.TargetHarness != domain.HarnessCodex {
+	if switched.Switch.ID != "switch-1" || switched.Switch.TargetHarness != domain.HarnessCodex || switched.Switch.TargetModel != "o3" {
 		t.Fatalf("switch response = %+v", switched.Switch)
 	}
 	if switched.Switch.ErrorCode != domain.AgentSwitchErrorTargetStartUnconfirmed {
@@ -578,7 +615,7 @@ func TestSessionsAPI_AgentSwitchLifecycle(t *testing.T) {
 	if !switched.Switch.SemanticHandoffIncluded {
 		t.Fatal("semantic handoff inclusion fact was not projected")
 	}
-	if svc.switchConfig.Note != "continue the review" || svc.switchConfig.IdempotencyKey != "retry-1" {
+	if svc.switchConfig.TargetModel != "o3" || svc.switchConfig.Note != "continue the review" || svc.switchConfig.IdempotencyKey != "retry-1" {
 		t.Fatalf("switch config = %+v", svc.switchConfig)
 	}
 
@@ -614,6 +651,96 @@ func TestSessionsAPI_AgentSwitchLifecycle(t *testing.T) {
 
 }
 
+func TestSessionsAPI_SwitchAgentCompatibilityAlias(t *testing.T) {
+	svc := newFakeSessionService()
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/switch-agent", `{
+		"targetHarness":"codex",
+		"note":"legacy client",
+		"idempotencyKey":"legacy-retry-1"
+	}`)
+	if status != http.StatusOK {
+		t.Fatalf("compatibility switch = %d, want 200; body=%s", status, body)
+	}
+	if svc.switchConfig.TargetHarness != domain.HarnessCodex || svc.switchConfig.Note != "legacy client" || svc.switchConfig.IdempotencyKey != "legacy-retry-1" {
+		t.Fatalf("compatibility config = %+v", svc.switchConfig)
+	}
+	assertAgentSwitchResponseRedacted(t, body)
+}
+
+func TestSessionsAPI_AgentSwitchOptionsAreDaemonAuthoritative(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.switchOptions = sessionsvc.AgentSwitchOptions{
+		Available: true,
+		RoleID:    "implementor",
+		Current:   domain.FailoverTarget{Harness: domain.HarnessClaudeCode, Model: "sonnet"},
+		Targets: []domain.FailoverTarget{
+			{Harness: domain.HarnessCodex, Model: "o3"},
+			{Harness: domain.HarnessCodex, Model: "o4-mini"},
+		},
+	}
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1/agent-switch-options", "")
+	if status != http.StatusOK {
+		t.Fatalf("options = %d, want 200; body=%s", status, body)
+	}
+	var got controllers.AgentSwitchOptionsResponse
+	mustJSON(t, body, &got)
+	if !got.Available || got.RoleID != "implementor" || len(got.Targets) != 2 {
+		t.Fatalf("options = %+v", got)
+	}
+	if got.Current.Harness != domain.HarnessClaudeCode || got.Targets[0].Harness != domain.HarnessCodex || got.Targets[0].Model != "o3" {
+		t.Fatalf("option targets = current %+v targets %+v", got.Current, got.Targets)
+	}
+	if !reflect.DeepEqual(svc.switchOptionIDs, []domain.SessionID{"ao-1"}) {
+		t.Fatalf("options session ids = %+v", svc.switchOptionIDs)
+	}
+}
+
+func TestSessionsAPI_AgentSwitchOptionsFailClosed(t *testing.T) {
+	svc := newFakeSessionService()
+	svc.switchOptionsErr = apierr.Internal("AGENT_SWITCH_OPTIONS_UNAVAILABLE", "policy read failed")
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodGet, "/api/v1/sessions/ao-1/agent-switch-options", "")
+	if status != http.StatusInternalServerError || !strings.Contains(string(body), "AGENT_SWITCH_OPTIONS_UNAVAILABLE") {
+		t.Fatalf("options failure = %d body=%s", status, body)
+	}
+}
+
+func TestSessionsAPI_RecoverAgentSwitchIsExactAndDoesNotRetryDelivery(t *testing.T) {
+	svc := newFakeSessionService()
+	now := time.Now().UTC()
+	svc.agentSwitches["switch-recovery"] = domain.AgentSwitch{
+		ID: "switch-recovery", SessionID: "ao-1", FromHarness: domain.HarnessClaudeCode,
+		TargetHarness: domain.HarnessCodex, State: domain.AgentSwitchDelivering,
+		AgentHandoffStatus: domain.AgentHandoffReceived, RequestedAt: now, UpdatedAt: now,
+	}
+	srv := newSessionTestServer(t, svc)
+
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches/switch-recovery/recover", "")
+	if status != http.StatusOK {
+		t.Fatalf("recover = %d, want 200; body=%s", status, body)
+	}
+	if svc.recoverySession != "ao-1" || svc.recoverySwitch != "switch-recovery" {
+		t.Fatalf("recovery fence = session %q switch %q", svc.recoverySession, svc.recoverySwitch)
+	}
+	var got controllers.AgentSwitchResponse
+	mustJSON(t, body, &got)
+	if got.Switch.State != domain.AgentSwitchFailed || got.Switch.ErrorCode != domain.AgentSwitchErrorDeliveryUnconfirmed {
+		t.Fatalf("recovery result = state %q code %q", got.Switch.State, got.Switch.ErrorCode)
+	}
+	assertAgentSwitchResponseRedacted(t, body)
+
+	svc.recoveryErr = apierr.Conflict("AGENT_SWITCH_RECOVERY_REQUIRED", "runtime ownership remains ambiguous", nil)
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches/switch-recovery/recover", "")
+	if status != http.StatusConflict || !strings.Contains(string(body), "AGENT_SWITCH_RECOVERY_REQUIRED") {
+		t.Fatalf("unresolved recovery = %d body=%s", status, body)
+	}
+}
+
 func assertAgentSwitchResponseRedacted(t *testing.T, body []byte) {
 	t.Helper()
 	privateFields := []string{
@@ -628,6 +755,8 @@ func assertAgentSwitchResponseRedacted(t *testing.T, body []byte) {
 		"targetGenerationId",
 		"targetRuntimeHandleId",
 		"targetAcknowledgedAt",
+		"roleSnapshot",
+		"failoverAttemptId",
 	}
 	for _, field := range privateFields {
 		if strings.Contains(string(body), `"`+field+`"`) {
@@ -663,8 +792,10 @@ func TestSessionsAPI_AgentSwitchValidationAndErrors(t *testing.T) {
 		body     string
 		wantCode string
 	}{
-		{name: "target required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/switch-agent", body: `{}`, wantCode: "TARGET_HARNESS_REQUIRED"},
-		{name: "note bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/switch-agent", body: `{"targetHarness":"codex","note":"` + strings.Repeat("x", 4097) + `"}`, wantCode: "SWITCH_NOTE_TOO_LONG"},
+		{name: "target required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches", body: `{}`, wantCode: "TARGET_HARNESS_REQUIRED"},
+		{name: "note bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches", body: `{"targetHarness":"codex","note":"` + strings.Repeat("x", 4097) + `"}`, wantCode: "SWITCH_NOTE_TOO_LONG"},
+		{name: "target model bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches", body: `{"targetHarness":"codex","targetModel":"` + strings.Repeat("x", 257) + `"}`, wantCode: "TARGET_MODEL_TOO_LONG"},
+		{name: "idempotency key bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches", body: `{"targetHarness":"codex","idempotencyKey":"` + strings.Repeat("x", 129) + `"}`, wantCode: "IDEMPOTENCY_KEY_TOO_LONG"},
 		{name: "source generation required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", body: `{"handoff":{}}`, wantCode: "SOURCE_GENERATION_REQUIRED"},
 		{name: "handoff required", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", body: `{"sourceGenerationId":"generation-7"}`, wantCode: "HANDOFF_REQUIRED"},
 		{name: "handoff bounded", method: http.MethodPost, path: "/api/v1/sessions/ao-1/agent-switches/switch-1/handoff", body: `{"sourceGenerationId":"generation-7","handoff":{"summary":"` + strings.Repeat("x", 65537) + `"}}`, wantCode: "HANDOFF_TOO_LARGE"},
@@ -691,9 +822,15 @@ func TestSessionsAPI_AgentSwitchValidationAndErrors(t *testing.T) {
 	svc := newFakeSessionService()
 	svc.switchErr = apierr.Conflict("AGENT_SWITCH_IN_PROGRESS", "switch in progress", nil)
 	srv := newSessionTestServer(t, svc)
-	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/switch-agent", `{"targetHarness":"codex"}`)
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches", `{"targetHarness":"codex"}`)
 	if status != http.StatusConflict || !strings.Contains(string(body), "AGENT_SWITCH_IN_PROGRESS") {
 		t.Fatalf("typed conflict = %d body=%s", status, body)
+	}
+
+	svc.switchErr = apierr.Conflict("AGENT_SWITCH_IDEMPOTENCY_CONFLICT", "idempotency key belongs to another request", nil)
+	body, status, _ = doRequest(t, srv, http.MethodPost, "/api/v1/sessions/ao-1/agent-switches", `{"targetHarness":"codex","idempotencyKey":"reused"}`)
+	if status != http.StatusConflict || !strings.Contains(string(body), "AGENT_SWITCH_IDEMPOTENCY_CONFLICT") {
+		t.Fatalf("idempotency conflict = %d body=%s", status, body)
 	}
 }
 

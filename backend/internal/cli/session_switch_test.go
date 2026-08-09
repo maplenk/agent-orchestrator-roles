@@ -47,6 +47,7 @@ func agentSwitchFixture(id, state string) string {
 		"sessionId":               "demo-1",
 		"fromHarness":             "claude-code",
 		"targetHarness":           "codex",
+		"targetModel":             "o3",
 		"state":                   state,
 		"agentHandoffStatus":      "not_attempted",
 		"semanticHandoffIncluded": false,
@@ -71,6 +72,8 @@ func agentSwitchFixtureWithPrivateFields(id, state string) string {
 	value["targetGenerationId"] = "generation-2"
 	value["targetRuntimeHandleId"] = "private-target-runtime-handle"
 	value["targetAcknowledgedAt"] = "2026-08-04T10:01:00Z"
+	value["roleSnapshot"] = map[string]any{"roleId": "private-role"}
+	value["failoverAttemptId"] = "private-attempt"
 	b, _ := json.Marshal(value)
 	return string(b)
 }
@@ -81,7 +84,7 @@ func TestSessionSwitchAgentPostsRequestAndPrintsSwitch(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		capture.record(r)
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/switch-agent" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/agent-switches" {
 			_, _ = io.WriteString(w, `{"switch":`+agentSwitchFixture("switch-1", "preparing_handoff")+`}`)
 			return
 		}
@@ -94,12 +97,13 @@ func TestSessionSwitchAgentPostsRequestAndPrintsSwitch(t *testing.T) {
 		"session", "switch-agent", "demo-1", "codex",
 		"--note", "preserve the current investigation",
 		"--idempotency-key", "switch-key",
+		"--target-model", "o3",
 	)
 	if err != nil {
 		t.Fatalf("session switch-agent failed: %v\nstderr=%s", err, errOut)
 	}
 	method, path, body, count := capture.snapshot()
-	if method != http.MethodPost || path != "/api/v1/sessions/demo-1/switch-agent" || count != 1 {
+	if method != http.MethodPost || path != "/api/v1/sessions/demo-1/agent-switches" || count != 1 {
 		t.Fatalf("request = %s %s (count %d)", method, path, count)
 	}
 	var got switchAgentRequest
@@ -108,13 +112,14 @@ func TestSessionSwitchAgentPostsRequestAndPrintsSwitch(t *testing.T) {
 	}
 	want := switchAgentRequest{
 		TargetHarness:  "codex",
+		TargetModel:    "o3",
 		Note:           "preserve the current investigation",
 		IdempotencyKey: "switch-key",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("request = %#v, want %#v", got, want)
 	}
-	for _, needle := range []string{"id: switch-1", "from: claude-code", "target: codex", "state: preparing_handoff", "source transcript: available"} {
+	for _, needle := range []string{"id: switch-1", "from: claude-code", "target: codex", "target model: o3", "state: preparing_handoff", "source transcript: available"} {
 		if !strings.Contains(out, needle) {
 			t.Errorf("output missing %q:\n%s", needle, out)
 		}
@@ -135,7 +140,7 @@ func TestSessionSwitchAgentOutlivesSharedHTTPClientTimeout(t *testing.T) {
 	)
 	cfg := setConfigEnv(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sessions/demo-1/switch-agent" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/sessions/demo-1/agent-switches" {
 			http.NotFound(w, r)
 			return
 		}
@@ -163,7 +168,7 @@ func TestSessionSwitchAgentJSONAndTypedDaemonError(t *testing.T) {
 		cfg := setConfigEnv(t)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
-			if r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/switch-agent" {
+			if r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/agent-switches" {
 				_, _ = io.WriteString(w, `{"switch":`+agentSwitchFixtureWithPrivateFields("switch-1", "preparing_handoff")+`}`)
 				return
 			}
@@ -200,6 +205,8 @@ func TestSessionSwitchAgentJSONAndTypedDaemonError(t *testing.T) {
 			"targetGenerationId",
 			"targetRuntimeHandleId",
 			"targetAcknowledgedAt",
+			"roleSnapshot",
+			"failoverAttemptId",
 		} {
 			if _, ok := envelope["switch"][privateField]; ok {
 				t.Errorf("private field %q leaked in output: %s", privateField, out)
@@ -236,6 +243,73 @@ func TestSessionSwitchAgentJSONAndTypedDaemonError(t *testing.T) {
 	})
 }
 
+func TestSessionAgentSwitchRecoverPostsOnceAndSurfacesAmbiguity(t *testing.T) {
+	t.Run("terminal ambiguity is displayed without another request", func(t *testing.T) {
+		cfg := setConfigEnv(t)
+		capture := &agentSwitchRequestCapture{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capture.record(r)
+			w.Header().Set("Content-Type", "application/json")
+			if r.Method == http.MethodPost && r.URL.Path == "/api/v1/sessions/demo-1/agent-switches/switch-1/recover" {
+				fixture := agentSwitchFixture("switch-1", "failed")
+				var value map[string]any
+				_ = json.Unmarshal([]byte(fixture), &value)
+				value["errorCode"] = "delivery_unconfirmed"
+				encoded, _ := json.Marshal(value)
+				_, _ = io.WriteString(w, `{"switch":`+string(encoded)+`}`)
+				return
+			}
+			http.NotFound(w, r)
+		}))
+		t.Cleanup(srv.Close)
+		writeRunFileFor(t, cfg, srv)
+
+		out, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+			"session", "agent-switch", "recover", "demo-1", "switch-1")
+		if err != nil {
+			t.Fatalf("agent-switch recover failed: %v\nstderr=%s", err, errOut)
+		}
+		method, path, body, count := capture.snapshot()
+		if method != http.MethodPost || path != "/api/v1/sessions/demo-1/agent-switches/switch-1/recover" || count != 1 {
+			t.Fatalf("recovery request = %s %s count=%d", method, path, count)
+		}
+		if len(body) != 0 {
+			t.Fatalf("recovery request body = %q, want empty", body)
+		}
+		if !strings.Contains(out, "state: failed") || !strings.Contains(out, "error code: delivery_unconfirmed") {
+			t.Fatalf("recovery output = %s", out)
+		}
+	})
+
+	t.Run("typed recovery required is not generically retried", func(t *testing.T) {
+		cfg := setConfigEnv(t)
+		capture := &agentSwitchRequestCapture{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			capture.record(r)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_, _ = io.WriteString(w, `{"message":"runtime ownership remains ambiguous","code":"AGENT_SWITCH_RECOVERY_REQUIRED","requestId":"req-recovery-1"}`)
+		}))
+		t.Cleanup(srv.Close)
+		writeRunFileFor(t, cfg, srv)
+
+		_, _, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
+			"session", "agent-switch", "recover", "demo-1", "switch-1", "--json")
+		if err == nil {
+			t.Fatal("expected typed daemon error")
+		}
+		_, _, _, count := capture.snapshot()
+		if count != 1 {
+			t.Fatalf("ambiguous recovery requests = %d, want exactly 1", count)
+		}
+		for _, needle := range []string{"runtime ownership remains ambiguous", "AGENT_SWITCH_RECOVERY_REQUIRED", "req-recovery-1"} {
+			if !strings.Contains(err.Error(), needle) {
+				t.Errorf("error %q missing %q", err, needle)
+			}
+		}
+	})
+}
+
 func TestSessionAgentSwitchList(t *testing.T) {
 	cfg := setConfigEnv(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -251,7 +325,7 @@ func TestSessionAgentSwitchList(t *testing.T) {
 	writeRunFileFor(t, cfg, srv)
 
 	listOut, errOut, err := executeCLI(t, Deps{ProcessAlive: func(int) bool { return true }},
-		"session", "agent-switch", "ls", "demo-1")
+		"session", "agent-switch", "history", "demo-1")
 	if err != nil {
 		t.Fatalf("agent-switch ls failed: %v\nstderr=%s", err, errOut)
 	}

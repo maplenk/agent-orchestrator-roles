@@ -1212,6 +1212,10 @@ type fakeCommander struct {
 	outputErr               error
 	outputCalls             int
 	outputLines             int
+	recoverSession          domain.SessionID
+	recoverSwitch           domain.AgentSwitchID
+	recoverResult           domain.AgentSwitch
+	recoverErr              error
 }
 
 func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.SessionRecord, int, int, error) {
@@ -1234,6 +1238,11 @@ func (f *fakeCommander) Spawn(_ context.Context, cfg ports.SpawnConfig) (domain.
 }
 func (*fakeCommander) SwitchAgent(context.Context, domain.SessionID, sessionmanager.SwitchAgentConfig) (domain.AgentSwitch, error) {
 	return domain.AgentSwitch{}, nil
+}
+func (f *fakeCommander) RecoverAgentSwitch(_ context.Context, id domain.SessionID, switchID domain.AgentSwitchID) (domain.AgentSwitch, error) {
+	f.recoverSession = id
+	f.recoverSwitch = switchID
+	return f.recoverResult, f.recoverErr
 }
 func (*fakeCommander) ListAgentSwitches(context.Context, domain.SessionID) ([]domain.AgentSwitch, error) {
 	return nil, nil
@@ -1850,6 +1859,9 @@ func TestToAPIErrorMapsWorkspaceBranchSentinels(t *testing.T) {
 		{"worker session required", fmt.Errorf("switch agent mer-orchestrator: %w", sessionmanager.ErrUnsupportedSwitchKind), apierr.KindInvalid, "WORKER_SESSION_REQUIRED"},
 		{"unsupported switch harness", fmt.Errorf("switch agent mer-1: %w", sessionmanager.ErrUnsupportedSwitchHarness), apierr.KindInvalid, "UNSUPPORTED_SWITCH_HARNESS"},
 		{"already using harness", fmt.Errorf("switch agent mer-1: %w", sessionmanager.ErrAlreadyUsingHarness), apierr.KindConflict, "ALREADY_USING_HARNESS"},
+		{"agent switch initiation disabled", fmt.Errorf("switch agent mer-1: %w", sessionmanager.ErrAgentSwitchInitiationDisabled), apierr.KindConflict, "AGENT_SWITCH_INITIATION_DISABLED"},
+		{"active switch requires recovery engine", &sessionmanager.ActiveAgentSwitchRequiresEngineError{}, apierr.KindConflict, "ACTIVE_AGENT_SWITCH_REQUIRES_ENGINE"},
+		{"agent switch engine unavailable", fmt.Errorf("recover switch: %w", sessionmanager.ErrSwitchUnavailable), apierr.KindConflict, "AGENT_SWITCH_UNAVAILABLE"},
 		{"switch not found", fmt.Errorf("get switch: %w", sessionmanager.ErrSwitchNotFound), apierr.KindNotFound, "AGENT_SWITCH_NOT_FOUND"},
 		{"stale handoff", fmt.Errorf("submit handoff: %w", sessionmanager.ErrStaleHandoff), apierr.KindConflict, "STALE_AGENT_HANDOFF"},
 		{"invalid handoff", fmt.Errorf("submit handoff: %w", sessionmanager.ErrInvalidAgentHandoff), apierr.KindInvalid, "INVALID_AGENT_HANDOFF"},

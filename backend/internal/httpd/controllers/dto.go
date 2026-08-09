@@ -356,9 +356,12 @@ type SpawnSessionResponse struct {
 	SystemPromptBytes int         `json:"systemPromptBytes"`
 }
 
-// SwitchAgentRequest is the body of POST /api/v1/sessions/{sessionId}/switch-agent.
+// SwitchAgentRequest is the body of
+// POST /api/v1/sessions/{sessionId}/agent-switches. The older switch-agent
+// route accepts the same body as a compatibility alias.
 type SwitchAgentRequest struct {
 	TargetHarness  domain.AgentHarness `json:"targetHarness" enum:"claude-code,codex" description:"Agent harness to continue the logical AO session with."`
+	TargetModel    string              `json:"targetModel,omitempty" maxLength:"256" description:"Exact role-authorized target model. Required when the role allows multiple models for the target harness."`
 	Note           string              `json:"note,omitempty" maxLength:"4096" description:"Optional user guidance included in the bounded handoff context."`
 	IdempotencyKey string              `json:"idempotencyKey,omitempty" maxLength:"128" description:"Optional retry key. Reusing it with a different request is rejected."`
 }
@@ -369,8 +372,9 @@ type SwitchAgentRequest struct {
 type AgentSwitchView struct {
 	ID                      domain.AgentSwitchID                     `json:"id"`
 	SessionID               domain.SessionID                         `json:"sessionId"`
-	FromHarness             domain.AgentHarness                      `json:"fromHarness"`
-	TargetHarness           domain.AgentHarness                      `json:"targetHarness"`
+	FromHarness             domain.AgentHarness                      `json:"fromHarness" enum:"claude-code,codex"`
+	TargetHarness           domain.AgentHarness                      `json:"targetHarness" enum:"claude-code,codex"`
+	TargetModel             string                                   `json:"targetModel,omitempty"`
 	TargetStartMode         domain.AgentSwitchTargetStartMode        `json:"targetStartMode,omitempty" enum:"fresh,resumed"`
 	State                   domain.AgentSwitchState                  `json:"state" enum:"preparing_handoff,stopping_source,source_stopped,starting_target,target_ready,delivering_context,completed,failed"`
 	AgentHandoffStatus      domain.AgentHandoffStatus                `json:"agentHandoffStatus" enum:"not_attempted,requested,received,unavailable,timed_out,failed,rejected"`
@@ -391,6 +395,22 @@ type AgentSwitchResponse struct {
 // GET /api/v1/sessions/{sessionId}/agent-switches.
 type ListAgentSwitchesResponse struct {
 	Switches []AgentSwitchView `json:"switches"`
+}
+
+// AgentSwitchTargetView is one exact daemon-authorized harness/model pair.
+type AgentSwitchTargetView struct {
+	Harness domain.AgentHarness `json:"harness" enum:"claude-code,codex"`
+	Model   string              `json:"model"`
+}
+
+// AgentSwitchOptionsResponse is the read-only policy answer for a worker's
+// switch dialog. Mutation-time authorization always revalidates the choice.
+type AgentSwitchOptionsResponse struct {
+	Available bool                    `json:"available"`
+	RoleID    string                  `json:"roleId,omitempty"`
+	Current   AgentSwitchTargetView   `json:"current"`
+	Targets   []AgentSwitchTargetView `json:"targets"`
+	Reason    string                  `json:"reason,omitempty" enum:"worker_session_required,terminated,paused,agent_switch_in_progress,switch_chat_unsupported,role_pin_required,role_map_required,role_not_in_map,no_target"`
 }
 
 // SubmitAgentHandoffRequest is the body of

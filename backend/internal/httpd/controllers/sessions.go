@@ -36,12 +36,13 @@ import (
 )
 
 const (
-	maxPromptLen      = 4096
-	maxMessageLen     = 4096
-	maxModelLen       = 256
-	maxDisplayNameLen = 20
-	maxSwitchNoteLen  = 4096
-	maxIdempotencyKey = 128
+	maxPromptLen            = 4096
+	maxMessageLen           = 4096
+	maxModelLen             = 256
+	maxDisplayNameLen       = 20
+	maxSwitchNoteLen        = 4096
+	maxIdempotencyKey       = 128
+	maxAgentSwitchBodyBytes = 16 << 10
 
 	// Agent-authored handoffs are deliberately bounded. Deterministic AO
 	// context is stored separately and does not need to be repeated here.
@@ -122,6 +123,18 @@ type agentSwitchInitiationService interface {
 
 type agentSwitchHistoryService interface {
 	ListAgentSwitches(ctx context.Context, id domain.SessionID) ([]domain.AgentSwitch, error)
+}
+
+type agentSwitchOptionsService interface {
+	AgentSwitchOptions(ctx context.Context, id domain.SessionID) (sessionsvc.AgentSwitchOptions, error)
+}
+
+type agentSwitchRecoveryService interface {
+	RecoverAgentSwitch(
+		ctx context.Context,
+		id domain.SessionID,
+		switchID domain.AgentSwitchID,
+	) (domain.AgentSwitch, error)
 }
 
 type agentSwitchHandoffService interface {
@@ -252,6 +265,7 @@ func (c *SessionsController) Register(r chi.Router) {
 	r.Post("/sessions/{sessionId}/restore", c.restore)
 	r.Post("/sessions/{sessionId}/resume-agent", c.resumeAgent)
 	r.Get("/sessions/{sessionId}/agent-switches", c.listAgentSwitches)
+	r.Get("/sessions/{sessionId}/agent-switch-options", c.agentSwitchOptions)
 	r.Post("/sessions/{sessionId}/agent-switches/{switchId}/handoff", c.submitAgentHandoff)
 	r.Get("/sessions/{sessionId}/interface-transition", c.interfaceTransitionStatus)
 	r.Post("/sessions/{sessionId}/interface-transition", c.startInterfaceTransition)
@@ -302,9 +316,13 @@ func (c *SessionsController) output(w http.ResponseWriter, r *http.Request) {
 	envelope.WriteJSON(w, http.StatusOK, SessionOutputResponse{SessionID: id, Output: out, Lines: lines})
 }
 
-// RegisterSwitchAgent mounts the synchronous switch workflow separately so
-// the API layer can give it a larger bounded timeout than ordinary REST calls.
+// RegisterSwitchAgent mounts the synchronous switch and recovery workflows
+// separately so the API layer can give them a larger bounded timeout than
+// ordinary REST calls. switch-agent is the compatibility alias retained for
+// clients shipped before the canonical agent-switch collection route.
 func (c *SessionsController) RegisterSwitchAgent(r chi.Router) {
+	r.Post("/sessions/{sessionId}/agent-switches", c.switchAgent)
+	r.Post("/sessions/{sessionId}/agent-switches/{switchId}/recover", c.recoverAgentSwitch)
 	r.Post("/sessions/{sessionId}/switch-agent", c.switchAgent)
 }
 
@@ -1180,9 +1198,10 @@ func (c *SessionsController) resumeAgent(w http.ResponseWriter, r *http.Request)
 func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request) {
 	svc, ok := c.Svc.(agentSwitchInitiationService)
 	if !ok {
-		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/switch-agent")
+		apispec.NotImplemented(w, r, "POST", agentSwitchRouteTemplate(r))
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxAgentSwitchBodyBytes)
 	var in SwitchAgentRequest
 	if err := decodeJSON(r, &in); err != nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_JSON", "Invalid JSON body", nil)
@@ -1191,6 +1210,11 @@ func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request)
 	targetHarness := domain.AgentHarness(strings.TrimSpace(string(in.TargetHarness)))
 	if targetHarness == "" {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TARGET_HARNESS_REQUIRED", "targetHarness is required", nil)
+		return
+	}
+	targetModel := strings.TrimSpace(in.TargetModel)
+	if len(targetModel) > maxModelLen {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "TARGET_MODEL_TOO_LONG", "targetModel is too long", nil)
 		return
 	}
 	note := domain.SanitizeControlChars(strings.TrimSpace(in.Note))
@@ -1205,6 +1229,7 @@ func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request)
 	}
 	switchRecord, err := svc.SwitchAgent(r.Context(), sessionID(r), sessionsvc.SwitchAgentInput{
 		TargetHarness:  targetHarness,
+		TargetModel:    targetModel,
 		Note:           note,
 		IdempotencyKey: idempotencyKey,
 	})
@@ -1213,6 +1238,32 @@ func (c *SessionsController) switchAgent(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, AgentSwitchResponse{Switch: agentSwitchView(switchRecord)})
+}
+
+func (c *SessionsController) recoverAgentSwitch(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(agentSwitchRecoveryService)
+	if !ok {
+		apispec.NotImplemented(w, r, "POST", "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover")
+		return
+	}
+	switchID := agentSwitchID(r)
+	if strings.TrimSpace(string(switchID)) == "" {
+		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "AGENT_SWITCH_ID_REQUIRED", "switchId is required", nil)
+		return
+	}
+	switchRecord, err := svc.RecoverAgentSwitch(r.Context(), sessionID(r), switchID)
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, AgentSwitchResponse{Switch: agentSwitchView(switchRecord)})
+}
+
+func agentSwitchRouteTemplate(r *http.Request) string {
+	if strings.HasSuffix(r.URL.Path, "/switch-agent") {
+		return "/api/v1/sessions/{sessionId}/switch-agent"
+	}
+	return "/api/v1/sessions/{sessionId}/agent-switches"
 }
 
 func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Request) {
@@ -1227,6 +1278,20 @@ func (c *SessionsController) listAgentSwitches(w http.ResponseWriter, r *http.Re
 		return
 	}
 	envelope.WriteJSON(w, http.StatusOK, ListAgentSwitchesResponse{Switches: agentSwitchViews(switches)})
+}
+
+func (c *SessionsController) agentSwitchOptions(w http.ResponseWriter, r *http.Request) {
+	svc, ok := c.Svc.(agentSwitchOptionsService)
+	if !ok {
+		apispec.NotImplemented(w, r, "GET", "/api/v1/sessions/{sessionId}/agent-switch-options")
+		return
+	}
+	options, err := svc.AgentSwitchOptions(r.Context(), sessionID(r))
+	if err != nil {
+		envelope.WriteError(w, r, err)
+		return
+	}
+	envelope.WriteJSON(w, http.StatusOK, agentSwitchOptionsResponse(options))
 }
 
 func (c *SessionsController) submitAgentHandoff(w http.ResponseWriter, r *http.Request) {
@@ -2342,6 +2407,7 @@ func agentSwitchView(s domain.AgentSwitch) AgentSwitchView {
 		SessionID:               s.SessionID,
 		FromHarness:             s.FromHarness,
 		TargetHarness:           s.TargetHarness,
+		TargetModel:             strings.TrimSpace(s.TargetModel),
 		TargetStartMode:         s.TargetStartMode,
 		State:                   s.State,
 		AgentHandoffStatus:      s.AgentHandoffStatus,
@@ -2359,6 +2425,23 @@ func agentSwitchViews(switches []domain.AgentSwitch) []AgentSwitchView {
 		out = append(out, agentSwitchView(agentSwitch))
 	}
 	return out
+}
+
+func agentSwitchOptionsResponse(options sessionsvc.AgentSwitchOptions) AgentSwitchOptionsResponse {
+	targetView := func(target domain.FailoverTarget) AgentSwitchTargetView {
+		return AgentSwitchTargetView{Harness: target.Harness, Model: strings.TrimSpace(target.Model)}
+	}
+	targets := make([]AgentSwitchTargetView, 0, len(options.Targets))
+	for _, target := range options.Targets {
+		targets = append(targets, targetView(target))
+	}
+	return AgentSwitchOptionsResponse{
+		Available: options.Available,
+		RoleID:    strings.TrimSpace(options.RoleID),
+		Current:   targetView(options.Current),
+		Targets:   targets,
+		Reason:    strings.TrimSpace(options.Reason),
+	}
 }
 
 // sessionViews cannot fail, because building one view cannot. Keeping an error

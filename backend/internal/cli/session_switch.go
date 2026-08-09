@@ -19,10 +19,15 @@ import (
 type sessionSwitchAgentOptions struct {
 	note           string
 	idempotencyKey string
+	targetModel    string
 	json           bool
 }
 
 type sessionAgentSwitchListOptions struct {
+	json bool
+}
+
+type sessionAgentSwitchRecoverOptions struct {
 	json bool
 }
 
@@ -42,10 +47,11 @@ type sessionHandoffSubmitOptions struct {
 const switchAgentCommandTimeout = 7 * time.Minute
 
 // switchAgentRequest mirrors the daemon's request body for
-// POST /api/v1/sessions/{id}/switch-agent. Keeping the wire type here avoids
+// POST /api/v1/sessions/{id}/agent-switches. Keeping the wire type here avoids
 // coupling the thin CLI client to the HTTP controller package.
 type switchAgentRequest struct {
 	TargetHarness  string `json:"targetHarness"`
+	TargetModel    string `json:"targetModel,omitempty"`
 	Note           string `json:"note,omitempty"`
 	IdempotencyKey string `json:"idempotencyKey,omitempty"`
 }
@@ -65,6 +71,7 @@ type agentSwitchDTO struct {
 	SessionID               string    `json:"sessionId"`
 	FromHarness             string    `json:"fromHarness"`
 	TargetHarness           string    `json:"targetHarness"`
+	TargetModel             string    `json:"targetModel,omitempty"`
 	TargetStartMode         string    `json:"targetStartMode,omitempty"`
 	State                   string    `json:"state"`
 	AgentHandoffStatus      string    `json:"agentHandoffStatus"`
@@ -103,6 +110,7 @@ func newSessionSwitchAgentCommand(ctx *commandContext) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&opts.note, "note", "", "Optional guidance for the handoff")
 	cmd.Flags().StringVar(&opts.idempotencyKey, "idempotency-key", "", "Reuse a prior identical switch request safely")
+	cmd.Flags().StringVar(&opts.targetModel, "target-model", "", "Exact role-authorized target model")
 	cmd.Flags().BoolVar(&opts.json, "json", false, "Output the agent switch as JSON")
 	return cmd
 }
@@ -114,6 +122,7 @@ func newSessionAgentSwitchCommand(ctx *commandContext) *cobra.Command {
 		Short:   "Inspect agent switches for a session",
 	}
 	cmd.AddCommand(newSessionAgentSwitchListCommand(ctx))
+	cmd.AddCommand(newSessionAgentSwitchRecoverCommand(ctx))
 	return cmd
 }
 
@@ -121,7 +130,7 @@ func newSessionAgentSwitchListCommand(ctx *commandContext) *cobra.Command {
 	var opts sessionAgentSwitchListOptions
 	cmd := &cobra.Command{
 		Use:     "ls <session-id>",
-		Aliases: []string{"list"},
+		Aliases: []string{"list", "history"},
 		Short:   "List agent switches for a session",
 		Args:    oneSessionIDArg,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -133,6 +142,28 @@ func newSessionAgentSwitchListCommand(ctx *commandContext) *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&opts.json, "json", false, "Output agent switches as JSON")
+	return cmd
+}
+
+func newSessionAgentSwitchRecoverCommand(ctx *commandContext) *cobra.Command {
+	var opts sessionAgentSwitchRecoverOptions
+	cmd := &cobra.Command{
+		Use:   "recover <session-id> <switch-id>",
+		Short: "Safely reconcile one interrupted agent switch",
+		Args:  usageArgs(cobra.ExactArgs(2)),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			sessionID, err := normalizeSessionID(args[0])
+			if err != nil {
+				return err
+			}
+			switchID := strings.TrimSpace(args[1])
+			if switchID == "" {
+				return usageError{errors.New("switch id is required")}
+			}
+			return ctx.recoverSessionAgentSwitch(cmd.Context(), cmd, sessionID, switchID, opts)
+		},
+	}
+	cmd.Flags().BoolVar(&opts.json, "json", false, "Output the recovered agent switch as JSON")
 	return cmd
 }
 
@@ -172,16 +203,42 @@ func (c *commandContext) switchSessionAgent(
 ) error {
 	req := switchAgentRequest{
 		TargetHarness:  targetHarness,
+		TargetModel:    strings.TrimSpace(opts.targetModel),
 		Note:           strings.TrimSpace(opts.note),
 		IdempotencyKey: strings.TrimSpace(opts.idempotencyKey),
 	}
 	var res agentSwitchResponse
-	path := "sessions/" + url.PathEscape(sessionID) + "/switch-agent"
+	path := "sessions/" + url.PathEscape(sessionID) + "/agent-switches"
 	if err := c.doJSONPathWithHeadersAndTimeout(
 		ctx,
 		http.MethodPost,
 		"/api/v1/"+path,
 		req,
+		&res,
+		nil,
+		switchAgentCommandTimeout,
+	); err != nil {
+		return err
+	}
+	if opts.json {
+		return writeJSON(cmd.OutOrStdout(), res)
+	}
+	return writeAgentSwitchDetails(cmd, res.Switch)
+}
+
+func (c *commandContext) recoverSessionAgentSwitch(
+	ctx context.Context,
+	cmd *cobra.Command,
+	sessionID, switchID string,
+	opts sessionAgentSwitchRecoverOptions,
+) error {
+	var res agentSwitchResponse
+	path := "sessions/" + url.PathEscape(sessionID) + "/agent-switches/" + url.PathEscape(switchID) + "/recover"
+	if err := c.doJSONPathWithHeadersAndTimeout(
+		ctx,
+		http.MethodPost,
+		"/api/v1/"+path,
+		nil,
 		&res,
 		nil,
 		switchAgentCommandTimeout,
@@ -279,7 +336,7 @@ func writeAgentSwitchList(cmd *cobra.Command, switches []agentSwitchDTO) error {
 		return err
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "ID\tFROM\tTARGET\tSTATE\tHANDOFF\tUPDATED"); err != nil {
+	if _, err := fmt.Fprintln(tw, "ID\tFROM\tTARGET\tMODEL\tSTATE\tHANDOFF\tUPDATED"); err != nil {
 		return err
 	}
 	for _, agentSwitch := range switches {
@@ -289,10 +346,11 @@ func writeAgentSwitchList(cmd *cobra.Command, switches []agentSwitchDTO) error {
 		}
 		if _, err := fmt.Fprintf(
 			tw,
-			"%s\t%s\t%s\t%s\t%s\t%s\n",
+			"%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			agentSwitch.ID,
 			agentSwitch.FromHarness,
 			agentSwitch.TargetHarness,
+			agentSwitch.TargetModel,
 			agentSwitch.State,
 			agentSwitch.AgentHandoffStatus,
 			updated,
@@ -310,6 +368,7 @@ func writeAgentSwitchDetails(cmd *cobra.Command, agentSwitch agentSwitchDTO) err
 		{"session", agentSwitch.SessionID},
 		{"from", agentSwitch.FromHarness},
 		{"target", agentSwitch.TargetHarness},
+		{"target model", agentSwitch.TargetModel},
 		{"state", agentSwitch.State},
 		{"handoff", agentSwitch.AgentHandoffStatus},
 		{"semantic handoff included", strconv.FormatBool(agentSwitch.SemanticHandoffIncluded)},

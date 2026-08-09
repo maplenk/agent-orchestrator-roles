@@ -33,6 +33,7 @@ func TestCLIActorTypeKeepsKnownLegacyUserCommands(t *testing.T) {
 		"ao session switch-agent",
 		"ao session agent-switch",
 		"ao session agent-switch ls",
+		"ao session agent-switch recover",
 		"ao dev import-projects",
 		"ao project orchestration get",
 		"ao project orchestration set",

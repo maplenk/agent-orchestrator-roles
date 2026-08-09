@@ -1660,6 +1660,45 @@ paths:
       summary: Report an agent activity-state signal for a session
       tags:
       - sessions
+  /api/v1/sessions/{sessionId}/agent-switch-options:
+    get:
+      operationId: getSessionAgentSwitchOptions
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSwitchOptionsResponse'
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: List exact daemon-authorized agent-switch targets for a worker
+      tags:
+      - sessions
   /api/v1/sessions/{sessionId}/agent-switches:
     get:
       operationId: listSessionAgentSwitches
@@ -1697,6 +1736,68 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: List a session's durable agent-switch history
+      tags:
+      - sessions
+    post:
+      operationId: createSessionAgentSwitch
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchAgentRequest'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSwitchResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Switch a logical AO session to another agent harness
       tags:
       - sessions
   /api/v1/sessions/{sessionId}/agent-switches/{switchId}/handoff:
@@ -1761,6 +1862,64 @@ paths:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
       summary: Submit a generation-fenced source-agent handoff
+      tags:
+      - sessions
+  /api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover:
+    post:
+      operationId: recoverSessionAgentSwitch
+      parameters:
+      - description: Session identifier, e.g. project-1.
+        in: path
+        name: sessionId
+        required: true
+        schema:
+          description: Session identifier, e.g. project-1.
+          type: string
+      - description: Durable agent-switch identifier.
+        in: path
+        name: switchId
+        required: true
+        schema:
+          description: Durable agent-switch identifier.
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSwitchResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Implemented
+      summary: Safely reconcile one exact interrupted agent switch
       tags:
       - sessions
   /api/v1/sessions/{sessionId}/attachments:
@@ -4352,6 +4511,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Bad Request
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Forbidden
         "404":
           content:
             application/json:
@@ -4376,7 +4541,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/APIError'
           description: Not Implemented
-      summary: Switch a logical AO session to another agent harness
+      summary: Compatibility alias for creating a session agent switch
       tags:
       - sessions
   /api/v1/sessions/{sessionId}/workspace/events:
@@ -4987,6 +5152,9 @@ components:
           - switch_failed
           type: string
         fromHarness:
+          enum:
+          - claude-code
+          - codex
           type: string
         id:
           type: string
@@ -5015,6 +5183,11 @@ components:
           - failed
           type: string
         targetHarness:
+          enum:
+          - claude-code
+          - codex
+          type: string
+        targetModel:
           type: string
         targetStartMode:
           enum:
@@ -5035,12 +5208,54 @@ components:
       - requestedAt
       - updatedAt
       type: object
+    AgentSwitchOptionsResponse:
+      properties:
+        available:
+          type: boolean
+        current:
+          $ref: '#/components/schemas/AgentSwitchTarget'
+        reason:
+          enum:
+          - worker_session_required
+          - terminated
+          - paused
+          - agent_switch_in_progress
+          - switch_chat_unsupported
+          - role_pin_required
+          - role_map_required
+          - role_not_in_map
+          - no_target
+          type: string
+        roleId:
+          type: string
+        targets:
+          items:
+            $ref: '#/components/schemas/AgentSwitchTarget'
+          type: array
+      required:
+      - available
+      - current
+      - targets
+      type: object
     AgentSwitchResponse:
       properties:
         switch:
           $ref: '#/components/schemas/AgentSwitch'
       required:
       - switch
+      type: object
+    AgentSwitchTarget:
+      properties:
+        harness:
+          enum:
+          - claude-code
+          - codex
+          type: string
+        model:
+          type: string
+      required:
+      - harness
+      - model
       type: object
     AttachmentInput:
       properties:
@@ -8202,6 +8417,11 @@ components:
           enum:
           - claude-code
           - codex
+          type: string
+        targetModel:
+          description: Exact role-authorized target model. Required when the role
+            allows multiple models for the target harness.
+          maxLength: 256
           type: string
       required:
       - targetHarness

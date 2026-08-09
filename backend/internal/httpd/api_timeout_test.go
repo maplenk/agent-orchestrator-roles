@@ -110,17 +110,17 @@ func TestSwitchAgentRouteTimeouts(t *testing.T) {
 			started := time.Now()
 			switchRequest := httptest.NewRequest(
 				http.MethodPost,
-				"/api/v1/sessions/ao-1/switch-agent",
+				"/api/v1/sessions/ao-1/agent-switches",
 				bytes.NewBufferString(`{"targetHarness":"codex"}`),
 			)
 			switchRequest.Header.Set("Content-Type", "application/json")
 			switchResponse := httptest.NewRecorder()
 			router.ServeHTTP(switchResponse, switchRequest)
 			if switchResponse.Code != http.StatusOK {
-				t.Fatalf("POST switch-agent status = %d, want 200; body=%s", switchResponse.Code, switchResponse.Body.String())
+				t.Fatalf("POST agent-switches status = %d, want 200; body=%s", switchResponse.Code, switchResponse.Body.String())
 			}
 			if tt.switchDelay > 0 && time.Since(started) < tt.switchDelay {
-				t.Fatalf("POST switch-agent completed in %s, want at least %s", time.Since(started), tt.switchDelay)
+				t.Fatalf("POST agent-switches completed in %s, want at least %s", time.Since(started), tt.switchDelay)
 			}
 			if switchBudget := <-svc.switchBudget; switchBudget < tt.minimumSwitchBudget-time.Second {
 				t.Fatalf("switch request budget = %s, want at least %s", switchBudget, tt.minimumSwitchBudget)
