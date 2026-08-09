@@ -8,6 +8,7 @@
 **Existing-project starter-role close-out:** `762ae160`
 **Target B config-containment hardening:** `8bb1e3af`
 **Target B migration-history hardening:** `586d1156`
+**Target B adapter test hygiene:** `66d65e4e`
 
 **Evidence integration branch:** `codex/mvp-integration`  
 **Target roles trunk:** `roles/multi-sub-v1` (merge not yet claimed)
@@ -15,10 +16,11 @@
 **Target:** B (~full wishlist)  
 **Current gate:** the promoted `166e9e63` live matrix and the post-evidence
 default-data-dir runtime replay on `3c3aef51` are complete; independent combined
-review approves integration `72f274a7` with no remaining P1/P2. The ordinary
-full backend run fails only the known untouched fake/kilocode/opencode
-wall-clock trio; static checks, typecheck, API drift, and the full frontend gate
-pass, while the repository-wide suite is still not fully green
+review approves integration `72f274a7` with no remaining P1/P2. Target B test
+hygiene removes the fake/Kilocode/OpenCode wall-clock trio without changing
+production deadlines or classifier behavior; the ordinary full backend run now
+passes 4,724 tests across 132 packages. Static checks, typecheck, API drift, and
+the authoritative full frontend gate also pass.
 
 This document is the living plan: **what landed**, **what remains**, **order**, and **gates**.  
 The current MVP boundary is [`MVP_FINAL_SPEC.md`](MVP_FINAL_SPEC.md); canonical
@@ -45,7 +47,8 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 | Upstream Sync 2 | **Accepted and MERGED to the roles trunk (2026-08-07) as `5dc2fcfb`.** Pinned to `fa799a7a`; fork migrations are 9000–9007. All eight steps are done and **every required GitHub Actions job is green**; Step 5's two live records are in `UPSTREAM_SYNC2_DOGFOOD_STEP5.md`. See `UPSTREAM_SYNC2_PLAN.md`. |
 | Target B durability hardening A | **Implemented, independently reviewed, gated, and isolated-dogfooded at `8bb1e3af`.** Malformed, empty, null, unknown-field, and forward-role-schema project config is contained to one degraded row; other projects remain listable; raw bytes are preserved; all row mutations and dev import are fenced. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
 | Target B durability hardening B | **Implemented, independently reviewed, gated, and isolated-daemon dogfooded at `586d1156`.** A complete on-entry ledger/schema snapshot retains a genuine lone Muse 53, still clears the complete stale 53–60 block, preserves already-repaired rows, refuses partial/incomplete ambiguity before writes, and rolls back mid-rewrite failures exactly. No migration was added or edited. See `TARGET_B_DURABILITY_HARDENING_20260809.md`. |
-| CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. The ordinary full backend run fails only the known untouched fake/kilocode/opencode wall-clock trio; all other packages, including the MVP packages, pass. The full repository gate is therefore **not fully green**. |
+| Target B adapter test hygiene | **Implemented, independently reviewed, and gated at `66d65e4e`.** Fake lifecycle cadence is asserted structurally; Kilocode interactive-shell avoidance and CLI parsing are tested independently; OpenCode CLI classification is a pure, behavior-preserving helper with a load-bearing command-error case. Production three-second deadlines are unchanged. See `TARGET_B_TEST_HYGIENE_20260809.md`. |
+| CI | Exact race found zero data races; SQLite exact checks passed 5/5 and its package race run passed in 622.846s; Chat's test-only projector race is fixed at `f8883529`. After `66d65e4e`, focused normal and race checks each pass 105/105 and the ordinary full backend run passes 4,724 tests across 132 packages on its first run. |
 
 > **Strict does not mean read-only.** A writable strict orchestrator may use
 > Claude Code because strictness enforces role/routing/delegation policy, not a
@@ -53,11 +56,10 @@ long-range design remains `MASTER_PLAN.md`. This file tracks execution status.
 > `workspaceWrites:false` role; Claude remains `read_only_enforced=false`.
 
 **Next engineering actions:** none gate the MVP. Both Target B durability
-hardening slices are complete. Next remove the three pre-existing wall-clock
-dependencies without changing production timeouts or behavior; do not rewrite
-or rerun the accepted matrices merely to make that separate gate look green.
-Detector fixtures, the desktop editor, and opt-in automation follow the test
-hygiene slice.
+hardening slices and the isolated adapter test-hygiene slice are complete.
+Next capture real vendor limit fixtures without promoting any capability.
+The desktop role-map editor and opt-in automatic failover follow. Do not rewrite
+or rerun the accepted MVP matrices merely to replace historical evidence.
 
 ---
 
@@ -261,7 +263,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 
 | Task | Detail |
 |------|--------|
-| Clean full gate | **Not fully green:** zero races; SQLite exact 5/5 and package race pass; Chat test race fixed; ordinary full fails only the known untouched fake/kilocode/opencode wall-clock trio |
+| Clean full gate | **Green for the current backend:** zero races; SQLite exact 5/5 and package race pass; Chat test race fixed; adapter hygiene focused normal/race each 105/105; ordinary full passes 4,724 tests across 132 packages. Historical accepted evidence remains unchanged. |
 | Worker dogfood | **Complete:** all 12 records passed on `166e9e63`; evidence `322f9c18` |
 | Orchestrator dogfood | **Complete:** Codex→Claude→Codex, fencing, unauthorized refusal, Fresh and same-generation recovery passed |
 | Post-review default-path replay | **Complete on `3c3aef51`:** actual default tmux socket; Restart, boot live reconcile, and boot reap/restore each converged to one active row/runtime; focused tmux/session-manager/reaper race tests passed |
@@ -286,7 +288,7 @@ submission rather than re-reading it and accidentally clearing a newer pin.
 | ~~Phase 2B-0a/0b/1/2~~ | **Done** | 2A patterns; ≈6–11 d actual, not the 3–5 first estimated |
 | ~~Phase 2B-3 (cross-harness orch)~~ | **Implemented and live-accepted** | Final MVP strict-policy amendment |
 | ~~Phase 3B manual Continue~~ | **Implemented and live-accepted** | Final probe review |
-| Final repository gate | classified; non-blocking for MVP | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; full backend retains three pre-existing wall-clock failures |
+| Final repository gate | current backend and authoritative frontend green | Static/typecheck/API drift pass; SessionFilesView fix passes 20/20 exact and 28/28 full file; authoritative full Vitest passes 151/151 files and 2040/2040 tests; current full backend passes 4,724 tests across 132 packages |
 
 ### Sequencing sketch
 
@@ -299,12 +301,12 @@ Sync 2 acceptance ──► DONE (2026-08-07)
 Final MVP core + surface ──► IMPLEMENTED / REVIEW FIXES INTEGRATED
 Live matrix @ 166e9e63 ──► ACCEPTED (evidence 322f9c18)
 Race close-out ──► Chat test fixed; SQLite exact 5/5 + package PASS; zero races
-Ordinary backend ──► MVP/all other packages PASS; known untouched wall-clock trio FAIL
+Ordinary backend ──► PASS, 4,724 tests / 132 packages after isolated wall-clock hygiene
 Static/typecheck ──► PASS on exact head f8883529
 API drift ──► PASS (two identical regenerations; clean diff)
 Frontend classification ──► deterministic pre-MVP failure (0/20 isolated; full file 27/28)
 Frontend fix @ 6473b134 ──► 20/20 exact + 28/28 file PASS; negative mutation retained
-Now ──► close verified MVP/static/API/frontend surface; keep full-repo gate distinct
+Now ──► capture real vendor limit fixtures; keep capability promotion separate
      ║
      ╚═ parallel: Claude RO / Phase 1-F (explicit read-only roles only)
 ```

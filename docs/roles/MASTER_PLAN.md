@@ -24,10 +24,11 @@ Independent review is closed and the complete worker/orchestrator live matrix
 is promoted by evidence commit `322f9c18`. The Chat rollback failure was
 classified as test-only asynchronous projection and fixed at integration head
 `f8883529`; SQLite exact checks passed 5/5, its race package passed in 622.846s,
-and race validation found zero data races. The ordinary full backend run fails
-only the known untouched fake/kilocode/opencode wall-clock trio; all other
-packages, including the MVP packages, pass. The repository-wide final gate
-remains non-green while those three failures remain. On exact integration head
+and race validation found zero data races. Target B adapter test hygiene at
+`66d65e4e` replaces the known fake/Kilocode/OpenCode real-time assertions with
+structural or pure-classifier coverage while preserving production deadlines
+and behavior. Focused normal/race checks each pass 105/105 and the ordinary
+full backend run passes 4,724 tests across 132 packages. On exact integration head
 `f8883529`, gofmt, vet, cold-cache golangci-lint v2.12.2, and typecheck pass;
 before the test fix, full Vitest was 2039/2040. Its sole `SessionFilesView`
 failure is deterministic (0/20 exact-test passes, full file 27/28) and
@@ -51,8 +52,9 @@ dogfood are recorded in `TARGET_B_DURABILITY_HARDENING_20260809.md`. Hardening
 B is complete at `586d1156`: a pre-write block classifier preserves a genuine
 lone Muse 53, retains complete stale 53–60 cleanup, refuses ambiguous histories
 loudly, and proves transactional rollback. Neither slice added a migration or
-promoted a capability cell. The next Target B slice removes the known
-fake/Kilocode/OpenCode wall-clock test dependencies.
+promoted a capability cell. The fake/Kilocode/OpenCode wall-clock slice is now
+complete at `66d65e4e`; real vendor fixture capture is next and remains
+non-promoting.
 The estimates below are original planning estimates, not a claim
 about remaining duration.
 
@@ -414,6 +416,9 @@ Zai and Kimi validated **separately** on Pi.
     discriminator that retains a genuine lone Muse 53, preserves complete
     stale 53–60 cleanup, and refuses ambiguous upstream schema loudly
     (`586d1156`)
+19. [x] Remove fake/Kilocode/OpenCode wall-clock dependencies with structural
+    cadence and pure classifier tests, leaving production timeouts unchanged
+    (`66d65e4e`)
 
 ---
 
