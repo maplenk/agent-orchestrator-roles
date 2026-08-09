@@ -44,6 +44,16 @@ type failoverAttemptStore interface {
 	UpdateSessionFailoverAttemptState(ctx context.Context, attemptID string, from, to domain.FailoverAttemptState, updatedAt time.Time) (bool, error)
 }
 
+// activeAgentSwitchReader is deliberately narrower than ports.AgentSwitchStore:
+// failover only needs the durable reservation fact. Keeping the read optional
+// preserves focused manager fakes while the production SQLite store supplies
+// it. A nonterminal canonical agent-switch saga owns the session and its target
+// runtime, so the legacy failover path must not insert an attempt or spend a
+// ladder rung while that ownership is unresolved.
+type activeAgentSwitchReader interface {
+	GetActiveAgentSwitch(context.Context, domain.SessionID) (domain.AgentSwitch, bool, error)
+}
+
 func (m *Manager) failoverStore() (failoverAttemptStore, error) {
 	s, ok := m.store.(failoverAttemptStore)
 	if !ok {
@@ -83,6 +93,17 @@ func (m *Manager) continueFailover(
 	store, err := m.failoverStore()
 	if err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
+	}
+	if reader, ok := m.store.(activeAgentSwitchReader); ok {
+		active, found, readErr := reader.GetActiveAgentSwitch(ctx, id)
+		if readErr != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: read active agent switch: %w", id, readErr)
+		}
+		if found {
+			return ContinueFailoverResult{}, fmt.Errorf(
+				"continue %s: %w: agent switch %s is %s on generation %s",
+				id, ErrFailoverRecoveryRequired, active.ID, active.State, active.TargetGenerationID)
+		}
 	}
 
 	// Lazy crash reconciliation, at an entry point this file owns. Boot's

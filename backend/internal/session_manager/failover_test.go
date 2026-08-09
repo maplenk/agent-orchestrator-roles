@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,24 @@ type failoverFakeStore struct {
 	// reaches SwitchWorker. It exposes the crash/race window without weakening
 	// the production ordering being tested.
 	afterAppend func()
+}
+
+type agentSwitchReservedFailoverStore struct {
+	*failoverFakeStore
+	active    domain.AgentSwitch
+	activeErr error
+}
+
+func (s *agentSwitchReservedFailoverStore) GetActiveAgentSwitch(
+	_ context.Context, sessionID domain.SessionID,
+) (domain.AgentSwitch, bool, error) {
+	if s.activeErr != nil {
+		return domain.AgentSwitch{}, false, s.activeErr
+	}
+	if s.active.SessionID != sessionID || s.active.State.Terminal() {
+		return domain.AgentSwitch{}, false, nil
+	}
+	return s.active, true, nil
 }
 
 func (f *failoverFakeStore) GetSession(
@@ -260,6 +279,48 @@ func TestAutomaticFailoverFenceIsScopedToTheExactIncident(t *testing.T) {
 		t.Fatal("a newer incident was suppressed by the older incident's still-unwinding fence")
 	}
 	m.endAutomaticFailover(id, "inc-b")
+}
+
+func TestContinueFailover_NonterminalAgentSwitchReservesRungBeforeMutation(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	reserved := &agentSwitchReservedFailoverStore{
+		failoverFakeStore: st,
+		active: domain.AgentSwitch{
+			ID: "switch-active", SessionID: id,
+			State: domain.AgentSwitchDelivering, TargetGenerationID: "agent-switch-gen-1",
+		},
+	}
+	m.store = reserved
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("error = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if reserved.appendCalls != 0 || len(reserved.attempts) != 0 {
+		t.Fatalf("reserved switch spent a failover rung: append calls=%d attempts=%+v",
+			reserved.appendCalls, reserved.attempts)
+	}
+	if len(rt.destroyedIDs) != 0 || rt.created != 0 {
+		t.Fatalf("reserved switch touched runtimes: creates=%d destroys=%v", rt.created, rt.destroyedIDs)
+	}
+}
+
+func TestContinueFailover_ActiveAgentSwitchReadFailureIsFailClosed(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	reserved := &agentSwitchReservedFailoverStore{
+		failoverFakeStore: st,
+		activeErr:         errors.New("injected active switch read failure"),
+	}
+	m.store = reserved
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err == nil || !strings.Contains(err.Error(), "injected active switch read failure") {
+		t.Fatalf("error = %v, want active switch read failure", err)
+	}
+	if reserved.appendCalls != 0 || len(reserved.attempts) != 0 || rt.created != 0 || len(rt.destroyedIDs) != 0 {
+		t.Fatalf("failed reservation read mutated state: append=%d attempts=%d creates=%d destroys=%v",
+			reserved.appendCalls, len(reserved.attempts), rt.created, rt.destroyedIDs)
+	}
 }
 
 func TestContinueAutomaticFailover_OwnershipRefusesRealRestartAcrossFirstAttemptWindow(t *testing.T) {

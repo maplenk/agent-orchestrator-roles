@@ -27,6 +27,9 @@ type SwitchAgentInput struct {
 
 // SwitchAgent starts or resumes a durable agent-switch saga for a session.
 func (s *Service) SwitchAgent(ctx context.Context, id domain.SessionID, in SwitchAgentInput) (domain.AgentSwitch, error) {
+	if err := s.authorizeAgentSwitch(ctx, id, in.TargetHarness); err != nil {
+		return domain.AgentSwitch{}, err
+	}
 	switchRecord, err := s.manager.SwitchAgent(ctx, id, sessionmanager.SwitchAgentConfig{
 		TargetHarness:  in.TargetHarness,
 		Note:           in.Note,
