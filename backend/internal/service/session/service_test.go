@@ -1169,7 +1169,8 @@ func TestSessionOutputPreservesManagerResultAndTypedErrors(t *testing.T) {
 // fakeCommander records Kill/Spawn calls so a test can assert the
 // clean-orchestrator ordering without wiring a real session engine.
 type fakeCommander struct {
-	projectOrchestrator map[domain.ProjectID]domain.SessionRecord
+	projectOrchestrator    map[domain.ProjectID]domain.SessionRecord
+	projectOrchestratorErr error
 	// mu guards the recording fields. TestSpawn's concurrency case drives Spawn
 	// from several goroutines at once, so an unguarded counter is a real race
 	// that made `go test -race` unusable for this whole package — and a fake
@@ -1320,6 +1321,9 @@ func (f *fakeCommander) RollbackSpawn(context.Context, domain.SessionID) (bool, 
 func (f *fakeCommander) ProjectOrchestrator(_ context.Context, projectID domain.ProjectID) (domain.SessionRecord, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.projectOrchestratorErr != nil {
+		return domain.SessionRecord{}, false, f.projectOrchestratorErr
+	}
 	if f.projectOrchestrator == nil {
 		return domain.SessionRecord{}, false, nil
 	}

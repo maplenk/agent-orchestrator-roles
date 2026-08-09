@@ -117,9 +117,12 @@ func (s *Service) refineDelegatedTaskTitleInBackground(workerID domain.SessionID
 
 func (s *Service) refineDelegatedTaskTitle(ctx context.Context, workerID domain.SessionID, in DelegateTaskInput) error {
 	orchestrator, ok, err := s.manager.ProjectOrchestrator(ctx, in.ProjectID)
-	if err != nil || !ok || orchestrator.Activity.State == domain.ActivityExited {
-		// The worker spawn is already committed. A missing or unavailable
-		// orchestrator only means the best-effort title refinement is skipped.
+	if err != nil {
+		return fmt.Errorf("resolve title orchestrator for project %s: %w", in.ProjectID, err)
+	}
+	if !ok || orchestrator.Activity.State == domain.ActivityExited {
+		// The worker spawn is already committed. A missing or exited orchestrator
+		// only means the best-effort title refinement is skipped.
 		return nil
 	}
 	if err := s.manager.WaitForMessageDeliveryReady(ctx, orchestrator.ID); err != nil {

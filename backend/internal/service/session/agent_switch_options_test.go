@@ -71,7 +71,7 @@ func TestAgentSwitchOptionsUnavailableReasons(t *testing.T) {
 				rec.Kind = domain.KindOrchestrator
 				store.sessions[id] = rec
 			},
-			wantReason: AgentSwitchOptionsReasonWorkerRequired,
+			wantReason: agentSwitchOptionsReasonWorkerRequired,
 		},
 		{
 			name: "terminated",
@@ -80,7 +80,7 @@ func TestAgentSwitchOptionsUnavailableReasons(t *testing.T) {
 				rec.IsTerminated = true
 				store.sessions[id] = rec
 			},
-			wantReason: AgentSwitchOptionsReasonTerminated,
+			wantReason: agentSwitchOptionsReasonTerminated,
 		},
 		{
 			name: "paused",
@@ -89,14 +89,14 @@ func TestAgentSwitchOptionsUnavailableReasons(t *testing.T) {
 				rec.Metadata.Pause = &domain.SessionPause{IncidentID: "incident-1"}
 				store.sessions[id] = rec
 			},
-			wantReason: AgentSwitchOptionsReasonPaused,
+			wantReason: agentSwitchOptionsReasonPaused,
 		},
 		{
 			name: "active saga",
 			active: domain.AgentSwitch{
 				ID: "switch-active", SessionID: "mer-1", State: domain.AgentSwitchDelivering,
 			},
-			wantReason: AgentSwitchOptionsReasonInProgress,
+			wantReason: agentSwitchOptionsReasonInProgress,
 		},
 	}
 

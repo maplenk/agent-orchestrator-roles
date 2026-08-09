@@ -214,11 +214,6 @@ type OperatorSpawnValidator interface {
 //
 // Headerless spawn is rejected (workers must not fall through to "operator").
 const (
-	// maxDelegateTaskBodyBytes bounds the LAN-served delegation request before
-	// JSON decoding. It leaves ample room for escaped representations of the
-	// 4 KiB brief and 256-character model while preventing unbounded reads.
-	maxDelegateTaskBodyBytes = 32 << 10
-
 	// maxPauseBodyBytes caps pause/resume bodies. They carry an incident id and
 	// a fixed reason; 4 KiB is already far more than either needs.
 	maxPauseBodyBytes = 4 << 10

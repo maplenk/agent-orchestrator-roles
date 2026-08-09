@@ -9,8 +9,9 @@ import (
 	"strings"
 	"time"
 
-	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 	"golang.org/x/sync/singleflight"
+
+	chatsvc "github.com/aoagents/agent-orchestrator/backend/internal/service/chat"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 	"github.com/aoagents/agent-orchestrator/backend/internal/httpd/apierr"

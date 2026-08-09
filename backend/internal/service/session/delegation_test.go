@@ -177,6 +177,16 @@ func TestDelegateTaskSkipsTitleWhenProjectHasNoOwner(t *testing.T) {
 	}
 }
 
+func TestRefineDelegatedTaskTitleReturnsProjectOwnerLookupError(t *testing.T) {
+	wantErr := errors.New("owner lookup failed")
+	svc := &Service{manager: &fakeCommander{projectOrchestratorErr: wantErr}}
+
+	err := svc.refineDelegatedTaskTitle(context.Background(), "worker", DelegateTaskInput{ProjectID: "ao"})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("refineDelegatedTaskTitle error = %v, want wrapped owner lookup error", err)
+	}
+}
+
 func TestDelegateTaskKeepsSpawnSuccessWhenTitleOrchestratorNeverBecomesReady(t *testing.T) {
 	st := newFakeStore()
 	st.projects["ao"] = domain.ProjectRecord{ID: "ao"}

@@ -10,15 +10,15 @@ import (
 )
 
 const (
-	AgentSwitchOptionsReasonWorkerRequired  = "worker_session_required"
-	AgentSwitchOptionsReasonTerminated      = "terminated"
-	AgentSwitchOptionsReasonPaused          = "paused"
-	AgentSwitchOptionsReasonInProgress      = "agent_switch_in_progress"
-	AgentSwitchOptionsReasonChatUnsupported = "switch_chat_unsupported"
-	AgentSwitchOptionsReasonRolePinRequired = "role_pin_required"
-	AgentSwitchOptionsReasonRoleMapRequired = "role_map_required"
-	AgentSwitchOptionsReasonRoleNotInMap    = "role_not_in_map"
-	AgentSwitchOptionsReasonNoTarget        = "no_target"
+	agentSwitchOptionsReasonWorkerRequired  = "worker_session_required"
+	agentSwitchOptionsReasonTerminated      = "terminated"
+	agentSwitchOptionsReasonPaused          = "paused"
+	agentSwitchOptionsReasonInProgress      = "agent_switch_in_progress"
+	agentSwitchOptionsReasonChatUnsupported = "switch_chat_unsupported"
+	agentSwitchOptionsReasonRolePinRequired = "role_pin_required"
+	agentSwitchOptionsReasonRoleMapRequired = "role_map_required"
+	agentSwitchOptionsReasonRoleNotInMap    = "role_not_in_map"
+	agentSwitchOptionsReasonNoTarget        = "no_target"
 )
 
 // AgentSwitchOptions is the daemon-authoritative set of exact harness/model
@@ -60,31 +60,31 @@ func (s *Service) AgentSwitchOptions(ctx context.Context, id domain.SessionID) (
 		Targets: []domain.FailoverTarget{},
 	}
 	if rec.Kind != domain.KindWorker {
-		options.Reason = AgentSwitchOptionsReasonWorkerRequired
+		options.Reason = agentSwitchOptionsReasonWorkerRequired
 		return options, nil
 	}
 	if rec.IsTerminated {
-		options.Reason = AgentSwitchOptionsReasonTerminated
+		options.Reason = agentSwitchOptionsReasonTerminated
 		return options, nil
 	}
 	if rec.Metadata.Pause != nil {
-		options.Reason = AgentSwitchOptionsReasonPaused
+		options.Reason = agentSwitchOptionsReasonPaused
 		return options, nil
 	}
 	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
-		options.Reason = AgentSwitchOptionsReasonChatUnsupported
+		options.Reason = agentSwitchOptionsReasonChatUnsupported
 		return options, nil
 	}
 	if reader, ok := s.store.(agentSwitchOptionsActiveReader); ok {
 		if _, active, readErr := reader.GetActiveAgentSwitch(ctx, id); readErr != nil {
 			return AgentSwitchOptions{}, fmt.Errorf("agent switch options %s: read active switch: %w", id, readErr)
 		} else if active {
-			options.Reason = AgentSwitchOptionsReasonInProgress
+			options.Reason = agentSwitchOptionsReasonInProgress
 			return options, nil
 		}
 	}
 	if roleID == "" {
-		options.Reason = AgentSwitchOptionsReasonRolePinRequired
+		options.Reason = agentSwitchOptionsReasonRolePinRequired
 		return options, nil
 	}
 
@@ -97,11 +97,11 @@ func (s *Service) AgentSwitchOptions(ctx context.Context, id domain.SessionID) (
 	}
 	roleMap := project.Config.RoleMap.WithDefaults()
 	if roleMap.IsZero() {
-		options.Reason = AgentSwitchOptionsReasonRoleMapRequired
+		options.Reason = agentSwitchOptionsReasonRoleMapRequired
 		return options, nil
 	}
 	if _, ok := roleMap.Roles[roleID]; !ok {
-		options.Reason = AgentSwitchOptionsReasonRoleNotInMap
+		options.Reason = agentSwitchOptionsReasonRoleNotInMap
 		return options, nil
 	}
 	for _, target := range domain.RoleAuthorizedSwitchTargets(roleMap, roleID) {
@@ -112,7 +112,7 @@ func (s *Service) AgentSwitchOptions(ctx context.Context, id domain.SessionID) (
 		options.Targets = append(options.Targets, target)
 	}
 	if len(options.Targets) == 0 {
-		options.Reason = AgentSwitchOptionsReasonNoTarget
+		options.Reason = agentSwitchOptionsReasonNoTarget
 		return options, nil
 	}
 	options.Available = true
