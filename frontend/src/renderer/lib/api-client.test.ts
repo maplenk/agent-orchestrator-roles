@@ -241,6 +241,21 @@ describe("normalizeApiOperation", () => {
 		expect(normalizeApiOperation("GET", "/api/v1/orchestrators/orch-abc")).toBe("GET /api/v1/orchestrators/:id");
 		expect(normalizeApiOperation("POST", "/api/v1/prs/pr-1/merge")).toBe("POST /api/v1/prs/:id/merge");
 	});
+
+	it("never reports session or durable switch ids from agent-switch routes", () => {
+		expect(normalizeApiOperation("GET", "/api/v1/sessions/session-secret/agent-switch-options")).toBe(
+			"GET /api/v1/sessions/:id/agent-switch-options",
+		);
+		expect(normalizeApiOperation("POST", "/api/v1/sessions/session-secret/agent-switches")).toBe(
+			"POST /api/v1/sessions/:id/agent-switches",
+		);
+		expect(
+			normalizeApiOperation(
+				"POST",
+				"/api/v1/sessions/session-secret/agent-switches/switch-secret/recover",
+			),
+		).toBe("POST /api/v1/sessions/:id/agent-switches/:id/recover");
+	});
 });
 
 describe("api error telemetry", () => {
@@ -344,7 +359,7 @@ describe("applyOperatorSpawnHeaders", () => {
 		expect(o.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
 	});
 
-	it("injects operator token for switch and fresh-conversation", () => {
+	it("injects operator token for switch, canonical agent switch, recovery, and fresh-conversation", () => {
 		const sw = applyOperatorSpawnHeaders(
 			new Headers(),
 			"POST",
@@ -352,6 +367,14 @@ describe("applyOperatorSpawnHeaders", () => {
 			"op-tok",
 		);
 		expect(sw.get("X-AO-Operator-Spawn-Token")).toBe("op-tok");
+		for (const path of [
+			"/api/v1/sessions/mer-1/switch-agent",
+			"/api/v1/sessions/mer-1/agent-switches",
+			"/api/v1/sessions/mer-1/agent-switches/switch-1/recover",
+		]) {
+			const headers = applyOperatorSpawnHeaders(new Headers(), "POST", path, "op-tok");
+			expect(headers.get("X-AO-Operator-Spawn-Token"), path).toBe("op-tok");
+		}
 		const fr = applyOperatorSpawnHeaders(
 			new Headers(),
 			"POST",

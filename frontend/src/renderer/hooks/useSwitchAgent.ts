@@ -1,8 +1,8 @@
 import { type QueryClient, useMutation, useMutationState, useQueryClient } from "@tanstack/react-query";
 import type { components } from "../../api/schema";
-import { apiClient, apiErrorMessage } from "../lib/api-client";
+import { ApiActionError, apiClient } from "../lib/api-client";
 import type { WorkspaceSession } from "../types/workspace";
-import { agentSwitchesQueryKey, type AgentSwitch } from "./useAgentSwitches";
+import { agentSwitchOptionsQueryKey, agentSwitchesQueryKey, type AgentSwitch } from "./useAgentSwitches";
 import { workspaceQueryKey } from "./useWorkspaceQuery";
 
 export type SwitchAgentHarness = components["schemas"]["SwitchAgentRequest"]["targetHarness"];
@@ -10,6 +10,7 @@ export type SwitchAgentHarness = components["schemas"]["SwitchAgentRequest"]["ta
 export type SwitchAgentInput = {
 	session: WorkspaceSession;
 	targetHarness: SwitchAgentHarness;
+	targetModel?: string;
 	note: string;
 	idempotencyKey: string;
 };
@@ -51,13 +52,8 @@ export function useSwitchAgentState(sessionId: string) {
 	}
 
 	return {
-		error:
-			!pending &&
-			latest?.status === "error" &&
-			latest.error instanceof Error
-				? latest.error.message
-				: null,
-		input: pending?.input,
+		error: !pending && latest?.status === "error" ? latest.error : null,
+		input: pending?.input ?? (latest?.status === "error" ? latest.input : undefined),
 		isPending: Boolean(pending),
 	};
 }
@@ -76,31 +72,66 @@ export function createSwitchAgentIdempotencyKey(): string {
 	return crypto.randomUUID();
 }
 
+type AgentSwitchMutationResponse = {
+	data?: { switch: AgentSwitch };
+	error?: unknown;
+	response?: Response;
+};
+
+// These canonical Phase 4 routes are owned by the API lane. Keep the temporary
+// cast isolated here so this branch can typecheck without editing generated
+// schema.ts; npm run api removes the schema lag when the lanes merge.
+async function postCanonicalAgentSwitch(
+	sessionId: string,
+	body: {
+		idempotencyKey: string;
+		note?: string;
+		targetHarness: SwitchAgentHarness;
+		targetModel?: string;
+	},
+): Promise<AgentSwitchMutationResponse> {
+	const post = apiClient.POST as unknown as (
+		path: "/api/v1/sessions/{sessionId}/agent-switches",
+		options: { params: { path: { sessionId: string } }; body: typeof body },
+	) => Promise<AgentSwitchMutationResponse>;
+	return post("/api/v1/sessions/{sessionId}/agent-switches", {
+		params: { path: { sessionId } },
+		body,
+	});
+}
+
+async function postAgentSwitchRecovery(
+	sessionId: string,
+	switchId: string,
+): Promise<AgentSwitchMutationResponse> {
+	const post = apiClient.POST as unknown as (
+		path: "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover",
+		options: { params: { path: { sessionId: string; switchId: string } } },
+	) => Promise<AgentSwitchMutationResponse>;
+	return post("/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover", {
+		params: { path: { sessionId, switchId } },
+	});
+}
+
 export function useSwitchAgent() {
 	const queryClient = useQueryClient();
 	return useMutation({
 		mutationKey: switchAgentMutationKey,
-		mutationFn: async ({ session, targetHarness, note, idempotencyKey }: SwitchAgentInput) => {
+		mutationFn: async ({ session, targetHarness, targetModel, note, idempotencyKey }: SwitchAgentInput) => {
 			const body: {
 				targetHarness: SwitchAgentHarness;
+				targetModel?: string;
 				note?: string;
 				idempotencyKey: string;
 			} = { targetHarness, idempotencyKey };
+			const normalizedModel = targetModel?.trim();
+			if (normalizedModel) body.targetModel = normalizedModel;
 			const normalizedNote = note.trim();
 			if (normalizedNote) body.note = normalizedNote;
 
-			const { data, error, response } = await apiClient.POST(
-				"/api/v1/sessions/{sessionId}/switch-agent",
-				{
-					params: { path: { sessionId: session.id } },
-					body,
-				},
-			);
+			const { data, error } = await postCanonicalAgentSwitch(session.id, body);
 			if (error) {
-				const fallback = response
-					? `Failed to switch agent (${response.status})`
-					: "Failed to switch agent";
-				throw new Error(apiErrorMessage(error, fallback));
+				throw new ApiActionError(error, "Failed to switch agent");
 			}
 			return data?.switch;
 		},
@@ -117,7 +148,34 @@ export function useSwitchAgent() {
 		onSettled: async (_data, _error, variables) => {
 			await Promise.all([
 				queryClient.invalidateQueries({ queryKey: workspaceQueryKey }),
+				queryClient.invalidateQueries({ queryKey: agentSwitchOptionsQueryKey(variables.session.id) }),
 				queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(variables.session.id) }),
+			]);
+		},
+	});
+}
+
+export function useRecoverAgentSwitch() {
+	const queryClient = useQueryClient();
+	return useMutation({
+		mutationKey: ["recover-agent-switch"],
+		mutationFn: async ({ sessionId, switchId }: { sessionId: string; switchId: string }) => {
+			const { data, error } = await postAgentSwitchRecovery(sessionId, switchId);
+			if (error) throw new ApiActionError(error, "Failed to recover agent switch");
+			if (!data?.switch) throw new Error("Agent switch recovery returned no switch");
+			return data.switch;
+		},
+		onSuccess: (agentSwitch) => {
+			queryClient.setQueryData<AgentSwitch[]>(
+				agentSwitchesQueryKey(agentSwitch.sessionId),
+				(current = []) => [agentSwitch, ...current.filter((entry) => entry.id !== agentSwitch.id)],
+			);
+		},
+		onSettled: async (_data, _error, variables) => {
+			await Promise.all([
+				queryClient.invalidateQueries({ queryKey: workspaceQueryKey }),
+				queryClient.invalidateQueries({ queryKey: agentSwitchOptionsQueryKey(variables.sessionId) }),
+				queryClient.invalidateQueries({ queryKey: agentSwitchesQueryKey(variables.sessionId) }),
 			]);
 		},
 	});

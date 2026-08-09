@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { AgentSwitch } from "./useAgentSwitches";
-import { agentSwitchesRefetchInterval } from "./useAgentSwitches";
+import {
+	agentSwitchNeedsManualDelivery,
+	agentSwitchNeedsRecovery,
+	agentSwitchesRefetchInterval,
+} from "./useAgentSwitches";
 
 function switchRecord(overrides: Partial<AgentSwitch> = {}): AgentSwitch {
 	return {
@@ -24,5 +28,27 @@ describe("agentSwitchesRefetchInterval", () => {
 		["does not poll terminal history", { state: "completed" }, false],
 	] as const)("%s", (_name, overrides, expected) => {
 		expect(agentSwitchesRefetchInterval([switchRecord(overrides)])).toBe(expected);
+	});
+});
+
+describe("agent switch operator actions", () => {
+	it("requires safe recovery only for the nonterminal ambiguous-owner marker", () => {
+		expect(agentSwitchNeedsRecovery(switchRecord({ errorCode: "target_start_unconfirmed" }))).toBe(true);
+		expect(
+			agentSwitchNeedsRecovery(
+				switchRecord({ errorCode: "delivery_unconfirmed", state: "failed" }),
+			),
+		).toBe(false);
+	});
+
+	it("routes ambiguous delivery to manual guidance instead of recovery", () => {
+		expect(
+			agentSwitchNeedsManualDelivery(
+				switchRecord({ errorCode: "delivery_unconfirmed", state: "failed" }),
+			),
+		).toBe(true);
+		expect(
+			agentSwitchNeedsManualDelivery(switchRecord({ errorCode: "target_start_unconfirmed" })),
+		).toBe(false);
 	});
 });

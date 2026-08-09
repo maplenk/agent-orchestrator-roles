@@ -1,23 +1,33 @@
 import { ArrowLeftRight, FileWarning, LoaderCircle, TriangleAlert, X } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
 	createSwitchAgentIdempotencyKey,
 	clearSwitchAgentState,
 	type SwitchAgentHarness,
+	useRecoverAgentSwitch,
 	useSwitchAgent,
 	useSwitchAgentState,
 } from "../hooks/useSwitchAgent";
 import {
 	findActiveAgentSwitch,
+	agentSwitchNeedsManualDelivery,
 	findRecoveryRequiredAgentSwitch,
 	isTerminalAgentSwitch,
 	type AgentSwitch,
+	type AgentSwitchTarget,
+	useAgentSwitchOptions,
 	useAgentSwitches,
 } from "../hooks/useAgentSwitches";
-import { agentSwitchErrorLabelKeys, type AgentSwitchErrorCode } from "../i18n/key-maps";
-import { AGENT_LABELS, AGENT_OPTIONS, agentLabel } from "../lib/agent-options";
+import {
+	agentSwitchActionErrorCode,
+	agentSwitchActionErrorLabelKey,
+	agentSwitchOptionsReasonLabelKey,
+	agentSwitchStartModeLabelKey,
+	agentSwitchStateLabelKey,
+} from "../lib/agent-switch-presentation";
+import { agentLabel } from "../lib/agent-options";
 import type { WorkspaceSession } from "../types/workspace";
 import { AgentAvatar } from "./AgentAvatar";
 import {
@@ -38,26 +48,12 @@ export const SWITCH_AGENT_OPTIONS = [
 	{ value: "codex", label: "Codex" },
 ] as const satisfies ReadonlyArray<{ value: SwitchAgentHarness; label: string }>;
 
-const ALL_SWITCH_AGENT_OPTIONS = AGENT_OPTIONS.map((value) => ({ value, label: AGENT_LABELS[value] }));
-
 export function canSwitchAgentHarness(value: string): value is SwitchAgentHarness {
 	return SWITCH_AGENT_OPTIONS.some((option) => option.value === value);
 }
 
-const AGENT_SWITCH_STATE_KEYS = {
-	preparing_handoff: "switchAgent.state.preparingHandoff",
-	stopping_source: "switchAgent.state.stoppingSource",
-	source_stopped: "switchAgent.state.sourceStopped",
-	starting_target: "switchAgent.state.startingTarget",
-	target_ready: "switchAgent.state.targetReady",
-	delivering_context: "switchAgent.state.deliveringContext",
-	completed: "switchAgent.state.completed",
-	failed: "switchAgent.state.failed",
-} as const;
-
-function agentSwitchErrorLabelKey(errorCode: string | undefined) {
-	if (!errorCode) return "switchAgent.state.failed" as const;
-	return agentSwitchErrorLabelKeys[errorCode as AgentSwitchErrorCode] ?? "switchAgent.state.failed";
+function switchTargetKey(target: AgentSwitchTarget): string {
+	return `${target.harness}\u001f${target.model}`;
 }
 
 function usedFallbackContext(agentSwitch: AgentSwitch): boolean {
@@ -84,51 +80,94 @@ export function SwitchAgentDialog({
 	const noteId = useId();
 	const targetId = useId();
 	const historyId = useId();
-	const defaultTargetHarness: SwitchAgentHarness = session.provider === "claude-code" ? "codex" : "claude-code";
-	const [targetHarness, setTargetHarness] = useState<SwitchAgentHarness>(defaultTargetHarness);
+	const [selectedTargetKey, setSelectedTargetKey] = useState("");
 	const [note, setNote] = useState("");
+	const [manualDeliveryAcknowledged, setManualDeliveryAcknowledged] = useState(false);
 	const switchAgent = useSwitchAgent();
+	const recoverAgentSwitch = useRecoverAgentSwitch();
 	const switchMutation = useSwitchAgentState(session.id);
+	const idempotencyKeyRef = useRef("");
+	if (!idempotencyKeyRef.current) {
+		idempotencyKeyRef.current =
+			switchMutation.error && !agentSwitchActionErrorCode(switchMutation.error)
+				? (switchMutation.input?.idempotencyKey ?? createSwitchAgentIdempotencyKey())
+				: createSwitchAgentIdempotencyKey();
+	}
 	const switchesQuery = useAgentSwitches(session.id);
+	const optionsQuery = useAgentSwitchOptions(session.id);
 	const switches = switchesQuery.data ?? [];
+	const authorizedTargets = (optionsQuery.data?.targets ?? []).filter((target) =>
+		canSwitchAgentHarness(target.harness),
+	);
+	const selectedTarget = authorizedTargets.find((target) => switchTargetKey(target) === selectedTargetKey);
 	const activeSwitch = findActiveAgentSwitch(switches);
 	const recoverySwitch = findRecoveryRequiredAgentSwitch(switches);
+	const latestSwitch = switches[0];
 	const pendingInput = switchMutation.input;
 	const switchInProgress = Boolean(
 		!recoverySwitch && (activeSwitch || (switchMutation.isPending && pendingInput)),
 	);
 	const terminalHistory = switches.filter(isTerminalAgentSwitch).slice(0, 5);
-	const checkingStatus = switchesQuery.isPending;
-	const switchBlocked = Boolean(recoverySwitch || switchInProgress || checkingStatus);
+	const manualDeliveryRequired = Boolean(
+		(latestSwitch && agentSwitchNeedsManualDelivery(latestSwitch)) ||
+			agentSwitchActionErrorCode(switchMutation.error) === "AGENT_SWITCH_DELIVERY_UNCONFIRMED",
+	);
+	const manualDeliveryBlocking = manualDeliveryRequired && !manualDeliveryAcknowledged;
+	const checkingStatus = switchesQuery.isPending || optionsQuery.isPending;
+	const statusError = switchesQuery.isError || optionsQuery.isError;
+	const optionsUnavailable = Boolean(
+		!checkingStatus &&
+			(!optionsQuery.data?.available || authorizedTargets.length === 0),
+	);
+	const switchBlocked = Boolean(
+		recoverySwitch ||
+			manualDeliveryBlocking ||
+			switchInProgress ||
+			checkingStatus ||
+			statusError ||
+			optionsUnavailable,
+	);
 
-	const clearFailedAttempt = () => {
+	useEffect(() => {
+		if (selectedTarget && authorizedTargets.some((target) => switchTargetKey(target) === selectedTargetKey)) {
+			return;
+		}
+		setSelectedTargetKey(authorizedTargets[0] ? switchTargetKey(authorizedTargets[0]) : "");
+	}, [authorizedTargets, selectedTarget, selectedTargetKey]);
+
+	const resetDraftAttempt = () => {
+		idempotencyKeyRef.current = createSwitchAgentIdempotencyKey();
 		if (!switchMutation.error) return;
 		clearSwitchAgentState(queryClient, session.id);
 	};
 
 	const submit = () => {
-		if (switchMutation.isPending || checkingStatus || activeSwitch || recoverySwitch) return;
+		if (
+			switchMutation.isPending ||
+			checkingStatus ||
+			activeSwitch ||
+			recoverySwitch ||
+			!selectedTarget ||
+			!canSwitchAgentHarness(selectedTarget.harness)
+		) return;
 		switchAgent.mutate({
 			session,
-			targetHarness,
+			targetHarness: selectedTarget.harness,
+			targetModel: selectedTarget.model,
 			note,
-			idempotencyKey: createSwitchAgentIdempotencyKey(),
+			idempotencyKey: idempotencyKeyRef.current,
 		});
 		onOpenChange(false);
 	};
 
 	const error = switchMutation.error;
-	const historyError = switchesQuery.error instanceof Error ? switchesQuery.error.message : null;
-	const stateLabel = (agentSwitch: AgentSwitch) => {
-		if (agentSwitch.state === "failed") {
-			return t(agentSwitchErrorLabelKey(agentSwitch.errorCode));
-		}
-		const translationKey =
-			agentSwitch.state in AGENT_SWITCH_STATE_KEYS
-				? AGENT_SWITCH_STATE_KEYS[agentSwitch.state as keyof typeof AGENT_SWITCH_STATE_KEYS]
-				: undefined;
-		return translationKey ? t(translationKey) : agentSwitch.state;
+	const stateLabel = (agentSwitch: AgentSwitch) => t(agentSwitchStateLabelKey(agentSwitch));
+	const startModeLabel = (agentSwitch: AgentSwitch) => {
+		const key = agentSwitchStartModeLabelKey(agentSwitch);
+		return key ? t(key) : null;
 	};
+
+	if (session.kind !== "worker") return null;
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
@@ -165,19 +204,36 @@ export function SwitchAgentDialog({
 								role="alert"
 							>
 								<TriangleAlert className="mt-0.5 size-icon-sm shrink-0 text-warning" aria-hidden="true" />
-								<div>
+								<div className="min-w-0">
 									<div className="text-control font-medium text-foreground">
 										{t("switchAgent.recovery.title")}
 									</div>
 									<p className="mt-0.5 text-caption leading-4 text-settings-muted">
 										{t("switchAgent.recovery.description")}
 									</p>
+									<p className="mt-1 text-micro text-settings-muted">
+										{t("switchAgent.phaseLabel", { phase: stateLabel(recoverySwitch) })}
+									</p>
 								</div>
 							</div>
-						) : checkingStatus ? (
-							<div className="inline-flex items-center gap-2 text-control text-settings-muted" role="status">
-								<LoaderCircle className="size-icon-sm animate-spin" aria-hidden="true" />
-								{t("switchAgent.checkingStatus")}
+						) : manualDeliveryBlocking ? (
+							<div
+								aria-label={t("switchAgent.delivery.title")}
+								className="flex items-start gap-2 rounded-md border border-warning/35 bg-warning/5 px-3 py-2.5"
+								role="alert"
+							>
+								<FileWarning className="mt-0.5 size-icon-sm shrink-0 text-warning" aria-hidden="true" />
+								<div>
+									<div className="text-control font-medium text-foreground">
+										{t("switchAgent.delivery.title")}
+									</div>
+									<p className="mt-0.5 text-caption leading-4 text-settings-muted">
+										{t("switchAgent.delivery.description")}
+									</p>
+									<p className="mt-1 text-caption leading-4 text-settings-muted">
+										{t("switchAgent.delivery.guidance")}
+									</p>
+								</div>
 							</div>
 						) : switchInProgress ? (
 							<div aria-live="polite" className="flex items-start gap-2 py-1" role="status">
@@ -186,13 +242,38 @@ export function SwitchAgentDialog({
 									<div className="text-control font-medium text-foreground">
 										{t("switchAgent.progressTitle", {
 											source: agentLabel(activeSwitch?.fromHarness ?? pendingInput?.session.provider ?? session.provider),
-											target: agentLabel(activeSwitch?.targetHarness ?? pendingInput?.targetHarness ?? targetHarness),
+											target: agentLabel(activeSwitch?.targetHarness ?? pendingInput?.targetHarness ?? session.provider),
 										})}
 									</div>
 									<p className="mt-0.5 text-caption text-settings-muted">
-										{activeSwitch ? stateLabel(activeSwitch) : t("switchAgent.switching")}
+										{activeSwitch
+											? t("switchAgent.phaseLabel", { phase: stateLabel(activeSwitch) })
+											: t("switchAgent.switching")}
 									</p>
+									{activeSwitch && startModeLabel(activeSwitch) ? (
+										<p className="mt-1 text-micro text-settings-muted">
+											{startModeLabel(activeSwitch)}
+										</p>
+									) : null}
 								</div>
+							</div>
+						) : checkingStatus ? (
+							<div className="inline-flex items-center gap-2 text-control text-settings-muted" role="status">
+								<LoaderCircle className="size-icon-sm animate-spin" aria-hidden="true" />
+								{t("switchAgent.checkingStatus")}
+							</div>
+						) : statusError ? (
+							<p className="text-caption leading-4 text-error" role="alert">
+								{t("switchAgent.error.loadStatus")}
+							</p>
+						) : optionsUnavailable ? (
+							<div className="rounded-md border border-border px-3 py-2.5" role="status">
+								<div className="text-control font-medium text-foreground">
+									{t("switchAgent.unavailable.title")}
+								</div>
+								<p className="mt-0.5 text-caption leading-4 text-settings-muted">
+									{t(agentSwitchOptionsReasonLabelKey(optionsQuery.data?.reason))}
+								</p>
 							</div>
 						) : (
 							<>
@@ -202,11 +283,11 @@ export function SwitchAgentDialog({
 									</label>
 									<Select
 										onValueChange={(value) => {
-											if (!canSwitchAgentHarness(value) || value === session.provider) return;
-											clearFailedAttempt();
-											setTargetHarness(value);
+											if (!authorizedTargets.some((target) => switchTargetKey(target) === value)) return;
+											resetDraftAttempt();
+											setSelectedTargetKey(value);
 										}}
-										value={targetHarness}
+										value={selectedTargetKey}
 									>
 										<SelectTrigger id={targetId} className="settings-field-control w-full">
 											<SelectValue />
@@ -216,38 +297,26 @@ export function SwitchAgentDialog({
 											className="max-h-64 w-(--radix-select-trigger-width) [&_[data-slot=select-scroll-down-button]]:hidden [&_[data-slot=select-scroll-up-button]]:hidden"
 											position="popper"
 										>
-											{ALL_SWITCH_AGENT_OPTIONS.map((option) => {
-												const supported = canSwitchAgentHarness(option.value);
-												const current = option.value === session.provider;
-												return (
+											{authorizedTargets.map((target) => (
 													<SelectItem
 														className="[&>span:last-child]:w-full"
-														disabled={!supported || current}
-														key={option.value}
-														value={option.value}
+														key={switchTargetKey(target)}
+														value={switchTargetKey(target)}
 													>
 														<span className="flex w-full items-center gap-2">
-															<AgentAvatar className="size-icon-lg" decorative provider={option.value} />
-															<span className="min-w-0 flex-1 truncate">{option.label}</span>
-															{!supported ? (
+															<AgentAvatar className="size-icon-lg" decorative provider={target.harness} />
+															<span className="min-w-0 flex-1 truncate">{agentLabel(target.harness)}</span>
+															{target.model ? (
 																<>
 																	<span className="sr-only">, </span>
 																	<span className="shrink-0 text-micro text-settings-muted">
-																		{t("switchAgent.comingSoon")}
-																	</span>
-																</>
-															) : current ? (
-																<>
-																	<span className="sr-only">, </span>
-																	<span className="shrink-0 text-micro text-settings-muted">
-																		{t("switchAgent.current")}
+																		{target.model}
 																	</span>
 																</>
 															) : null}
 														</span>
 													</SelectItem>
-												);
-											})}
+											))}
 										</SelectContent>
 									</Select>
 								</div>
@@ -261,7 +330,7 @@ export function SwitchAgentDialog({
 										className="settings-field-control min-h-(--size-textarea-min) resize-y py-2.5"
 										maxLength={4096}
 										onChange={(event) => {
-											clearFailedAttempt();
+											resetDraftAttempt();
 											setNote(event.target.value);
 										}}
 										placeholder={t("switchAgent.notePlaceholder")}
@@ -292,6 +361,11 @@ export function SwitchAgentDialog({
 														{t("switchAgent.historyFallbackContext")}
 													</span>
 												) : null}
+												{startModeLabel(entry) ? (
+													<span className="mt-0.5 block text-micro text-settings-muted">
+														{startModeLabel(entry)}
+													</span>
+												) : null}
 											</div>
 											<span className="shrink-0 text-micro text-settings-muted">{stateLabel(entry)}</span>
 										</li>
@@ -300,14 +374,14 @@ export function SwitchAgentDialog({
 							</section>
 						) : null}
 
-						{error ? (
+						{error && !manualDeliveryRequired ? (
 							<p className="text-caption leading-4 text-error" role="alert">
-								{error}
+								{t(agentSwitchActionErrorLabelKey(error))}
 							</p>
 						) : null}
-						{historyError ? (
+						{recoverAgentSwitch.error ? (
 							<p className="text-caption leading-4 text-error" role="alert">
-								{historyError}
+								{t("switchAgent.recovery.failed")}
 							</p>
 						) : null}
 					</div>
@@ -325,6 +399,35 @@ export function SwitchAgentDialog({
 							>
 								<ArrowLeftRight className="size-icon-sm" aria-hidden="true" />
 								{t("switchAgent.confirm")}
+							</button>
+						) : recoverySwitch ? (
+							<button
+								className="settings-footer-button settings-footer-button-primary"
+								disabled={recoverAgentSwitch.isPending}
+								onClick={() =>
+									recoverAgentSwitch.mutate({ sessionId: session.id, switchId: recoverySwitch.id })
+								}
+								type="button"
+							>
+								{recoverAgentSwitch.isPending ? (
+									<LoaderCircle className="size-icon-sm animate-spin" aria-hidden="true" />
+								) : (
+									<TriangleAlert className="size-icon-sm" aria-hidden="true" />
+								)}
+								{recoverAgentSwitch.isPending
+									? t("switchAgent.recovery.recovering")
+									: t("switchAgent.recovery.confirm")}
+							</button>
+						) : manualDeliveryBlocking ? (
+							<button
+								className="settings-footer-button settings-footer-button-primary"
+								onClick={() => {
+									resetDraftAttempt();
+									setManualDeliveryAcknowledged(true);
+								}}
+								type="button"
+							>
+								{t("switchAgent.delivery.confirm")}
 							</button>
 						) : null}
 					</div>

@@ -207,6 +207,8 @@ describe("CenterPane toolbar session label", () => {
 		expect(screen.getByTestId("terminal-interaction-surface")).toHaveAttribute("inert");
 		expect(screen.getByTestId("agent-switch-terminal-overlay")).not.toHaveClass("cursor-wait");
 		expect(within(overlay).getByText("Target startup could not be confirmed")).toBeInTheDocument();
+		expect(within(overlay).getByText("Phase: Starting target agent")).toBeInTheDocument();
+		expect(overlay).toHaveTextContent("Open the warning beside the session name to run safe recovery.");
 		expect(overlay.querySelector(".agent-switch-transfer-pulse")).not.toBeInTheDocument();
 	});
 

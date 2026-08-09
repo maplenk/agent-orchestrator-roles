@@ -6,6 +6,7 @@ import { useOverflowScroll } from "../hooks/useOverflowScroll";
 import {
 	findActiveAgentSwitch,
 	findRecoveryRequiredAgentSwitch,
+	type AgentSwitch,
 	useAgentSwitches,
 } from "../hooks/useAgentSwitches";
 import { useSwitchAgentState } from "../hooks/useSwitchAgent";
@@ -14,6 +15,7 @@ import type { ShellTerminal } from "../hooks/useShellTerminals";
 import { TERMINAL_FONT_SIZE_DEFAULT, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN } from "../lib/design-tokens";
 import { getAgentActivityView } from "../lib/session-presentation";
 import { agentLabel } from "../lib/agent-options";
+import { agentSwitchPhaseLabelKey } from "../lib/agent-switch-presentation";
 import { isLinuxPlatform, isMacPlatform } from "../lib/platform";
 import { aoBridge } from "../lib/bridge";
 import { handleTerminalTabListKeyDown } from "../lib/terminal-tabs";
@@ -424,6 +426,7 @@ export function CenterPane({
 				</div>
 				{(isSwitchingAgent || switchNeedsRecovery) && switchSource && switchTarget ? (
 					<AgentSwitchTerminalOverlay
+						phase={(recoveryAgentSwitch ?? activeAgentSwitch)?.state}
 						permissionRequired={switchPermissionRequired}
 						recoveryRequired={switchNeedsRecovery}
 						source={switchSource}
@@ -436,6 +439,7 @@ export function CenterPane({
 }
 
 type AgentSwitchTerminalOverlayProps = {
+	phase?: AgentSwitch["state"];
 	permissionRequired: boolean;
 	recoveryRequired: boolean;
 	source: string;
@@ -443,6 +447,7 @@ type AgentSwitchTerminalOverlayProps = {
 };
 
 function AgentSwitchTerminalOverlay({
+	phase,
 	permissionRequired,
 	recoveryRequired,
 	source,
@@ -456,6 +461,11 @@ function AgentSwitchTerminalOverlay({
 				source: agentLabel(source),
 				target: agentLabel(target),
 			});
+	const phaseLabel = phase
+		? t("switchAgent.phaseLabel", {
+				phase: t(agentSwitchPhaseLabelKey(phase)),
+			})
+		: null;
 
 	useEffect(() => {
 		if (!permissionRequired) overlayRef.current?.focus({ preventScroll: true });
@@ -489,6 +499,10 @@ function AgentSwitchTerminalOverlay({
 					<p className="text-caption leading-4 text-muted-foreground">
 						{t("switchAgent.recovery.shortDescription")}
 					</p>
+					{phaseLabel ? <p className="text-micro text-muted-foreground">{phaseLabel}</p> : null}
+					<p className="text-caption leading-4 text-muted-foreground">
+						{t("switchAgent.recovery.openGuidance")}
+					</p>
 				</div>
 			) : (
 				<div
@@ -511,6 +525,7 @@ function AgentSwitchTerminalOverlay({
 						<SwitchingAgentMark harness={target} />
 					</div>
 					<p className="font-mono text-control font-medium text-foreground">{title}</p>
+					{phaseLabel ? <p className="text-micro text-muted-foreground">{phaseLabel}</p> : null}
 					{permissionRequired ? (
 						<p className="rounded-md border border-warning/40 bg-surface/95 px-3 py-2 text-caption text-foreground shadow-lg">
 							{t("switchAgent.permissionRequired")}

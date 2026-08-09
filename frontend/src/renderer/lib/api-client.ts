@@ -81,6 +81,10 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/sessions",
 	"/api/v1/sessions/{sessionId}",
 	"/api/v1/sessions/{sessionId}/activity",
+	"/api/v1/sessions/{sessionId}/agent-switches",
+	"/api/v1/sessions/{sessionId}/agent-switches/{switchId}/handoff",
+	"/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover",
+	"/api/v1/sessions/{sessionId}/agent-switch-options",
 	"/api/v1/sessions/{sessionId}/interface-transition",
 	"/api/v1/sessions/{sessionId}/kill",
 	"/api/v1/sessions/{sessionId}/pr",
@@ -96,6 +100,7 @@ const ROUTE_TEMPLATES = [
 	"/api/v1/sessions/{sessionId}/reviews/trigger",
 	"/api/v1/sessions/{sessionId}/rollback",
 	"/api/v1/sessions/{sessionId}/send",
+	"/api/v1/sessions/{sessionId}/switch-agent",
 	"/api/v1/sessions/{sessionId}/workspace/events",
 	"/api/v1/sessions/{sessionId}/workspace/file",
 	"/api/v1/sessions/{sessionId}/workspace/files",
@@ -216,7 +221,7 @@ export function applyOperatorSpawnHeaders(
 	const privileged =
 		pathname === "/api/v1/sessions" ||
 		pathname === "/api/v1/orchestrators" ||
-		/^\/api\/v1\/sessions\/[^/]+\/(switch|fresh-conversation|pause|resume|continue)$/.test(pathname);
+		/^\/api\/v1\/sessions\/[^/]+\/(switch|switch-agent|agent-switches|agent-switches\/[^/]+\/recover|fresh-conversation|pause|resume|continue)$/.test(pathname);
 	if (
 		m === "POST" &&
 		privileged &&
