@@ -1,7 +1,10 @@
 # Upstream Sync 3 execution ledger
 
-**Status:** Phase 0 complete at merge commit
-`c7889415fe0b757a2158ebf830771fa33fd8dc08`; Phase 1 lanes are in progress.
+**Status:** implementation and the locally executable acceptance matrix are
+complete on `codex/upstream-sync3-integration` at
+`81302eb53bfb8f7edd15bafee0bb267d6ff59437`. Promotion, real-desktop dogfood,
+GitHub branch-protection enforcement, Windows execution, and release-conductor
+artifact checks remain pending as recorded below.
 
 **Fork source:** `roles/multi-sub-v1` at
 `37f2db5471d667e225d131babe6555f031229684`.
@@ -13,6 +16,14 @@
 `6e9dbb1051b0d4dc2b67f6525a0be1aec0c8d445`.
 
 **Integration branch:** `codex/upstream-sync3-integration`.
+
+**Validated implementation head:**
+`81302eb53bfb8f7edd15bafee0bb267d6ff59437` (32 integration commits after the
+merge).
+
+**Promotion target:** `roles/multi-sub-v1`.
+
+**Promotion PR:** **PENDING — root will insert the PR URL after creation.**
 
 **Integration merge:** `c7889415fe0b757a2158ebf830771fa33fd8dc08`
 with parents `ecf45bccd015575be5d90ee3241adf746f42826f` and the immutable
@@ -186,10 +197,32 @@ Upstream intentionally deletes `detect-urls.test.ts` with the browser-owned
 content change and `ui-store.test.ts` with the settings/UI-store rewrite. Both
 retirements require named replacement coverage before the union is accepted.
 
-No newly added focused or unconditional skip marker was found. Nine new Go
-conditional skips are platform/environment guards and remain ledgered for
-post-merge review. The inventories were captured on Darwin; ConPTY behavior
-still requires Windows CI.
+No newly added focused or unconditional skip marker was found. The nine new Go
+conditional skips are classified platform/environment guards, and the final
+renderer run reports zero skips. The inventories were captured on Darwin;
+ConPTY cross-compilation passes but execution still requires Windows CI.
+
+### Final inventory reconciliation
+
+The final inventories were captured from integrated code after all acceptance
+fixes. Their counts are name-set inventories for the surveyed surfaces; they
+are deliberately distinct from the 5,804 executed test/subtest events in the
+full 160-package backend race run.
+
+| Surface | Final count and SHA-256 | Reviewed union comparison | Reconciliation |
+|---|---|---|---|
+| Backend acceptance inventory | 1,757; `6ec0587c9b2d729163574a40a4136dbd4d85ceca998b73f9dff4223a1b226ae6` | 1,712-name union; 25 names absent and 70 integration names added | all 25 absences classified; the three real service gaps were restored by `5d91676c1` |
+| Runtime inventory | 2,295; `1694c597b8c5621fad7ed67ae4a85855bea9d07a07ae61b1bb0594f845818cc1` | 2,209-name union; 27 names absent and 113 integration names added | all 27 absences classified; the remaining Muse top-level activity-hook gap was restored by `81302eb53` |
+| Renderer inventory | 2,222; `3f293e3b383e97263e38d749555d1dd19f8ff5c75e7cac6cf69321c10dbe4166` | 2,294-name union; 85 names absent and 13 integration names added | all 85 absences classified; no unexplained renderer test loss remains |
+
+The backend service gaps were the explicit clean-replacement mode, inherited
+persisted mode, and explicit mode for a new orchestrator. They now exercise the
+manager-owned `EnsureOrchestrator` boundary. The runtime follow-up pins Muse in
+the registry-wide top-level activity-hook contract. The renderer reconciliation
+also accounts for upstream's intentional retirement of `detect-urls.test.ts`
+and `ui-store.test.ts`; replacement behavior is covered by the browser-owned
+content and current settings/store suites. No accepted inventory difference is
+an unexplained deletion, silent skip, or assertion removal.
 
 ## Reviewer and desktop conflict decisions
 
@@ -200,16 +233,19 @@ still requires Windows CI.
 - Upstream's experimental reviewer catalog does not itself grant fork
   authorization. Reviewer trust/capability policy remains separately
   authoritative and unknown-auth reviewers are not enabled accidentally.
-- The worker switch UI remains unavailable until the engine and policy gates
-  pass. Its eventual targets come from authorized role-map harness/model pairs,
-  never the upstream hard-coded set.
+- The worker switch UI is enabled only through daemon-authoritative exact
+  harness/model options. It never infers targets from a local catalog, and the
+  mutation path re-authorizes the same role-map intent before saga creation.
+  Recovery-incapable builds report initiation-disabled instead of exposing an
+  unsafe switch action.
 - Orchestrator switching remains outside the worker engine and hidden in Chat.
 - Browser runtime and native-window composition must retain daemon authority,
   the opt-in authenticated LAN listener, updater behavior, and all state below
   `~/.ao`.
 - Forge/package conflicts preserve the fork daemon and ACP resources while
-  adding the pinned agent-browser runtime. `npm ci` accepted the merged lock;
-  a post-integration zero-diff lock audit remains pending.
+  adding the pinned agent-browser runtime. `npm ci` accepted the merged lock,
+  no later integration commit changed the package manifests or lock, and the
+  final Darwin arm64 Forge package completed successfully.
 
 ## Migration ledger
 
@@ -221,16 +257,31 @@ still requires Windows CI.
   `b3871aaf81c982886f3385f276aed543abdce029a62057f1a6708a3b5c643bc3`.
 - The file in integration merge `c7889415` retains those exact Git-blob and
   SHA-256 identities.
-- Fresh-database, copied-fork-through-`9008`, and second-boot idempotency tests
-  are mandatory.
+- Fresh-database, copied-fork-through-`9008`, second-boot idempotency,
+  burned-version, and migration-reconciliation tests all pass in the final
+  normal and race backend suites.
 - `migrate_burned_versions_test.go` is a semantic merge conflict and may not be
   resolved wholesale.
 - Fork migration-ledger repair must run before upstream chat and agent-switch
   renumber repair, followed by burned-schema and review/browser compatibility
   preparation, `goose.Up` with allow-missing, and post-migration
   reconciliation.
-- Any fork-specific switch extension uses a new `9009+` migration; `0085` and
-  the already-merged `9008` are immutable.
+- Fork-specific switch extensions use new migrations; `0085` and the
+  already-merged `9008` remain immutable:
+  - `9009_agent_switch_contract_guards.sql` enforces the initial tuple,
+    immutable provenance, legal state transitions, and coherent recovery
+    tuple at the database boundary;
+  - `9010_agent_switch_authorized_intent.sql` persists exact target model,
+    role snapshot, failover attempt, and source/target generation provenance,
+    with source and authorized intent fields immutable;
+  - `9011_failover_authorized_role_snapshot.sql` closes the durable window
+    between failover-attempt admission and saga creation with a required,
+    immutable role snapshot.
+
+`git diff 6e9dbb105 -- 0085_agent_switching.sql` is empty at final integration
+head. Its Git blob remains `8582b8b9b9e4b0398487fbbca19f91f016016957`
+and its SHA-256 remains
+`b3871aaf81c982886f3385f276aed543abdce029a62057f1a6708a3b5c643bc3`.
 
 ## Phase 0 gate evidence
 
@@ -249,13 +300,14 @@ The following commands/results were actually observed on integration commit
 Phase 0 did **not** run the full backend test suite, full renderer tests, final
 generator zero-diff checks, frontend production build/package, migration
 matrix, browser end-to-end tests, Windows ConPTY CI, real-desktop validation,
-or signed artifact verification. Those remain later gates.
+or signed artifact verification. That is the historical Phase 0 state; the
+locally executable items were completed at final integration head below.
 
 ## Phase 1 policy characterization evidence
 
-The isolated policy lane added test-only commit
-`a93714b4aed6f239557841b85b5ff87335a2668b` (`test: characterize switch
-policy boundaries`) on `codex/upstream-sync3-policy`. It adds:
+The isolated policy lane was integrated as
+`09d1356938b56cdaec803776d9a065ec3cb2afc3` (`test: characterize switch policy
+boundaries`). It adds:
 
 - `backend/internal/domain/policy_characterization_test.go`;
 - `backend/internal/service/session/policy_characterization_test.go`;
@@ -286,22 +338,119 @@ three-package baseline failures cluster in shared chat cleanup, dogfood
 rollback, orchestrator reap, pause re-nudge, legacy orchestrator rollback,
 switch rollback error identity, and the service mapping for
 `manager_switch_in_progress`. They are unresolved integration evidence, not
-failures introduced by `a93714b4`.
+failures introduced by `09d135693`.
 
-## Unresolved acceptance items
+That paragraph records the Phase 1 baseline, not final state. The failures were
+closed by the convergence and acceptance commits below; the final full normal,
+lint, and race runs are green.
 
-- Run `npm run sqlc` and `npm run api` again after all Phase 1-3 integration
-  and require zero diff.
-- Run the fresh database, copied fork-through-`9008`, second-boot idempotency,
-  burned-version, and migration reconciliation matrix.
-- Resolve the 17 observed domain/service/session-manager baseline failures and
-  run the complete backend test suite, including race coverage where required.
-- Produce the post-merge test-name inventory and reconcile it against the
-  2,209-path runtime and renderer reviewed unions.
-- Name and verify replacement coverage for the intentionally retired
-  `detect-urls.test.ts` and `ui-store.test.ts` suites.
-- Run full renderer tests, frontend build/package, browser/Electron end-to-end,
-  real-desktop isolated-`AO_DATA_DIR`, Windows ConPTY, and macOS signed ZIP/DMG
-  artifact verification.
-- Keep the worker switch UI unavailable until policy/engine convergence and
-  the later acceptance gates are complete.
+## Integrated phase and commit ledger
+
+All commit IDs below are unambiguous prefixes on
+`codex/upstream-sync3-integration`; the full validated implementation head is
+recorded at the top of this ledger.
+
+| Phase | Integrated commits | Accepted outcome |
+|---|---|---|
+| Phase 0 merge and irreversible-risk work | `ac7ef32aa`, `ecf45bccd`, merge `c7889415f`, `67972d90d`, `86f4d1125` | immutable plan and baseline; exact full-range merge; target generation frozen before destructive work; Phase 0 evidence recorded |
+| Phase 1 foundations and conflict convergence | `6161f7e3d`, `09d135693`, `f55cd3512`, `0a76245f7`, `5778f47c`, `1fb8f1525` | transient versus durable ownership errors separated; policy boundaries characterized; exact tmux capacity preflight; chat/switch cleanup safety retained; durable storage contracts and merged backend control paths reconciled |
+| Phase 2 provider continuity and handoff | `7a533f53b`, `89f957423`, `4a94473f5`, `bb3ec3bea`, `10d5d25ff`, `81a709b0f` | provider-native continuation probes hardened; native identity promoted only after exact acknowledgement; recovery-incapable boot refused; final handoff precedes source stop; initiation separated from recovery; adversarial boundary coverage added |
+| Maintenance automation | `7744297be` | daily/manual upstream drift inventory, fast-forward-only fork mirror, high-risk classification, and one stable tracker workflow added without any automatic fork-trunk merge |
+| Phase 3 policy, recovery and failover convergence | `b31f406f8`, `190ea997d`, `5d5a7866e`, `97c7913c7`, `26584306a`, `e2a8c597f`, `45631c0dd`, `866d3f08e` | exact-fenced safe recovery; immutable target/model/role intent; failover role snapshot; worker route enforcement; idempotent policy proof; automatic failover convergence; final generation and recovery gates closed |
+| Phase 4 API, CLI and desktop | `b4038015e`, `6457c621d`, `c68f36e1b`, `4703071f1` | safe worker switch controls; canonical create/history/options/exact-recovery HTTP contract; legacy switch compatibility wrapper; HTTP-only CLI idempotency/note/JSON/history/recovery; generated client adoption; settings/task-flow conflict reconciliation |
+| Final acceptance and lint reconciliation | `5d91676c1`, `7aede584d`, `32481ebcc`, `b0e8201e6`, `81302eb53` | missing orchestrator-mode paths restored; manager, service/controller, provider and storage lint cleared; Muse top-level activity contract restored |
+
+The canonical worker-switch operation now authorizes the exact role-map
+harness/model pair before saga creation, persists the target and source
+generations separately from the request fingerprint, never routes an
+orchestrator through the worker engine, and treats ambiguous delivery as a
+terminal safe-recovery decision rather than a generic resend. The old
+`switch_pending_json` path remains limited to orchestrators and recovery of
+legacy in-flight workers.
+
+## Final acceptance evidence
+
+The final locally executable matrix was run from the integrated branch after
+the acceptance commits.
+
+### Backend, generators and lint
+
+| Command / gate | Final result |
+|---|---|
+| `npm run lint` | passed, including the normal Go suite and `golangci-lint` with 0 issues |
+| `cd backend && go build ./...` | passed |
+| `cd backend && go vet ./...` | passed |
+| `cd backend && go test -race ./...` | 5,804 tests/subtests passed across 160 packages |
+| `npm run sqlc` | passed; zero generated diff |
+| `npm run api` | passed; zero generated OpenAPI or `frontend/src/api/schema.ts` diff |
+
+The full backend runs include the fresh database, copied fork-through-`9008`,
+second idempotent boot, burned-version, migration-reconciliation, durable saga,
+provider continuation, lifecycle, failover, API, CLI, and telemetry coverage.
+Generated sqlc, OpenAPI, and TypeScript contract artifacts therefore match
+their final sources.
+
+### Frontend, E2E and package
+
+| Command / gate | Final result |
+|---|---|
+| `npm run typecheck` | passed |
+| `npm run typecheck:e2e` | passed |
+| `AO_AGENT_BROWSER_TEST_BINARY=$PWD/agent-browser/agent-browser npm run test -- --reporter=dot` | 2,222 of 2,222 Vitest tests passed; zero skips |
+| `npm run test:e2e:renderer` | 21 of 21 passed after installing the pinned Chromium build |
+| `npm run test:e2e` | passed with exit status 0 |
+| `npm run package` | passed; Electron Forge produced the local Darwin arm64 package |
+| ConPTY cross-compile gate | passed; execution on a Windows host remains external |
+
+The generated client is the only renderer switch contract. The UI reads exact
+daemon options, sends `targetModel`, exposes history and exact recovery, and
+does not implement storage, runtime, role-map, idempotency, or recovery policy
+locally.
+
+## Maintenance workflow implementation
+
+Commit `7744297bedc5b4d1d97c2d7f142fee5a3fffc063` adds the 446-line
+`.github/workflows/upstream-watch.yml` implementation described by the plan.
+It runs daily at 06:23 UTC and through `workflow_dispatch`, with a dry-run
+input. It:
+
+- fetches canonical upstream without GitHub credentials and enforces the
+  disabled canonical push URL;
+- gives its token only `contents: write` and `issues: write` on the fork;
+- creates or advances only `origin/upstream-main`, through an ordinary
+  fast-forward-only one-ref push, and refuses divergence;
+- records the canonical SHA/date/subject, ahead/behind counts, commit list,
+  changed files, new migrations, and high-risk path categories;
+- creates or updates one labeled drift tracker and marks it current when the
+  recorded baseline equals canonical main;
+- never merges, cherry-picks, regenerates, edits migrations, publishes, or
+  writes the protected fork trunk.
+
+`docs/roles/AO_BASELINE_SHA.txt` intentionally remains at the last accepted
+Sync 2 pin until this cumulative promotion merges. After promotion it must be
+advanced to the full Sync 3 pin
+`6e9dbb1051b0d4dc2b67f6525a0be1aec0c8d445`, and the hosted workflow must prove
+its drift, no-drift, and non-fast-forward-refusal paths.
+
+## Pending external and promotion evidence
+
+These are environmental or repository-administration gates, not known local
+test failures:
+
+- **Desktop dogfood:** **PENDING — root will insert real-desktop evidence here.**
+- **Promotion PR:** **PENDING — root will insert the PR URL here.**
+- `npx @redwoodjs/agent-ci run --all` could not run because this host has no
+  Docker binary or socket.
+- ConPTY cross-compilation passed, but a real Windows execution run remains
+  external.
+- The GitHub branch-protection API returned 404 for `roles/multi-sub-v1`; the
+  promotion target is not currently protected and must be protected before it
+  can enforce the planned PR-only maintenance boundary.
+- Dogfood on two physical installations remains external.
+- Signed macOS ZIP/DMG verification remains reserved for the designated
+  release conductor. The local Forge package is not a substitute for
+  `verify-mac-artifact.sh`, notarization, stapling, updater metadata, or
+  release-channel verification.
+- The hosted upstream-watch drift/no-drift/non-fast-forward matrix requires
+  fork Actions permissions, the mirror branch, and tracker issue state after
+  promotion; local source review cannot create that evidence.

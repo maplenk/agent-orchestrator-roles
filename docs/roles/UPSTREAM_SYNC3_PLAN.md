@@ -1,6 +1,8 @@
 # Upstream Sync 3 — full upstream-main integration and maintenance plan
 
-**Status:** planned; implementation has not started.
+**Status:** implemented on `codex/upstream-sync3-integration`; final promotion
+and externally hosted acceptance evidence are tracked in
+[`UPSTREAM_SYNC3_EXECUTION.md`](UPSTREAM_SYNC3_EXECUTION.md).
 
 **Created:** 2026-08-09.
 
