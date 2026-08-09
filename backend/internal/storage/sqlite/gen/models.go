@@ -452,6 +452,7 @@ type SessionFailoverAttempt struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	SourceGenerationID string
+	RoleSnapshotJson   string
 }
 
 type SessionInterfaceTransition struct {

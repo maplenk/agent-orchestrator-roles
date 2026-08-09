@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -57,6 +58,7 @@ func (s *Store) AppendSessionFailoverAttemptWithLedger(
 	if strings.TrimSpace(payload) == "" {
 		payload = "{}"
 	}
+	roleSnapshotJSON, _ := json.Marshal(attempt.RoleSnapshot)
 
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -94,6 +96,7 @@ func (s *Store) AppendSessionFailoverAttemptWithLedger(
 			RungIndex:          int64(attempt.RungIndex),
 			GenerationID:       attempt.GenerationID,
 			SourceGenerationID: attempt.SourceGenerationID,
+			RoleSnapshotJson:   string(roleSnapshotJSON),
 			State:              string(attempt.State),
 			CreatedAt:          attempt.CreatedAt.UTC(),
 			UpdatedAt:          attempt.UpdatedAt.UTC(),
@@ -202,12 +205,20 @@ func validateFailoverAttempt(a domain.FailoverAttempt) error {
 	if strings.TrimSpace(a.SourceGenerationID) == "" {
 		return fmt.Errorf("failover attempt %s: source_generation_id required", a.ID)
 	}
+	if strings.TrimSpace(a.RoleSnapshot.RoleID) == "" || a.RoleSnapshot.ResolvedHarness != a.ToHarness ||
+		strings.TrimSpace(a.RoleSnapshot.ResolvedModel) != strings.TrimSpace(a.ToModel) {
+		return fmt.Errorf("failover attempt %s: role snapshot must match the authorized target", a.ID)
+	}
 	return nil
 }
 
 func failoverAttemptsToDomain(rows []gen.SessionFailoverAttempt) []domain.FailoverAttempt {
 	out := make([]domain.FailoverAttempt, 0, len(rows))
 	for _, r := range rows {
+		var roleSnapshot domain.SessionRoleBinding
+		if r.RoleSnapshotJson != "" {
+			_ = json.Unmarshal([]byte(r.RoleSnapshotJson), &roleSnapshot)
+		}
 		out = append(out, domain.FailoverAttempt{
 			ID:                 r.ID,
 			SessionID:          domain.SessionID(r.SessionID),
@@ -222,6 +233,7 @@ func failoverAttemptsToDomain(rows []gen.SessionFailoverAttempt) []domain.Failov
 			RungIndex:          int(r.RungIndex),
 			GenerationID:       r.GenerationID,
 			SourceGenerationID: r.SourceGenerationID,
+			RoleSnapshot:       roleSnapshot,
 			State:              domain.FailoverAttemptState(r.State),
 			CreatedAt:          r.CreatedAt.UTC(),
 			UpdatedAt:          r.UpdatedAt.UTC(),

@@ -116,9 +116,13 @@ type FailoverAttempt struct {
 	// attempt's first durable write. Adoption after a crash must not substitute
 	// whichever generation happens to own the session later.
 	SourceGenerationID string
-	State              FailoverAttemptState
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
+	// RoleSnapshot is the exact authorized target role carried across the
+	// attempt-insert/saga-create crash window. Recovery never reconstructs it
+	// from a role map that may have changed in the meantime.
+	RoleSnapshot SessionRoleBinding
+	State        FailoverAttemptState
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 }
 
 // Target returns the attempt's destination as a ladder target.

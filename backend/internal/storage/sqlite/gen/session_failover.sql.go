@@ -15,11 +15,12 @@ const insertSessionFailoverAttempt = `-- name: InsertSessionFailoverAttempt :exe
 INSERT INTO session_failover_attempts (
     id, session_id, project_id, incident_id, seq,
     role_id, from_harness, from_model, to_harness, to_model,
-    rung_index, generation_id, state, created_at, updated_at, source_generation_id
+    rung_index, generation_id, state, created_at, updated_at, source_generation_id,
+    role_snapshot_json
 ) VALUES (
     ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?
 )
 `
 
@@ -40,6 +41,7 @@ type InsertSessionFailoverAttemptParams struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	SourceGenerationID string
+	RoleSnapshotJson   string
 }
 
 // ASCII ONLY IN THIS FILE. This is not a style preference; see the NOTE at the
@@ -74,6 +76,7 @@ func (q *Queries) InsertSessionFailoverAttempt(ctx context.Context, arg InsertSe
 		arg.CreatedAt,
 		arg.UpdatedAt,
 		arg.SourceGenerationID,
+		arg.RoleSnapshotJson,
 	)
 	return err
 }
@@ -82,7 +85,8 @@ const listSessionFailoverAttemptsByIncident = `-- name: ListSessionFailoverAttem
 SELECT
     id, session_id, project_id, incident_id, seq,
     role_id, from_harness, from_model, to_harness, to_model,
-    rung_index, generation_id, state, created_at, updated_at, source_generation_id
+    rung_index, generation_id, state, created_at, updated_at, source_generation_id,
+    role_snapshot_json
 FROM session_failover_attempts
 WHERE session_id = ? AND incident_id = ?
 ORDER BY seq ASC
@@ -123,6 +127,7 @@ func (q *Queries) ListSessionFailoverAttemptsByIncident(ctx context.Context, arg
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.SourceGenerationID,
+			&i.RoleSnapshotJson,
 		); err != nil {
 			return nil, err
 		}
@@ -141,7 +146,8 @@ const listSessionFailoverAttemptsBySession = `-- name: ListSessionFailoverAttemp
 SELECT
     id, session_id, project_id, incident_id, seq,
     role_id, from_harness, from_model, to_harness, to_model,
-    rung_index, generation_id, state, created_at, updated_at, source_generation_id
+    rung_index, generation_id, state, created_at, updated_at, source_generation_id,
+    role_snapshot_json
 FROM session_failover_attempts
 WHERE session_id = ?
 ORDER BY created_at ASC, seq ASC
@@ -177,6 +183,7 @@ func (q *Queries) ListSessionFailoverAttemptsBySession(ctx context.Context, sess
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.SourceGenerationID,
+			&i.RoleSnapshotJson,
 		); err != nil {
 			return nil, err
 		}

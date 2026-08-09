@@ -27,9 +27,12 @@ func failoverAttempt(sess domain.SessionID, incident string, seq int, gen string
 		RungIndex:          0,
 		GenerationID:       gen,
 		SourceGenerationID: "source-gen-1",
-		State:              domain.FailoverAttemptRequested,
-		CreatedAt:          now,
-		UpdatedAt:          now,
+		RoleSnapshot: domain.SessionRoleBinding{
+			RoleID: "implementor", ResolvedHarness: domain.HarnessCodex,
+		},
+		State:     domain.FailoverAttemptRequested,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }
 
@@ -76,6 +79,9 @@ func TestFailoverAttempt_AppendWithLedgerWritesBothRows(t *testing.T) {
 	}
 	if got[0].SourceGenerationID != "source-gen-1" {
 		t.Fatalf("source generation = %q, want source-gen-1", got[0].SourceGenerationID)
+	}
+	if got[0].RoleSnapshot != att.RoleSnapshot {
+		t.Fatalf("role snapshot = %+v, want %+v", got[0].RoleSnapshot, att.RoleSnapshot)
 	}
 	if got[0].State != domain.FailoverAttemptRequested {
 		t.Fatalf("state = %q, want requested", got[0].State)
