@@ -557,6 +557,63 @@ func TestSwitchPreview_ExactRoleMapModels(t *testing.T) {
 	}
 }
 
+func TestSwitchPreview_LegacyOrchestratorOffersStarterRoleTarget(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	st.projects["mer"] = domain.ProjectRecord{
+		ID: "mer",
+		Config: domain.ProjectConfig{RoleMap: domain.StarterRoleMap(
+			domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+			domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+		)},
+	}
+	rec := domain.SessionRecord{
+		ID: id, ProjectID: "mer", Kind: domain.KindOrchestrator, Harness: domain.HarnessClaudeCode,
+		Metadata: domain.SessionMetadata{RuntimeHandleID: "rt-1", WorkspacePath: "/ws"},
+	}
+	st.sessions[id] = rec
+	cmd := &fakeCommander{}
+	svc := NewWithDeps(Deps{Manager: cmd, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.Available || preview.RoleID != domain.DefaultOrchestratorRoleID || len(preview.Targets) != 1 || preview.Targets[0].Harness != domain.HarnessCodex {
+		t.Fatalf("preview = %+v", preview)
+	}
+
+	if _, err := svc.SwitchWorker(context.Background(), SwitchWorkerRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	}); err != nil {
+		t.Fatalf("switch: %v", err)
+	}
+	if cmd.orchestratorSwitchCalls != 1 || cmd.lastSwitch.AdoptRoleID != domain.DefaultOrchestratorRoleID {
+		t.Fatalf("manager request = %+v, calls=%d", cmd.lastSwitch, cmd.orchestratorSwitchCalls)
+	}
+}
+
+func TestSwitchPreview_LegacyOrchestratorDoesNotGuessModelSpecificRole(t *testing.T) {
+	st := newFakeStore()
+	id := domain.SessionID("mer-1")
+	roleMap := domain.StarterRoleMap(
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode, Model: "opus"},
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+	)
+	st.projects["mer"] = domain.ProjectRecord{ID: "mer", Config: domain.ProjectConfig{RoleMap: roleMap}}
+	rec := domain.SessionRecord{ID: id, ProjectID: "mer", Kind: domain.KindOrchestrator, Harness: domain.HarnessClaudeCode}
+	st.sessions[id] = rec
+	svc := NewWithDeps(Deps{Manager: &fakeCommander{}, Store: st})
+
+	preview, err := svc.SwitchPreview(context.Background(), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.Available || preview.Reason != SwitchPreviewReasonNoRolePin || preview.RoleID != "" {
+		t.Fatalf("preview guessed an unproven model identity: %+v", preview)
+	}
+}
+
 func TestSwitchPreview_DoesNotAdvertiseAmbiguousProviderDefault(t *testing.T) {
 	st := newFakeStore()
 	id := domain.SessionID("mer-1")

@@ -284,6 +284,14 @@ func Run() error {
 		}
 		return err
 	}
+	if updated, roleErr := projectSvc.EnsureDefaultRoleMaps(ctx); roleErr != nil {
+		// A malformed project config must not make an otherwise healthy daemon
+		// unbootable. The affected row already fails closed on use; keep serving
+		// other projects and retry the idempotent backfill next boot.
+		log.Error("seed default project role maps failed", "err", roleErr)
+	} else if updated > 0 {
+		log.Info("seeded default project role maps", "projects", updated)
+	}
 	lcStack.trackerDone = startTrackerIntake(ctx, store, sessionSvc, log)
 
 	agentSvc := agentsvc.NewWithDeps(agentsvc.Deps{Cache: store, Discoverer: modelcatalog.Discoverer{}, Projects: store})

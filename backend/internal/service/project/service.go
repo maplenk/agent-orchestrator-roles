@@ -109,6 +109,34 @@ func NewWithDeps(d Deps) *Service {
 	return s
 }
 
+// EnsureDefaultRoleMaps materializes AO's starter role catalog for every
+// existing active project that has never authored a role map. It is called at
+// boot before session reconciliation and is idempotent.
+func (m *Service) EnsureDefaultRoleMaps(ctx context.Context) (int, error) {
+	m.addMu.Lock()
+	defer m.addMu.Unlock()
+
+	projects, err := m.store.ListProjects(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list projects for default role maps: %w", err)
+	}
+	updated := 0
+	for _, row := range projects {
+		if !row.ArchivedAt.IsZero() || !row.Config.RoleMap.IsZero() {
+			continue
+		}
+		row.Config = m.withDefaultRoleMap(row.Config)
+		if err := validateProjectConfig(row.Config); err != nil {
+			return updated, fmt.Errorf("default role map for project %s: %w", row.ID, err)
+		}
+		if err := m.store.UpsertProject(ctx, row); err != nil {
+			return updated, fmt.Errorf("persist default role map for project %s: %w", row.ID, err)
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 // List returns every active registered project.
 func (m *Service) List(ctx context.Context) ([]Summary, error) {
 	projects, err := m.store.ListProjects(ctx)
@@ -210,6 +238,10 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
 		projectConfig = *in.Config
+	}
+	projectConfig = m.withDefaultRoleMap(projectConfig)
+	if err := validateProjectConfig(projectConfig); err != nil {
+		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
 
 	registeredAt := time.Now()
@@ -519,7 +551,8 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	if utf8.RuneCountInString(displayName) > maxDisplayNameLen {
 		return Project{}, apierr.Invalid("DISPLAY_NAME_TOO_LONG", "Display name must be 20 characters or fewer", nil)
 	}
-	if err := validateProjectConfig(in.Config); err != nil {
+	projectConfig := m.withDefaultRoleMap(in.Config)
+	if err := validateProjectConfig(projectConfig); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
 	row, ok, err := m.store.GetProject(ctx, string(id))
@@ -530,11 +563,11 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
 	if row.Kind.WithDefault() == domain.ProjectKindScratch {
-		if err := validateScratchProjectConfig(in.Config); err != nil {
+		if err := validateScratchProjectConfig(projectConfig); err != nil {
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
 	}
-	updated, err := m.store.UpdateProjectSettings(ctx, string(id), displayName, in.Config)
+	updated, err := m.store.UpdateProjectSettings(ctx, string(id), displayName, projectConfig)
 	if err != nil {
 		return Project{}, apierr.Internal("PROJECT_SETTINGS_UPDATE_FAILED", "Failed to update project settings")
 	}
@@ -542,7 +575,7 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
 	row.DisplayName = displayName
-	row.Config = in.Config
+	row.Config = projectConfig
 	return m.projectFromRow(row), nil
 }
 
@@ -580,6 +613,7 @@ func (m *Service) EnsureDefaultScratchProject(ctx context.Context, scratchPath s
 		Worker:       domain.RoleOverride{Harness: m.defaultHarness},
 		Orchestrator: domain.RoleOverride{Harness: m.defaultHarness},
 	}
+	cfg = m.withDefaultRoleMap(cfg)
 	if err := cfg.Validate(); err != nil {
 		return Project{}, apierr.Internal("SCRATCH_PROJECT_SEED_FAILED", "Default scratch project config is invalid")
 	}
@@ -603,7 +637,8 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 	if err := validateProjectID(id); err != nil {
 		return Project{}, err
 	}
-	if err := validateProjectConfig(in.Config); err != nil {
+	projectConfig := m.withDefaultRoleMap(in.Config)
+	if err := validateProjectConfig(projectConfig); err != nil {
 		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 	}
 	row, ok, err := m.store.GetProject(ctx, string(id))
@@ -614,15 +649,42 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
 	if row.Kind.WithDefault() == domain.ProjectKindScratch {
-		if err := validateScratchProjectConfig(in.Config); err != nil {
+		if err := validateScratchProjectConfig(projectConfig); err != nil {
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
 	}
-	row.Config = in.Config
+	row.Config = projectConfig
 	if err := m.store.UpsertProject(ctx, row); err != nil {
 		return Project{}, apierr.Internal("PROJECT_CONFIG_UPDATE_FAILED", "Failed to update project config")
 	}
 	return m.projectFromRow(row), nil
+}
+
+func (m *Service) withDefaultRoleMap(cfg domain.ProjectConfig) domain.ProjectConfig {
+	if !cfg.RoleMap.IsZero() {
+		return cfg
+	}
+	orchestratorHarness := cfg.Orchestrator.Harness
+	if orchestratorHarness == "" {
+		orchestratorHarness = m.defaultHarness
+	}
+	workerHarness := cfg.Worker.Harness
+	if workerHarness == "" {
+		workerHarness = m.defaultHarness
+	}
+	orchestratorModel := cfg.AgentConfig.Model
+	if cfg.Orchestrator.AgentConfig.Model != "" {
+		orchestratorModel = cfg.Orchestrator.AgentConfig.Model
+	}
+	workerModel := cfg.AgentConfig.Model
+	if cfg.Worker.AgentConfig.Model != "" {
+		workerModel = cfg.Worker.AgentConfig.Model
+	}
+	cfg.RoleMap = domain.StarterRoleMap(
+		domain.FailoverTarget{Harness: orchestratorHarness, Model: orchestratorModel},
+		domain.FailoverTarget{Harness: workerHarness, Model: workerModel},
+	)
+	return cfg
 }
 
 // validateProjectConfig runs domain structural validation plus harness

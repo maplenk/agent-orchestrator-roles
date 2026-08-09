@@ -183,13 +183,11 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	}
 
 	// Cross-harness from here on, which IS a host-authorized decision: the role
-	// map is the only source of legal targets, so a session without a pin, or a
-	// project without a map, has no way to authorize one.
+	// map is the only source of legal targets. An unpinned legacy orchestrator
+	// may adopt only the map's exact provider-default orchestrator primary; the
+	// manager repeats that decision under the project gate and applies the role
+	// template only at the fenced relaunch boundary.
 	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
-	if roleID == "" {
-		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_PIN_REQUIRED",
-			"Session has no durable role pin; cross-harness switch requires a role-mapped session", nil)
-	}
 	project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
 	if err != nil {
 		return SwitchWorkerOutcome{}, fmt.Errorf("switch %s: project: %w", req.SessionID, err)
@@ -201,6 +199,17 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 	if roleMap.IsZero() {
 		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_MAP_REQUIRED",
 			"Project has no role map; host-authorized switch targets are unavailable", nil)
+	}
+	adoptRoleID := ""
+	if roleID == "" {
+		if rec.Kind == domain.KindOrchestrator {
+			roleID, ok = domain.AdoptableOrchestratorRole(roleMap, rec.Harness)
+		}
+		if roleID == "" || !ok {
+			return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_PIN_REQUIRED",
+				"Session has no durable role pin and cannot safely adopt the project orchestrator role", nil)
+		}
+		adoptRoleID = roleID
 	}
 	if _, ok := roleMap.Roles[roleID]; !ok {
 		return SwitchWorkerOutcome{}, apierr.Invalid("ROLE_NOT_IN_MAP",
@@ -222,6 +231,7 @@ func (s *Service) SwitchWorker(ctx context.Context, req SwitchWorkerRequest) (Sw
 		TargetHarness: to,
 		TargetModel:   model,
 		Semantic:      sem,
+		AdoptRoleID:   adoptRoleID,
 	}
 	var res sessionmanager.SwitchResult
 	if rec.Kind == domain.KindOrchestrator {
@@ -274,10 +284,6 @@ func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (
 		preview.Reason = SwitchPreviewReasonUnavailable
 		return preview, nil
 	}
-	if preview.RoleID == "" {
-		preview.Reason = SwitchPreviewReasonNoRolePin
-		return preview, nil
-	}
 	project, ok, err := s.store.GetProject(ctx, string(rec.ProjectID))
 	if err != nil {
 		return SwitchPreview{}, fmt.Errorf("switch preview %s: project: %w", rec.ID, err)
@@ -289,6 +295,14 @@ func (s *Service) SwitchPreview(ctx context.Context, rec domain.SessionRecord) (
 	if roleMap.IsZero() {
 		preview.Reason = SwitchPreviewReasonNoRoleMap
 		return preview, nil
+	}
+	if preview.RoleID == "" {
+		if roleID, adoptable := domain.AdoptableOrchestratorRole(roleMap, rec.Harness); adoptable {
+			preview.RoleID = roleID
+		} else {
+			preview.Reason = SwitchPreviewReasonNoRolePin
+			return preview, nil
+		}
 	}
 	if _, ok := roleMap.Roles[preview.RoleID]; !ok {
 		preview.Reason = SwitchPreviewReasonRoleAbsent

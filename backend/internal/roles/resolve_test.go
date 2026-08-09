@@ -113,7 +113,7 @@ func TestResolve_StrictOrchestratorAutoBindsRole(t *testing.T) {
 	}
 }
 
-func TestResolve_NonStrictOrchestratorNoAutoBind(t *testing.T) {
+func TestResolve_NonStrictOrchestratorAutoBindsWithoutLegacyOverride(t *testing.T) {
 	m := testMap()
 	m.StrictDelegation = false
 	r, err := Resolve(ResolveInput{
@@ -123,8 +123,24 @@ func TestResolve_NonStrictOrchestratorNoAutoBind(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if r.RoleID != domain.DefaultOrchestratorRoleID {
+		t.Fatalf("non-strict orch role = %q, want default orchestrator", r.RoleID)
+	}
+}
+
+func TestResolve_NonStrictExplicitHarnessRemainsLegacy(t *testing.T) {
+	m := testMap()
+	m.StrictDelegation = false
+	r, err := Resolve(ResolveInput{
+		Map:             m,
+		Kind:            domain.KindOrchestrator,
+		ExplicitHarness: domain.HarnessCodex,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if r.RoleID != "" {
-		t.Fatalf("non-strict orch without RoleID must not auto-bind, got %q", r.RoleID)
+		t.Fatalf("explicit legacy orchestrator unexpectedly pinned role %q", r.RoleID)
 	}
 }
 

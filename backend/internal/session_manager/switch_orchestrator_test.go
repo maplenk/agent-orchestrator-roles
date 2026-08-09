@@ -364,6 +364,83 @@ func TestSwitchOrchestrator_CodexClaudeInPlacePreservesIdentityAndRotatesCredent
 	}
 }
 
+func TestSwitchOrchestrator_LegacySessionAdoptsStarterRoleAtRelaunch(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("---\nid: orchestrator\nname: Orchestrator\n---\n# Default role\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	m, st, id := orchestratorSwitchHarness(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap = domain.StarterRoleMap(
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+	)
+	st.projects["mer"] = project
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessClaudeCode
+	rec.Metadata.Role = domain.SessionRoleBinding{}
+	st.sessions[id] = rec
+
+	res, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	})
+	if err != nil {
+		t.Fatalf("switch: %v", err)
+	}
+	role := res.Session.Metadata.Role
+	if role.RoleID != domain.DefaultOrchestratorRoleID || role.ResolvedHarness != domain.HarnessCodex || !role.ResolvedPermissions.CanSpawn || !role.ResolvedPermissions.WorkspaceWrites {
+		t.Fatalf("adopted role = %+v", role)
+	}
+	if role.RoleMapSHA256 == "" || role.TemplateArtifactID == "" || role.TemplateSHA256 == "" {
+		t.Fatalf("incomplete durable role pin = %+v", role)
+	}
+	if _, _, ok, err := st.GetTemplateArtifact(context.Background(), role.TemplateArtifactID); err != nil || !ok {
+		t.Fatalf("template artifact = %v, %v", ok, err)
+	}
+	if res.Session.Metadata.SwitchPending != nil {
+		t.Fatalf("switch pending not cleared: %+v", res.Session.Metadata.SwitchPending)
+	}
+}
+
+func TestSwitchOrchestrator_LegacyRoleAdoptionRollsBackWithLiveSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "orchestrator.md"), []byte("---\nid: orchestrator\nname: Orchestrator\n---\n# Default role\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	testTemplateLoader = roles.NewLoader(roles.NewArtifactStore(), dir)
+	t.Cleanup(func() { testTemplateLoader = nil })
+
+	m, st, id := orchestratorSwitchHarness(t)
+	project := st.projects["mer"]
+	project.Config.RoleMap = domain.StarterRoleMap(
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+		domain.FailoverTarget{Harness: domain.HarnessClaudeCode},
+	)
+	st.projects["mer"] = project
+	rec := st.sessions[id]
+	rec.Harness = domain.HarnessClaudeCode
+	rec.Metadata.Role = domain.SessionRoleBinding{}
+	st.sessions[id] = rec
+	runtime := m.runtime.(*fakeRuntime)
+	runtime.aliveByHandle[rec.Metadata.RuntimeHandleID] = true
+
+	if _, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
+		SessionID: id, TargetHarness: domain.HarnessCodex,
+	}); err == nil {
+		t.Fatal("switch unexpectedly succeeded while source remained alive")
+	}
+	after := st.sessions[id]
+	if rolePinHasAnyField(after.Metadata.Role) {
+		t.Fatalf("failed pre-stop switch left an unapplied role pin: %+v", after.Metadata.Role)
+	}
+	if after.Metadata.SwitchPending != nil || after.Metadata.RuntimeHandleID != rec.Metadata.RuntimeHandleID {
+		t.Fatalf("source usability not restored: %+v", after.Metadata)
+	}
+}
+
 // This is the live strict-role specimen: the repository's full orchestrator
 // template (kept at least as large as the original 3,885-byte specimen), one
 // worker in the observed roster, and an immediate

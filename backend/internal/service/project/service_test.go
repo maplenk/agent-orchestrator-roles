@@ -424,8 +424,8 @@ func TestManager_DefaultsWhenUnconfigured(t *testing.T) {
 		t.Fatalf("Add: %v", err)
 	}
 
-	// Get on a project that set no config still reports the default branch and a
-	// derived session prefix, and omits the (empty) config object.
+	// Get on a project that set no config reports the ordinary defaults plus the
+	// persisted non-strict starter role map.
 	got, err := m.Get(ctx, "ao")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -439,8 +439,15 @@ func TestManager_DefaultsWhenUnconfigured(t *testing.T) {
 	if got.Project.Agent != "claude-code" {
 		t.Fatalf("default agent = %q, want claude-code", got.Project.Agent)
 	}
-	if got.Project.Config != nil {
-		t.Fatalf("unconfigured project should omit config, got %#v", got.Project.Config)
+	if got.Project.Config == nil {
+		t.Fatal("unconfigured project must expose its starter role map")
+	}
+	roleMap := got.Project.Config.RoleMap
+	if roleMap.StrictDelegation || roleMap.Roles[domain.DefaultOrchestratorRoleID].Harness != domain.HarnessClaudeCode {
+		t.Fatalf("starter role map = %+v", roleMap)
+	}
+	if targets := domain.RoleAuthorizedSwitchTargets(roleMap, domain.DefaultOrchestratorRoleID); len(targets) != 2 || targets[1].Harness != domain.HarnessCodex {
+		t.Fatalf("starter switch targets = %+v", targets)
 	}
 
 	list, err := m.List(ctx)
@@ -449,6 +456,41 @@ func TestManager_DefaultsWhenUnconfigured(t *testing.T) {
 	}
 	if list[0].SessionPrefix != "ao" {
 		t.Fatalf("default session prefix = %q, want derived 'ao'", list[0].SessionPrefix)
+	}
+}
+
+func TestManager_EnsureDefaultRoleMapsUpgradesExistingProjectsIdempotently(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlitetest.Open(t.TempDir())
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "legacy", Path: gitRepo(t), DisplayName: "Legacy", RegisteredAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed legacy project: %v", err)
+	}
+	m := project.NewWithDeps(project.Deps{Store: store, DefaultHarness: domain.HarnessCodex})
+
+	if updated, err := m.EnsureDefaultRoleMaps(ctx); err != nil || updated != 1 {
+		t.Fatalf("first ensure = %d, %v; want 1", updated, err)
+	}
+	row, ok, err := store.GetProject(ctx, "legacy")
+	if err != nil || !ok {
+		t.Fatalf("get upgraded project = %v, %v", ok, err)
+	}
+	if row.Config.RoleMap.StrictDelegation {
+		t.Fatal("existing project was made strict")
+	}
+	if primary := row.Config.RoleMap.Roles[domain.DefaultOrchestratorRoleID]; primary.Harness != domain.HarnessCodex {
+		t.Fatalf("primary = %+v", primary)
+	}
+	if targets := domain.RoleAuthorizedSwitchTargets(row.Config.RoleMap, domain.DefaultOrchestratorRoleID); len(targets) != 2 || targets[1].Harness != domain.HarnessClaudeCode {
+		t.Fatalf("switch targets = %+v", targets)
+	}
+	if updated, err := m.EnsureDefaultRoleMaps(ctx); err != nil || updated != 0 {
+		t.Fatalf("second ensure = %d, %v; want 0", updated, err)
 	}
 }
 

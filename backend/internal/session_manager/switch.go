@@ -45,6 +45,11 @@ type SwitchRequest struct {
 	// The value is compared with the durable pin inside beginSwitch; it is never
 	// exposed as a free-form switch API field.
 	PauseIncidentID string
+	// AdoptRoleID is manager-internal authorization for an unpinned legacy
+	// orchestrator to adopt the project orchestrator role at this switch's
+	// fenced relaunch boundary. SwitchOrchestrator recomputes it under the
+	// project gate; callers cannot use it to select an arbitrary role.
+	AdoptRoleID string
 }
 
 // SwitchResult is the outcome of a completed switch/fresh saga (target ack).
@@ -168,15 +173,38 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	if _, ok := m.agents.Agent(toHarness); !ok {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w: %q", req.SessionID, ErrUnknownHarness, toHarness)
 	}
-	if rec.Metadata.Role.RoleID != "" && !rec.Metadata.Role.ResolvedPermissions.WorkspaceWrites {
-		if err := capabilities.RequireReadOnly(toHarness); err != nil {
-			return SwitchResult{}, fmt.Errorf("switch %s: %w: %w", req.SessionID, ErrReadOnlyUnsupported, err)
-		}
-	}
-
 	project, err := m.loadProject(ctx, rec.ProjectID)
 	if err != nil {
 		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, err)
+	}
+
+	roleBinding := rec.Metadata.Role
+	var adoptedRole roleApplyResult
+	if adoptRoleID := strings.TrimSpace(req.AdoptRoleID); adoptRoleID != "" {
+		if rec.Kind != domain.KindOrchestrator || strings.TrimSpace(roleBinding.RoleID) != "" {
+			return SwitchResult{}, fmt.Errorf("switch %s: legacy role adoption is not applicable: %w", req.SessionID, domain.ErrSwitchTargetUnauthorized)
+		}
+		expectedRoleID, ok := domain.AdoptableOrchestratorRole(project.Config.RoleMap, rec.Harness)
+		if !ok || expectedRoleID != adoptRoleID {
+			return SwitchResult{}, fmt.Errorf("switch %s: legacy role %q is not adoptable: %w", req.SessionID, adoptRoleID, domain.ErrSwitchTargetUnauthorized)
+		}
+		roleCfg := ports.SpawnConfig{Kind: domain.KindOrchestrator, RoleID: adoptRoleID}
+		adoptedRole, err = applyRoleMap(&roleCfg, project, m.dataDir)
+		if err != nil {
+			return SwitchResult{}, fmt.Errorf("switch %s: adopt role: %w", req.SessionID, mapRoleError(err))
+		}
+		if !adoptedRole.Applied || roleCfg.Harness != rec.Harness {
+			return SwitchResult{}, fmt.Errorf("switch %s: adopted role source mismatch: %w", req.SessionID, domain.ErrSwitchTargetUnauthorized)
+		}
+		if err := m.persistRoleTemplateArtifact(ctx, adoptedRole); err != nil {
+			return SwitchResult{}, fmt.Errorf("switch %s: persist adopted role template: %w", req.SessionID, err)
+		}
+		roleBinding = adoptedRole.Binding
+	}
+	if roleBinding.RoleID != "" && !roleBinding.ResolvedPermissions.WorkspaceWrites {
+		if err := capabilities.RequireReadOnly(toHarness); err != nil {
+			return SwitchResult{}, fmt.Errorf("switch %s: %w: %w", req.SessionID, ErrReadOnlyUnsupported, err)
+		}
 	}
 
 	// Single generation for ledger + runtime launch. A caller may pin it (see
@@ -185,8 +213,8 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	if targetGen == "" {
 		targetGen = m.newSwitchGeneration()
 	}
-	roleID := strings.TrimSpace(meta.Role.RoleID)
-	fromModel := strings.TrimSpace(meta.Role.ResolvedModel)
+	roleID := strings.TrimSpace(roleBinding.RoleID)
+	fromModel := strings.TrimSpace(roleBinding.ResolvedModel)
 	toModel := resolveTargetModel(req.TargetModel, fromModel, sameHarness)
 
 	sem := req.Semantic
@@ -253,6 +281,7 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	preSwitchAgentSession := meta.AgentSessionID
 	preSwitchHandle := meta.RuntimeHandleID
 	preSwitchLaunch := meta.RuntimeLaunchID
+	preSwitchRole := meta.Role
 
 	// Durable recoverable fence BEFORE destroying the source. If destroy succeeds
 	// but a later persist fails, boot recovery can still re-drive from pending.
@@ -269,6 +298,9 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		SourceRuntimeHandleID: meta.RuntimeHandleID,
 	}
 	rec.Metadata.SwitchPending = pending
+	if adoptedRole.Applied {
+		rec.Metadata.Role = adoptedRole.Binding
+	}
 	// Compose prompt now so recovery never needs to rebuild from empty payload.
 	rec.Metadata.Prompt = composeSwitchPrompt(originalTask, compiled.Text)
 	rec.UpdatedAt = m.clock()
@@ -286,7 +318,7 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	if !sourceDead {
 		// Confirmed alive: restore exact pre-switch usability (clear pending + prompt).
 		_ = m.appendSwitchLedger(ctx, rec, kind, domain.LifecyclePhaseFailed, targetGen, fromHarness, toHarness, fromModel, toModel, roleID, meta.AgentSessionID, "", payload)
-		if rbErr := m.rollbackSwitchPending(ctx, rec, preSwitchPrompt, preSwitchAgentSession, preSwitchHandle, preSwitchLaunch); rbErr != nil {
+		if rbErr := m.rollbackSwitchPending(ctx, rec, preSwitchPrompt, preSwitchAgentSession, preSwitchHandle, preSwitchLaunch, preSwitchRole); rbErr != nil {
 			return SwitchResult{}, fmt.Errorf("switch %s: pre-stop source alive; rollback pending failed: %w: %w", req.SessionID, ErrSwitchUncertain, rbErr)
 		}
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
@@ -311,12 +343,13 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 
 // rollbackSwitchPending restores pre-switch prompt/handles and clears pending so
 // a confirmed-alive source remains usable for user/terminal input.
-func (m *Manager) rollbackSwitchPending(ctx context.Context, rec domain.SessionRecord, prompt, agentSession, handleID, launchID string) error {
+func (m *Manager) rollbackSwitchPending(ctx context.Context, rec domain.SessionRecord, prompt, agentSession, handleID, launchID string, role domain.SessionRoleBinding) error {
 	rec.Metadata.SwitchPending = nil
 	rec.Metadata.Prompt = prompt
 	rec.Metadata.AgentSessionID = agentSession
 	rec.Metadata.RuntimeHandleID = handleID
 	rec.Metadata.RuntimeLaunchID = launchID
+	rec.Metadata.Role = role
 	rec.UpdatedAt = m.clock()
 	return m.store.UpdateSession(ctx, rec)
 }
@@ -534,7 +567,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	// equal the durable model: recovery must never reinterpret an empty/default
 	// target as a different fixed model.
 	if rec.Kind == domain.KindOrchestrator && toHarness != rec.Harness {
-		authorizedModel, authErr := m.authorizeOrchestratorSwitchTarget(ctx, rec, toHarness, toModel)
+		authorizedModel, _, authErr := m.authorizeOrchestratorSwitchTarget(ctx, rec, toHarness, toModel)
 		if authErr != nil {
 			return SwitchResult{}, fmt.Errorf("recover switch %s: authorize target: %w", sessionID, authErr)
 		}

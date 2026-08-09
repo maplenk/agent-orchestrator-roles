@@ -83,15 +83,21 @@ func Resolve(in ResolveInput) (Resolved, error) {
 		}
 	}
 
-	// Strict maps: auto-bind KindOrchestrator to orchestratorRole so routing,
-	// delegation instructions and spawn authority are never skipped. Strictness
-	// does not itself imply workspaceWrites=false; an explicitly read-only role
-	// is still capability-gated by applyRoleMap.
-	// Non-strict maps may still spawn KindOrchestrator without a RoleID.
-	if roleID == "" && in.Kind == domain.KindOrchestrator && m.StrictDelegation {
-		roleID = m.OrchestratorRole
-		if roleID == "" {
-			roleID = "orchestrator"
+	// Orchestrators with no explicit legacy harness auto-bind to an authored
+	// orchestratorRole even on a non-strict map. Non-strict continues to mean
+	// ordinary worker and explicit-harness legacy spawns are accepted; it must
+	// not mean the desktop-created project orchestrator silently skips its role
+	// pin and therefore loses the Switch surface.
+	//
+	// Strict maps still bind before rejecting an explicit harness below, so their
+	// host-authoritative contract is unchanged.
+	if roleID == "" && in.Kind == domain.KindOrchestrator && (m.StrictDelegation || in.ExplicitHarness == "") {
+		candidate := strings.TrimSpace(m.OrchestratorRole)
+		if candidate == "" {
+			candidate = domain.DefaultOrchestratorRoleID
+		}
+		if _, ok := m.Get(candidate); ok || m.StrictDelegation {
+			roleID = candidate
 		}
 	}
 

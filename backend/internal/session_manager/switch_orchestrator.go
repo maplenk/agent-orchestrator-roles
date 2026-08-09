@@ -157,11 +157,12 @@ func (m *Manager) orchestratorSwitch(ctx context.Context, req SwitchRequest) (Sw
 		return SwitchResult{}, fmt.Errorf("orchestrator switch %s: %w", sessionID, ErrNotOrchestrator)
 	}
 	if !req.FreshConversation {
-		model, authErr := m.authorizeOrchestratorSwitchTarget(ctx, rec, req.TargetHarness, req.TargetModel)
+		model, adoptRoleID, authErr := m.authorizeOrchestratorSwitchTarget(ctx, rec, req.TargetHarness, req.TargetModel)
 		if authErr != nil {
 			return SwitchResult{}, fmt.Errorf("orchestrator switch %s: authorize target: %w", sessionID, authErr)
 		}
 		req.TargetModel = model
+		req.AdoptRoleID = adoptRoleID
 	}
 
 	return m.switchUnderOwnership(ctx, req, true)
@@ -176,21 +177,28 @@ func (m *Manager) authorizeOrchestratorSwitchTarget(
 	rec domain.SessionRecord,
 	targetHarness domain.AgentHarness,
 	requestedModel string,
-) (string, error) {
+) (string, string, error) {
 	roleID := strings.TrimSpace(rec.Metadata.Role.RoleID)
-	if roleID == "" {
-		return "", fmt.Errorf("role pin required: %w", domain.ErrSwitchTargetUnauthorized)
-	}
 	project, err := m.loadProject(ctx, rec.ProjectID)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	roleMap := project.Config.RoleMap.WithDefaults()
 	if roleMap.IsZero() {
-		return "", fmt.Errorf("project has no role map: %w", domain.ErrSwitchTargetUnauthorized)
+		return "", "", fmt.Errorf("project has no role map: %w", domain.ErrSwitchTargetUnauthorized)
+	}
+	adoptRoleID := ""
+	if roleID == "" {
+		var ok bool
+		roleID, ok = domain.AdoptableOrchestratorRole(roleMap, rec.Harness)
+		if !ok {
+			return "", "", fmt.Errorf("role pin required: %w", domain.ErrSwitchTargetUnauthorized)
+		}
+		adoptRoleID = roleID
 	}
 	if _, ok := roleMap.Roles[roleID]; !ok {
-		return "", fmt.Errorf("role %q is absent from role map: %w", roleID, domain.ErrSwitchTargetUnauthorized)
+		return "", "", fmt.Errorf("role %q is absent from role map: %w", roleID, domain.ErrSwitchTargetUnauthorized)
 	}
-	return domain.ResolveAuthorizedSwitchModel(roleMap, roleID, targetHarness, requestedModel)
+	model, err := domain.ResolveAuthorizedSwitchModel(roleMap, roleID, targetHarness, requestedModel)
+	return model, adoptRoleID, err
 }
