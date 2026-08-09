@@ -13,6 +13,10 @@ import (
 
 type agentSwitchFixtureUpdater interface {
 	UpdateAgentSwitch(context.Context, domain.AgentSwitch, domain.AgentSwitchState, domain.AgentGenerationID, domain.AgentGenerationID) (bool, error)
+	ConfirmAgentSwitchSourceStopped(context.Context, domain.AgentSwitchSourceStopConfirmation) (bool, error)
+	ActivateAgentSwitchTarget(context.Context, domain.AgentSwitchTargetActivation) (bool, error)
+	GetAgentSwitch(context.Context, domain.AgentSwitchID) (domain.AgentSwitch, bool, error)
+	GetSession(context.Context, domain.SessionID) (domain.SessionRecord, bool, error)
 }
 
 func advanceAgentSwitchFixture(ctx context.Context, t *testing.T, s agentSwitchFixtureUpdater, sw *domain.AgentSwitch, next domain.AgentSwitchState, at time.Time) {
@@ -25,6 +29,67 @@ func advanceAgentSwitchFixtureWithMutation(ctx context.Context, t *testing.T, s 
 	expectedTarget := sw.TargetGenerationID
 	if mutate != nil {
 		mutate(sw)
+	}
+	if next == domain.AgentSwitchSourceStopped {
+		session, ok, err := s.GetSession(ctx, sw.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("read source owner for switch fixture: ok=%v err=%v", ok, err)
+		}
+		changed, err := s.ConfirmAgentSwitchSourceStopped(ctx, domain.AgentSwitchSourceStopConfirmation{
+			SwitchID:                      sw.ID,
+			SessionID:                     sw.SessionID,
+			SourceHarness:                 sw.FromHarness,
+			SourceGenerationID:            sw.SourceGenerationID,
+			ExpectedSourceRuntimeLaunchID: session.Metadata.RuntimeLaunchID,
+			TargetGenerationID:            sw.TargetGenerationID,
+			StoppedAt:                     at,
+		})
+		if err != nil || !changed {
+			t.Fatalf("confirm switch source stopped: changed=%v err=%v", changed, err)
+		}
+		stored, ok, err := s.GetAgentSwitch(ctx, sw.ID)
+		if err != nil || !ok {
+			t.Fatalf("reload source-stopped switch: ok=%v err=%v", ok, err)
+		}
+		*sw = stored
+		return
+	}
+	if next == domain.AgentSwitchTargetReady {
+		if sw.TargetNativeSessionRef == nil {
+			t.Fatal("target-ready fixture requires a native-session reference")
+		}
+		if sw.TargetRuntimeHandleID == "" {
+			sw.TargetRuntimeHandleID = "fixture-target-handle"
+		}
+		sw.UpdatedAt = at
+		if changed, err := s.UpdateAgentSwitch(ctx, *sw, sw.State, sw.SourceGenerationID, sw.TargetGenerationID); err != nil || !changed {
+			t.Fatalf("record fixture target runtime handle: changed=%v err=%v", changed, err)
+		}
+		session, ok, err := s.GetSession(ctx, sw.SessionID)
+		if err != nil || !ok {
+			t.Fatalf("read source owner for target activation: ok=%v err=%v", ok, err)
+		}
+		changed, err := s.ActivateAgentSwitchTarget(ctx, domain.AgentSwitchTargetActivation{
+			SwitchID:                      sw.ID,
+			SessionID:                     sw.SessionID,
+			SourceHarness:                 sw.FromHarness,
+			SourceGenerationID:            sw.SourceGenerationID,
+			ExpectedSourceRuntimeLaunchID: session.Metadata.RuntimeLaunchID,
+			TargetHarness:                 sw.TargetHarness,
+			TargetNativeSessionRef:        *sw.TargetNativeSessionRef,
+			TargetGenerationID:            sw.TargetGenerationID,
+			RuntimeHandleID:               sw.TargetRuntimeHandleID,
+			ActivatedAt:                   at,
+		})
+		if err != nil || !changed {
+			t.Fatalf("activate switch target: changed=%v err=%v", changed, err)
+		}
+		stored, ok, err := s.GetAgentSwitch(ctx, sw.ID)
+		if err != nil || !ok {
+			t.Fatalf("reload target-ready switch: ok=%v err=%v", ok, err)
+		}
+		*sw = stored
+		return
 	}
 	sw.State = next
 	sw.UpdatedAt = at
@@ -134,6 +199,56 @@ func TestAgentNativeSessionGenerationFence(t *testing.T) {
 	}
 }
 
+func TestAgentNativeSessionFailedResumeKeepsHistoryWhenFreshFallbackIsCreated(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "native-fallback")
+	session, err := s.CreateSession(ctx, sampleRecord("native-fallback"))
+	if err != nil {
+		t.Fatalf("create AO session: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	retained := domain.AgentNativeSession{
+		ID: "retained-native", AOSessionID: session.ID, Harness: domain.HarnessCodex,
+		ConfigDir: "/ao/codex", NativeSessionID: "retained-thread",
+		TranscriptPath:   "/codex/retained.jsonl",
+		LastGenerationID: "retained-generation",
+		CreatedAt:        now, LastUsedAt: now,
+	}
+	if _, created, err := s.CreateAgentNativeSession(ctx, retained); err != nil || !created {
+		t.Fatalf("create retained conversation: created=%v err=%v", created, err)
+	}
+
+	failedResume := retained
+	failedResume.NativeSessionID = "overwritten-thread"
+	failedResume.TranscriptPath = "/codex/overwritten.jsonl"
+	failedResume.LastGenerationID = "fallback-generation"
+	failedResume.LastUsedAt = now.Add(time.Minute)
+	if changed, err := s.UpdateAgentNativeSession(ctx, failedResume, "stale-generation"); err != nil || changed {
+		t.Fatalf("failed resume update: changed=%v err=%v", changed, err)
+	}
+
+	fallback := domain.AgentNativeSession{
+		ID: "fallback-native", AOSessionID: session.ID, Harness: domain.HarnessCodex,
+		ConfigDir: "/ao/codex", NativeSessionID: "fallback-thread",
+		TranscriptPath:   "/codex/fallback.jsonl",
+		LastGenerationID: "fallback-generation",
+		CreatedAt:        now.Add(time.Minute), LastUsedAt: now.Add(time.Minute),
+	}
+	if _, created, err := s.CreateAgentNativeSession(ctx, fallback); err != nil || !created {
+		t.Fatalf("create fresh fallback conversation: created=%v err=%v", created, err)
+	}
+
+	gotRetained, ok, err := s.GetAgentNativeSession(ctx, retained.ID)
+	if err != nil || !ok || gotRetained != retained {
+		t.Fatalf("retained conversation changed: got=%+v ok=%v err=%v", gotRetained, ok, err)
+	}
+	all, err := s.ListAgentNativeSessions(ctx, session.ID)
+	if err != nil || len(all) != 2 || all[0].ID != fallback.ID || all[1].ID != retained.ID {
+		t.Fatalf("fallback history = %+v, err=%v", all, err)
+	}
+}
+
 func TestAgentSwitchIdempotencySingleActiveSagaAndGenerationFences(t *testing.T) {
 	s := newTestStore(t)
 	ctx := context.Background()
@@ -220,7 +335,10 @@ func TestAgentSwitchIdempotencySingleActiveSagaAndGenerationFences(t *testing.T)
 	if err != nil || !ok || current.State != domain.AgentSwitchPreparingHandoff || current.AgentHandoffStatus != domain.AgentHandoffReceived || current.AgentHandoffPath != handoffPath || current.AgentHandoffHash != handoffHash {
 		t.Fatalf("active switch after handoff = %+v, ok=%v err=%v", current, ok, err)
 	}
-	advanceAgentSwitchFixture(ctx, t, s, &current, domain.AgentSwitchStoppingSource, now.Add(2*time.Second))
+	advanceAgentSwitchFixtureWithMutation(ctx, t, s, &current, domain.AgentSwitchStoppingSource, now.Add(2*time.Second), func(sw *domain.AgentSwitch) {
+		sw.TargetStartMode = domain.AgentSwitchTargetStartResumed
+		sw.TargetGenerationID = "target-generation"
+	})
 	if ok, err := s.UpdateAgentSwitch(ctx, current, domain.AgentSwitchPreparingHandoff, "source-generation", ""); err != nil || ok {
 		t.Fatalf("replay stale state transition: ok=%v err=%v", ok, err)
 	}
@@ -271,6 +389,14 @@ func TestAgentSwitchIdempotencySingleActiveSagaAndGenerationFences(t *testing.T)
 	}
 	advanceAgentSwitchFixture(ctx, t, s, &current, domain.AgentSwitchTargetReady, now.Add(6*time.Second))
 	advanceAgentSwitchFixture(ctx, t, s, &current, domain.AgentSwitchDelivering, now.Add(7*time.Second))
+	acknowledgedAt := now.Add(7500 * time.Millisecond)
+	if ok, err := s.AcknowledgeAgentSwitchTarget(ctx, current.ID, current.SessionID, current.TargetGenerationID, acknowledgedAt); err != nil || !ok {
+		t.Fatalf("acknowledge target before completion: ok=%v err=%v", ok, err)
+	}
+	current, ok, err = s.GetAgentSwitch(ctx, current.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload acknowledged switch: ok=%v err=%v", ok, err)
+	}
 
 	completedAt := now.Add(8 * time.Second)
 	current.State = domain.AgentSwitchCompleted
@@ -442,6 +568,7 @@ func TestAgentHandoffUnavailableClosesRequestedLaneDuringRecovery(t *testing.T) 
 		t.Fatalf("request handoff: ok=%v err=%v", ok, err)
 	}
 	advanceAgentSwitchFixtureWithMutation(ctx, t, s, &current, domain.AgentSwitchStoppingSource, now.Add(4*time.Second), func(next *domain.AgentSwitch) {
+		next.TargetStartMode = domain.AgentSwitchTargetStartFresh
 		next.TargetGenerationID = "target-generation"
 	})
 	if ok, err := s.RecordAgentHandoff(ctx, sw.ID, sw.SourceGenerationID, domain.AgentHandoffUnavailable, "", "", now.Add(5*time.Second)); err != nil || !ok {
@@ -518,7 +645,10 @@ func TestAgentSwitchRejectsNativeReferenceFromAnotherAOSession(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("create switch: created=%v err=%v", created, err)
 	}
-	advanceAgentSwitchFixture(ctx, t, s, &base, domain.AgentSwitchStoppingSource, now.Add(time.Second))
+	advanceAgentSwitchFixtureWithMutation(ctx, t, s, &base, domain.AgentSwitchStoppingSource, now.Add(time.Second), func(sw *domain.AgentSwitch) {
+		sw.TargetStartMode = domain.AgentSwitchTargetStartResumed
+		sw.TargetGenerationID = "target-generation"
+	})
 	advanceAgentSwitchFixture(ctx, t, s, &base, domain.AgentSwitchSourceStopped, now.Add(2*time.Second))
 	advanceAgentSwitchFixture(ctx, t, s, &base, domain.AgentSwitchStartingTarget, now.Add(3*time.Second))
 	foreignRef := foreign.ID
@@ -526,7 +656,7 @@ func TestAgentSwitchRejectsNativeReferenceFromAnotherAOSession(t *testing.T) {
 	base.TargetStartMode = domain.AgentSwitchTargetStartResumed
 	base.TargetGenerationID = "target-generation"
 	base.UpdatedAt = now.Add(4 * time.Second)
-	if ok, err := s.UpdateAgentSwitch(ctx, base, domain.AgentSwitchStartingTarget, "source-generation", ""); err == nil || ok {
+	if ok, err := s.UpdateAgentSwitch(ctx, base, domain.AgentSwitchStartingTarget, "source-generation", "target-generation"); err == nil || ok {
 		t.Fatal("cross-session native reference was accepted")
 	}
 }
@@ -562,7 +692,10 @@ func TestAgentSwitchRejectsTargetNativeReferenceWithWrongHarness(t *testing.T) {
 	if _, _, err := s.CreateAgentNativeSession(ctx, wrongTarget); err != nil {
 		t.Fatalf("create wrong-harness target: %v", err)
 	}
-	advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchStoppingSource, now.Add(time.Second))
+	advanceAgentSwitchFixtureWithMutation(ctx, t, s, &stored, domain.AgentSwitchStoppingSource, now.Add(time.Second), func(sw *domain.AgentSwitch) {
+		sw.TargetStartMode = domain.AgentSwitchTargetStartFresh
+		sw.TargetGenerationID = "target-generation"
+	})
 	advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchSourceStopped, now.Add(2*time.Second))
 	advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchStartingTarget, now.Add(3*time.Second))
 	wrongTargetRef := wrongTarget.ID
@@ -570,7 +703,7 @@ func TestAgentSwitchRejectsTargetNativeReferenceWithWrongHarness(t *testing.T) {
 	stored.TargetStartMode = domain.AgentSwitchTargetStartFresh
 	stored.TargetGenerationID = "target-generation"
 	stored.UpdatedAt = now.Add(4 * time.Second)
-	if ok, err := s.UpdateAgentSwitch(ctx, stored, domain.AgentSwitchStartingTarget, "source-generation", ""); err == nil || ok {
+	if ok, err := s.UpdateAgentSwitch(ctx, stored, domain.AgentSwitchStartingTarget, "source-generation", "target-generation"); err == nil || ok {
 		t.Fatalf("same-session target native reference with the wrong harness: ok=%v err=%v", ok, err)
 	}
 }
@@ -683,26 +816,15 @@ func TestAgentSwitchDeliveryFailureIsAtomicWithAcknowledgement(t *testing.T) {
 			if err != nil || !created {
 				t.Fatalf("create switch: created=%v err=%v", created, err)
 			}
-			for step, nextState := range []domain.AgentSwitchState{
-				domain.AgentSwitchStoppingSource,
-				domain.AgentSwitchSourceStopped,
-				domain.AgentSwitchStartingTarget,
-				domain.AgentSwitchTargetReady,
-				domain.AgentSwitchDelivering,
-			} {
-				expectedState := stored.State
-				expectedTarget := stored.TargetGenerationID
-				if nextState == domain.AgentSwitchStoppingSource {
-					stored.TargetNativeSessionRef = &targetRef
-					stored.TargetStartMode = domain.AgentSwitchTargetStartFresh
-					stored.TargetGenerationID = "target-generation"
-				}
-				stored.State = nextState
-				stored.UpdatedAt = now.Add(time.Duration(step+1) * time.Second)
-				if ok, err := s.UpdateAgentSwitch(ctx, stored, expectedState, "source-generation", expectedTarget); err != nil || !ok {
-					t.Fatalf("advance context delivery to %s: ok=%v err=%v", nextState, ok, err)
-				}
-			}
+			advanceAgentSwitchFixtureWithMutation(ctx, t, s, &stored, domain.AgentSwitchStoppingSource, now.Add(time.Second), func(sw *domain.AgentSwitch) {
+				sw.TargetNativeSessionRef = &targetRef
+				sw.TargetStartMode = domain.AgentSwitchTargetStartFresh
+				sw.TargetGenerationID = "target-generation"
+			})
+			advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchSourceStopped, now.Add(2*time.Second))
+			advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchStartingTarget, now.Add(3*time.Second))
+			advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchTargetReady, now.Add(4*time.Second))
+			advanceAgentSwitchFixture(ctx, t, s, &stored, domain.AgentSwitchDelivering, now.Add(5*time.Second))
 
 			acknowledgedAt := stored.UpdatedAt.Add(time.Second)
 			if tt.acknowledgesFirst {
@@ -795,6 +917,12 @@ func TestAgentSwitchSourceStopAndTargetActivationAreAtomicAndNarrow(t *testing.T
 		sw.TargetStartMode = domain.AgentSwitchTargetStartFresh
 		sw.TargetGenerationID = "target-generation"
 	})
+	forgedSourceStop := stored
+	forgedSourceStop.State = domain.AgentSwitchSourceStopped
+	forgedSourceStop.UpdatedAt = now.Add(1500 * time.Millisecond)
+	if changed, err := s.UpdateAgentSwitch(ctx, forgedSourceStop, domain.AgentSwitchStoppingSource, "source-switch-generation", "target-generation"); err == nil || changed {
+		t.Fatalf("generic update forged source-stop boundary: changed=%v err=%v", changed, err)
+	}
 
 	confirmation := domain.AgentSwitchSourceStopConfirmation{
 		SwitchID: sw.ID, SessionID: session.ID, SourceHarness: domain.HarnessClaudeCode,
@@ -868,6 +996,12 @@ func TestAgentSwitchSourceStopAndTargetActivationAreAtomicAndNarrow(t *testing.T
 	stored.UpdatedAt = now.Add(3500 * time.Millisecond)
 	if ok, err := s.UpdateAgentSwitch(ctx, stored, domain.AgentSwitchStartingTarget, "source-switch-generation", "target-generation"); err != nil || !ok {
 		t.Fatalf("record target runtime handle: ok=%v err=%v", ok, err)
+	}
+	forgedTargetReady := stored
+	forgedTargetReady.State = domain.AgentSwitchTargetReady
+	forgedTargetReady.UpdatedAt = now.Add(3750 * time.Millisecond)
+	if changed, err := s.UpdateAgentSwitch(ctx, forgedTargetReady, domain.AgentSwitchStartingTarget, "source-switch-generation", "target-generation"); err == nil || changed {
+		t.Fatalf("generic update forged target activation: changed=%v err=%v", changed, err)
 	}
 	activation := domain.AgentSwitchTargetActivation{
 		SwitchID: sw.ID, SessionID: session.ID, SourceHarness: domain.HarnessClaudeCode,
@@ -1002,7 +1136,38 @@ func TestAgentSwitchOwnershipTransactionsRejectTerminatedSession(t *testing.T) {
 	if err != nil || !ok || current.State != domain.AgentSwitchStoppingSource {
 		t.Fatalf("terminated source stop partially advanced switch: %+v ok=%v err=%v", current, ok, err)
 	}
-	advanceAgentSwitchFixture(ctx, t, s, &current, domain.AgentSwitchSourceStopped, now.Add(2500*time.Millisecond))
+	// Build the post-stop recovery fixture through the typed confirmation while
+	// the session is live, then terminate it before target activation. Generic
+	// saga updates are deliberately unable to forge this boundary.
+	live, ok, err := s.GetSession(ctx, session.ID)
+	if err != nil || !ok {
+		t.Fatalf("read session for source-stop fixture: ok=%v err=%v", ok, err)
+	}
+	live.IsTerminated = false
+	live.UpdatedAt = now.Add(2 * time.Second)
+	if err := s.UpdateSession(ctx, live); err != nil {
+		t.Fatalf("temporarily restore source-stop fixture: %v", err)
+	}
+	if ok, err := s.ConfirmAgentSwitchSourceStopped(ctx, domain.AgentSwitchSourceStopConfirmation{
+		SwitchID: sw.ID, SessionID: session.ID, SourceHarness: domain.HarnessClaudeCode,
+		SourceGenerationID: "source-generation", ExpectedSourceRuntimeLaunchID: "source-runtime",
+		TargetGenerationID: "target-generation", StoppedAt: now.Add(2500 * time.Millisecond),
+	}); err != nil || !ok {
+		t.Fatalf("confirm source stop for activation fixture: ok=%v err=%v", ok, err)
+	}
+	current, ok, err = s.GetAgentSwitch(ctx, sw.ID)
+	if err != nil || !ok {
+		t.Fatalf("reload source-stopped switch: ok=%v err=%v", ok, err)
+	}
+	terminated, ok, err := s.GetSession(ctx, session.ID)
+	if err != nil || !ok {
+		t.Fatalf("read session before termination: ok=%v err=%v", ok, err)
+	}
+	terminated.IsTerminated = true
+	terminated.UpdatedAt = now.Add(2750 * time.Millisecond)
+	if err := s.UpdateSession(ctx, terminated); err != nil {
+		t.Fatalf("terminate activation fixture: %v", err)
+	}
 	advanceAgentSwitchFixture(ctx, t, s, &current, domain.AgentSwitchStartingTarget, now.Add(3*time.Second))
 	if ok, err := s.ActivateAgentSwitchTarget(ctx, domain.AgentSwitchTargetActivation{
 		SwitchID: sw.ID, SessionID: session.ID, SourceHarness: domain.HarnessClaudeCode,

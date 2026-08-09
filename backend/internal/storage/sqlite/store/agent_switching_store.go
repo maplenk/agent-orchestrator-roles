@@ -236,6 +236,12 @@ func (s *Store) UpdateAgentSwitch(ctx context.Context, rec domain.AgentSwitch, e
 	if !domain.ValidAgentSwitchTransition(expectedState, rec.State) {
 		return false, fmt.Errorf("update agent switch %s: invalid state transition %q -> %q", rec.ID, expectedState, rec.State)
 	}
+	if expectedState == domain.AgentSwitchStoppingSource && rec.State == domain.AgentSwitchSourceStopped {
+		return false, fmt.Errorf("update agent switch %s: source-stop transition requires AgentSwitchSourceStopConfirmation", rec.ID)
+	}
+	if expectedState == domain.AgentSwitchStartingTarget && rec.State == domain.AgentSwitchTargetReady {
+		return false, fmt.Errorf("update agent switch %s: target-ready transition requires AgentSwitchTargetActivation", rec.ID)
+	}
 	if expectedSourceGenerationID == "" || rec.SourceGenerationID != expectedSourceGenerationID {
 		return false, fmt.Errorf("update agent switch %s: source generation does not match immutable switch provenance", rec.ID)
 	}
@@ -598,6 +604,25 @@ func validateAgentSwitch(rec domain.AgentSwitch, create bool) error {
 			return fmt.Errorf("agent switch %s: target runtime handle requires a target generation and cannot have surrounding whitespace", rec.ID)
 		}
 	}
+	hasTargetGeneration := rec.TargetGenerationID != ""
+	hasTargetStartMode := rec.TargetStartMode != domain.AgentSwitchTargetStartPending
+	if hasTargetGeneration != hasTargetStartMode {
+		return fmt.Errorf("agent switch %s: target generation and start mode must be recorded together", rec.ID)
+	}
+	switch rec.State {
+	case domain.AgentSwitchStoppingSource, domain.AgentSwitchSourceStopped,
+		domain.AgentSwitchStartingTarget, domain.AgentSwitchTargetReady,
+		domain.AgentSwitchDelivering, domain.AgentSwitchCompleted:
+		if !hasTargetGeneration {
+			return fmt.Errorf("agent switch %s: state %q requires a target generation and start mode", rec.ID, rec.State)
+		}
+	}
+	switch rec.State {
+	case domain.AgentSwitchTargetReady, domain.AgentSwitchDelivering, domain.AgentSwitchCompleted:
+		if rec.TargetNativeSessionRef == nil || rec.TargetRuntimeHandleID == "" {
+			return fmt.Errorf("agent switch %s: state %q requires the target native session and runtime handle", rec.ID, rec.State)
+		}
+	}
 	if err := validateAgentHandoffReference(rec.AgentHandoffStatus, rec.AgentHandoffPath, rec.AgentHandoffHash); err != nil {
 		return fmt.Errorf("agent switch %s: %w", rec.ID, err)
 	}
@@ -615,9 +640,14 @@ func validateAgentSwitch(rec domain.AgentSwitch, create bool) error {
 		return fmt.Errorf("agent switch %s: invalid requested or updated timestamp", rec.ID)
 	}
 	if rec.TargetAcknowledgedAt != nil {
-		if rec.TargetGenerationID == "" || rec.TargetAcknowledgedAt.Before(rec.RequestedAt) || rec.TargetAcknowledgedAt.After(rec.UpdatedAt) {
+		if rec.TargetGenerationID == "" ||
+			(rec.State != domain.AgentSwitchDelivering && rec.State != domain.AgentSwitchCompleted) ||
+			rec.TargetAcknowledgedAt.Before(rec.RequestedAt) || rec.TargetAcknowledgedAt.After(rec.UpdatedAt) {
 			return fmt.Errorf("agent switch %s: target acknowledgement requires a target generation and a timestamp within the switch lifetime", rec.ID)
 		}
+	}
+	if rec.State == domain.AgentSwitchCompleted && rec.TargetAcknowledgedAt == nil {
+		return fmt.Errorf("agent switch %s: completed state requires exact target acknowledgement", rec.ID)
 	}
 	if create {
 		if rec.State != domain.AgentSwitchPreparingHandoff || rec.TargetNativeSessionRef != nil ||

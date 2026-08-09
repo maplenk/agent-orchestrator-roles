@@ -105,6 +105,7 @@ var shippedMigrations = map[int64]string{
 	9006: "9006_lifecycle_ledger_orchestrator_fresh.sql",
 	9007: "9007_session_pause.sql",
 	9008: "9008_session_failover_attempts.sql",
+	9009: "9009_agent_switch_contract_guards.sql",
 }
 
 // forkRenumbered maps the fork's abandoned 0053-0060 numbers to the 9000-series
