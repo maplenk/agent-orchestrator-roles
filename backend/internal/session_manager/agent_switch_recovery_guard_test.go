@@ -64,6 +64,9 @@ func TestAgentSwitchRecoveryCapabilityGuard(t *testing.T) {
 		if err := m.Reconcile(context.Background()); err != nil {
 			t.Fatalf("drain-mode boot was blocked: %v", err)
 		}
+		if _, err := m.SwitchAgent(context.Background(), "drain-session", SwitchAgentConfig{}); !errors.Is(err, ErrAgentSwitchInitiationDisabled) {
+			t.Fatalf("SwitchAgent error = %v, want initiation-disabled classification", err)
+		}
 	})
 
 	t.Run("inspection failure is boot-fatal", func(t *testing.T) {

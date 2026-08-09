@@ -94,6 +94,9 @@ func (m *Manager) SwitchAgent(ctx context.Context, id domain.SessionID, cfg Swit
 	if err != nil {
 		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, err)
 	}
+	if !m.agentSwitchInitiationEnabled {
+		return domain.AgentSwitch{}, fmt.Errorf("switch agent %s: %w", id, ErrAgentSwitchInitiationDisabled)
+	}
 	cfg.TargetHarness = domain.AgentHarness(strings.TrimSpace(string(cfg.TargetHarness)))
 	cfg.Note = boundedString(strings.TrimSpace(cfg.Note), maxSwitchNoteBytes)
 	cfg.IdempotencyKey = strings.TrimSpace(cfg.IdempotencyKey)

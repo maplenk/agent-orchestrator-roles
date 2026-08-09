@@ -10,6 +10,10 @@ import (
 // durable worker ownership that this binary cannot safely recover.
 var ErrActiveAgentSwitchRequiresEngine = errors.New("session: active agent switch requires recovery-capable engine")
 
+// ErrAgentSwitchInitiationDisabled marks a forward-rollback/drain build that
+// can recover existing durable ownership but must not create a new saga.
+var ErrAgentSwitchInitiationDisabled = errors.New("session: new agent switches are disabled while recovery remains enabled")
+
 // ActiveAgentSwitchRequiresEngineError retains a typed error for daemon/API
 // diagnostics while supporting errors.Is classification.
 type ActiveAgentSwitchRequiresEngineError struct{}
