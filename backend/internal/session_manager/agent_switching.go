@@ -2475,6 +2475,76 @@ func (m *Manager) ReconcileAgentSwitches(ctx context.Context) error {
 	return errors.Join(errs...)
 }
 
+// RecoverAgentSwitch performs one exact, conservative recovery pass for the
+// active durable saga selected by the caller. The switch ID fence prevents a
+// stale UI or CLI action from touching a newer saga for the same AO session.
+// Recovery never resends continuation: ambiguous delivery is terminalized as
+// unconfirmed, while unresolved external ownership stays nonterminal and
+// returns a typed recovery-required error.
+func (m *Manager) RecoverAgentSwitch(ctx context.Context, id domain.SessionID, switchID domain.AgentSwitchID) (domain.AgentSwitch, error) {
+	store, err := m.switchStore()
+	if err != nil {
+		return domain.AgentSwitch{}, fmt.Errorf("recover agent switch %s: %w", switchID, err)
+	}
+	sw, ok, err := store.GetActiveAgentSwitch(ctx, id)
+	if err != nil {
+		return domain.AgentSwitch{}, fmt.Errorf("recover agent switch %s: %w", switchID, err)
+	}
+	if !ok || sw.ID != switchID {
+		return domain.AgentSwitch{}, ErrSwitchNotFound
+	}
+	if !m.canRecoverNonterminalAgentSwitch {
+		return sw, &ActiveAgentSwitchRequiresEngineError{}
+	}
+	if err := m.beginAgentSwitchRecovery(ctx, id); err != nil {
+		return sw, err
+	}
+
+	// Re-read after acquiring the in-process fence. Another recovery process
+	// may have settled the selected saga before this process obtained it.
+	current, active, err := store.GetActiveAgentSwitch(ctx, id)
+	if err != nil {
+		m.endAgentSwitch(id)
+		return sw, err
+	}
+	if !active || current.ID != switchID {
+		m.endAgentSwitch(id)
+		return domain.AgentSwitch{}, ErrSwitchNotFound
+	}
+	rec, found, err := m.store.GetSession(ctx, id)
+	if err != nil {
+		m.endAgentSwitch(id)
+		return current, err
+	}
+	if !found {
+		m.endAgentSwitch(id)
+		return current, ErrNotFound
+	}
+
+	resolved, reconcileErr := m.reconcileAgentSwitch(ctx, store, rec, current)
+	if resolved {
+		m.endAgentSwitch(id)
+	} else {
+		m.retainAgentSwitch(id)
+	}
+	updated, found, reloadErr := store.GetAgentSwitch(ctx, switchID)
+	if reloadErr != nil {
+		return current, errors.Join(reconcileErr, reloadErr)
+	}
+	if !found || updated.SessionID != id {
+		return domain.AgentSwitch{}, errors.Join(reconcileErr, ErrSwitchNotFound)
+	}
+	if resolved && updated.State.Terminal() && strings.TrimSpace(m.dataDir) != "" {
+		if cleanupErr := m.cleanupAgentHandoffArtifacts(ctx, updated); cleanupErr != nil {
+			reconcileErr = errors.Join(reconcileErr, cleanupErr)
+		}
+	}
+	if !resolved && !updated.State.Terminal() {
+		reconcileErr = errors.Join(reconcileErr, agentSwitchRecoveryError(updated))
+	}
+	return updated, reconcileErr
+}
+
 func (m *Manager) reconcileRetainedAgentSwitchOnce(ctx context.Context, store ports.AgentSwitchStore, id domain.SessionID) (bool, error) {
 	sw, ok, err := store.GetActiveAgentSwitch(ctx, id)
 	if err != nil {

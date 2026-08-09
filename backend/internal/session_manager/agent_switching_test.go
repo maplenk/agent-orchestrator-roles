@@ -2436,6 +2436,91 @@ func TestReconcilePropagatesAgentSwitchDiscoveryFailureBeforeServing(t *testing.
 	}
 }
 
+func TestRecoverAgentSwitchRequiresExactActiveSaga(t *testing.T) {
+	manager, store, _ := newSwitchTestManager(t, &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}})
+	if _, err := manager.RecoverAgentSwitch(context.Background(), "proj-1", "missing"); !errors.Is(err, ErrSwitchNotFound) {
+		t.Fatalf("missing recovery error = %v, want ErrSwitchNotFound", err)
+	}
+
+	now := time.Now().UTC()
+	store.switches["active-switch"] = domain.AgentSwitch{
+		ID: "active-switch", SessionID: "proj-1", State: domain.AgentSwitchPreparingHandoff,
+		SourceGenerationID: "source-generation", RequestedAt: now, UpdatedAt: now,
+	}
+	if _, err := manager.RecoverAgentSwitch(context.Background(), "proj-1", "stale-switch"); !errors.Is(err, ErrSwitchNotFound) {
+		t.Fatalf("stale recovery error = %v, want ErrSwitchNotFound", err)
+	}
+	if got := store.switches["active-switch"].State; got != domain.AgentSwitchPreparingHandoff {
+		t.Fatalf("stale recovery mutated active saga to %q", got)
+	}
+}
+
+func TestRecoverAgentSwitchClosesAmbiguousDeliveryWithoutResend(t *testing.T) {
+	manager, store, messenger := newSwitchTestManager(t, &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}})
+	now := time.Now().UTC()
+	targetRef := domain.AgentNativeSessionID("native-target")
+	store.native[targetRef] = domain.AgentNativeSession{
+		ID: targetRef, AOSessionID: "proj-1", Harness: domain.HarnessCodex,
+		NativeSessionID: "codex-target", LastGenerationID: "target-generation",
+		CreatedAt: now, LastUsedAt: now,
+	}
+	store.switches["delivery-switch"] = domain.AgentSwitch{
+		ID: "delivery-switch", SessionID: "proj-1", State: domain.AgentSwitchDelivering,
+		FromHarness: domain.HarnessClaudeCode, TargetHarness: domain.HarnessCodex,
+		TargetNativeSessionRef: &targetRef, TargetStartMode: domain.AgentSwitchTargetStartFresh,
+		SourceGenerationID: "source-generation", TargetGenerationID: "target-generation",
+		RequestedAt: now, UpdatedAt: now,
+	}
+	rec := store.sessions["proj-1"]
+	rec.Harness = domain.HarnessCodex
+	rec.Metadata.RuntimeLaunchID = "target-generation"
+	rec.Metadata.AgentSessionID = "codex-target"
+	store.sessions[rec.ID] = rec
+
+	got, err := manager.RecoverAgentSwitch(context.Background(), "proj-1", "delivery-switch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != domain.AgentSwitchFailed || got.ErrorCode != domain.AgentSwitchErrorDeliveryUnconfirmed {
+		t.Fatalf("recovered switch = state %q code %q", got.State, got.ErrorCode)
+	}
+	if len(messenger.msgs) != 0 {
+		t.Fatalf("explicit recovery resent ambiguous continuation: %#v", messenger.msgs)
+	}
+	if manager.SessionMutationInProgress("proj-1") {
+		t.Fatal("terminal recovery retained the input fence")
+	}
+}
+
+func TestRecoverAgentSwitchKeepsUnresolvedOwnershipTypedAndFenced(t *testing.T) {
+	manager, store, messenger := newSwitchTestManager(t, &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}})
+	now := time.Now().UTC()
+	store.switches["unresolved-switch"] = domain.AgentSwitch{
+		ID: "unresolved-switch", SessionID: "proj-1", State: domain.AgentSwitchStartingTarget,
+		FromHarness: domain.HarnessClaudeCode, TargetHarness: domain.HarnessCodex,
+		SourceGenerationID: "source-generation", TargetGenerationID: "target-generation",
+		TargetStartMode: domain.AgentSwitchTargetStartFresh,
+		RequestedAt:     now, UpdatedAt: now,
+	}
+	rec := store.sessions["proj-1"]
+	rec.Activity = domain.Activity{State: domain.ActivityExited, LastActivityAt: now}
+	store.sessions[rec.ID] = rec
+
+	got, err := manager.RecoverAgentSwitch(context.Background(), "proj-1", "unresolved-switch")
+	if !errors.Is(err, ErrSwitchRecoveryRequired) {
+		t.Fatalf("recovery error = %v, want typed recovery-required", err)
+	}
+	if got.State != domain.AgentSwitchStartingTarget {
+		t.Fatalf("unresolved recovery state = %q", got.State)
+	}
+	if !manager.SessionMutationInProgress("proj-1") {
+		t.Fatal("unresolved ownership released the input fence")
+	}
+	if len(messenger.msgs) != 0 {
+		t.Fatalf("unresolved recovery sent continuation: %#v", messenger.msgs)
+	}
+}
+
 func TestSwitchAgentRetainsGateWhenSourceStopCommitIsUnknown(t *testing.T) {
 	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
 	manager, store, _ := newSwitchTestManager(t, runtime)
