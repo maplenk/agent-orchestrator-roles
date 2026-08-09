@@ -273,8 +273,12 @@ func (m RoleMap) Validate() error {
 		return fmt.Errorf("failover.mode: invalid %q (want manual|automatic)", m.Failover.Mode)
 	}
 	for roleID, rungs := range m.Failover.Roles {
-		if _, ok := m.Roles[roleID]; !ok {
+		binding, ok := m.Roles[roleID]
+		if !ok {
 			return fmt.Errorf("failover.roles[%s]: role not defined", roleID)
+		}
+		seenTargets := map[string]struct{}{
+			failoverTargetKey(binding.Harness, binding.Model): {},
 		}
 		for i, t := range rungs {
 			if t.Harness == "" || !t.Harness.IsKnown() {
@@ -283,9 +287,18 @@ func (m RoleMap) Validate() error {
 			if strings.EqualFold(strings.TrimSpace(t.Model), "default") {
 				return fmt.Errorf("failover.roles[%s][%d].model: use empty, not %q", roleID, i, t.Model)
 			}
+			targetKey := failoverTargetKey(t.Harness, t.Model)
+			if _, exists := seenTargets[targetKey]; exists {
+				return fmt.Errorf("failover.roles[%s][%d]: duplicates current or earlier target", roleID, i)
+			}
+			seenTargets[targetKey] = struct{}{}
 		}
 	}
 	return nil
+}
+
+func failoverTargetKey(harness AgentHarness, model string) string {
+	return string(harness) + "\x00" + strings.TrimSpace(model)
 }
 
 // Get returns a role binding or false.

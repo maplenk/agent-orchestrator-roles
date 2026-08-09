@@ -337,6 +337,7 @@ var schemaNames = map[string]string{
 	"ProjectInitializeRepositoryResult": "InitializeRepositoryResult",
 	"ProjectRemoveResult":               "RemoveProjectResult",
 	"ProjectSetConfigInput":             "SetProjectConfigInput",
+	"ProjectSetRoleMapInput":            "SetProjectRoleMapInput",
 	"ProjectUpdateSettingsInput":        "UpdateProjectSettingsInput",
 	"ProjectWorkspaceRepo":              "WorkspaceRepo",
 	"SessionWorkspaceFileStatus":        "WorkspaceFileStatus",
@@ -1130,6 +1131,19 @@ func projectOperations() []operation {
 			summary:    "Replace a project's per-project config",
 			pathParams: []any{controllers.ProjectIDParam{}},
 			reqBody:    projectsvc.SetConfigInput{},
+			resps: []respUnit{
+				{http.StatusOK, controllers.ProjectResponse{}},
+				{http.StatusBadRequest, envelope.APIError{}},
+				{http.StatusNotFound, envelope.APIError{}},
+				{http.StatusConflict, envelope.APIError{}},
+				{http.StatusInternalServerError, envelope.APIError{}},
+			},
+		},
+		{
+			method: http.MethodPut, path: "/api/v1/projects/{id}/role-map", id: "setProjectRoleMap", tag: "projects",
+			summary:    "Compare-and-swap a project's role map without replacing unrelated config",
+			pathParams: []any{controllers.ProjectIDParam{}},
+			reqBody:    projectsvc.SetRoleMapInput{},
 			resps: []respUnit{
 				{http.StatusOK, controllers.ProjectResponse{}},
 				{http.StatusBadRequest, envelope.APIError{}},

@@ -31,14 +31,22 @@ type InitializeRepositoryResult struct {
 // UpdateSettingsInput is the body shape for PUT /api/v1/projects/{id}. It
 // atomically replaces the user-facing display name and per-project config.
 type UpdateSettingsInput struct {
-	DisplayName string               `json:"displayName" minLength:"1" maxLength:"20"`
-	Config      domain.ProjectConfig `json:"config"`
+	DisplayName           string               `json:"displayName" minLength:"1" maxLength:"20"`
+	Config                domain.ProjectConfig `json:"config"`
+	ExpectedRoleMapSHA256 *string              `json:"expectedRoleMapSha256,omitempty"`
 }
 
 // SetConfigInput is the body shape for PUT /api/v1/projects/{id}/config. Config
 // replaces the project's stored config wholesale; a zero-value config clears it.
 type SetConfigInput struct {
 	Config domain.ProjectConfig `json:"config"`
+}
+
+// SetRoleMapInput atomically replaces only the role-map portion of the latest
+// project config. ExpectedRoleMapSHA256 makes stale editor writes fail closed.
+type SetRoleMapInput struct {
+	RoleMap               domain.RoleMap `json:"roleMap"`
+	ExpectedRoleMapSHA256 string         `json:"expectedRoleMapSha256"`
 }
 
 // RemoveResult reports what DELETE /api/v1/projects/{id} actually did.

@@ -92,6 +92,7 @@ func TestProjectsAPIContainsUnreadableStoredConfigAndFencesMutations(t *testing.
 		body   string
 	}{
 		{http.MethodPut, "/api/v1/projects/broken/config", `{"config":{"defaultBranch":"develop"}}`},
+		{http.MethodPut, "/api/v1/projects/broken/role-map", `{"expectedRoleMapSha256":"0000000000000000000000000000000000000000000000000000000000000000","roleMap":{"role_map_schema_version":1,"orchestratorRole":"orchestrator","roles":{"orchestrator":{"template":"orchestrator","harness":"codex","permissions":{"workspaceWrites":true,"canSpawn":true}}}}}`},
 		{http.MethodPut, "/api/v1/projects/broken", `{"displayName":"Changed","config":{"defaultBranch":"develop"}}`},
 		{http.MethodDelete, "/api/v1/projects/broken", ""},
 	}

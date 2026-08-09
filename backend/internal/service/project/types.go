@@ -23,6 +23,7 @@ type Project struct {
 	DefaultBranch  string                `json:"defaultBranch"`
 	Agent          string                `json:"agent,omitempty"`
 	Config         *domain.ProjectConfig `json:"config,omitempty"`
+	RoleMapSHA256  string                `json:"roleMapSha256"`
 	WorkspaceRepos []WorkspaceRepo       `json:"workspaceRepos,omitempty"`
 }
 

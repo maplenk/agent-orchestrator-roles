@@ -83,6 +83,16 @@ func TestRoleMapValidate_StrictOrchestratorMustSpawn(t *testing.T) {
 	}
 }
 
+func TestRoleMapValidate_StrictOrchestratorOnlyIsValid(t *testing.T) {
+	m := sampleStrictMap()
+	delete(m.Roles, "implementor")
+	delete(m.Roles, "ui")
+	delete(m.Failover.Roles, "implementor")
+	if err := m.Validate(); err != nil {
+		t.Fatalf("strict orchestrator-only map must remain valid: %v", err)
+	}
+}
+
 func TestRoleMapValidate_UnknownHarness(t *testing.T) {
 	m := sampleStrictMap()
 	b := m.Roles["ui"]
@@ -98,6 +108,42 @@ func TestRoleMapValidate_FailoverRoleMustExist(t *testing.T) {
 	m.Failover.Roles["ghost"] = []FailoverTarget{{Harness: HarnessCodex}}
 	if err := m.Validate(); err == nil {
 		t.Fatal("expected missing failover role error")
+	}
+}
+
+func TestRoleMapValidate_FailoverTargetsMustAdvance(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		targets []FailoverTarget
+	}{
+		{
+			name:    "first rung repeats current",
+			targets: []FailoverTarget{{Harness: HarnessCodex}},
+		},
+		{
+			name: "later rung repeats earlier",
+			targets: []FailoverTarget{
+				{Harness: HarnessPi, Model: "kimi/test"},
+				{Harness: HarnessClaudeCode},
+				{Harness: HarnessPi, Model: " kimi/test "},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := sampleStrictMap()
+			m.Failover.Roles["implementor"] = tc.targets
+			if err := m.Validate(); err == nil || !strings.Contains(err.Error(), "duplicates") {
+				t.Fatalf("Validate error = %v, want duplicate target rejection", err)
+			}
+		})
+	}
+}
+
+func TestRoleMapValidate_FailoverAllowsSameHarnessWithDistinctModel(t *testing.T) {
+	m := sampleStrictMap()
+	m.Failover.Roles["implementor"] = []FailoverTarget{{Harness: HarnessCodex, Model: "gpt-5.6"}}
+	if err := m.Validate(); err != nil {
+		t.Fatalf("same harness with a distinct model is a valid alternative: %v", err)
 	}
 }
 

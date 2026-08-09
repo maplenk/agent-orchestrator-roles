@@ -45,6 +45,10 @@ type Manager interface {
 	// read-model.
 	SetConfig(ctx context.Context, id domain.ProjectID, in SetConfigInput) (Project, error)
 
+	// SetRoleMap compare-and-swaps only the role-map portion of the latest
+	// project config, preserving concurrent edits to every unrelated field.
+	SetRoleMap(ctx context.Context, id domain.ProjectID, in SetRoleMapInput) (Project, error)
+
 	// Remove unregisters a project, stopping its sessions and reclaiming
 	// managed workspaces.
 	Remove(ctx context.Context, id domain.ProjectID) (RemoveResult, error)
@@ -209,7 +213,6 @@ func (m *Service) Add(ctx context.Context, in AddInput) (Project, error) {
 	if err := validateProjectID(id); err != nil {
 		return Project{}, err
 	}
-
 	m.addMu.Lock()
 	defer m.addMu.Unlock()
 
@@ -555,6 +558,13 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 	if err := validateProjectID(id); err != nil {
 		return Project{}, err
 	}
+	if in.ExpectedRoleMapSHA256 != nil && !roleMapSHA256Pattern.MatchString(*in.ExpectedRoleMapSHA256) {
+		return Project{}, apierr.Invalid(
+			"INVALID_ROLE_MAP_SHA256",
+			"expectedRoleMapSha256 must be a lowercase SHA-256 digest",
+			nil,
+		)
+	}
 	displayName := strings.TrimSpace(in.DisplayName)
 	if displayName == "" {
 		return Project{}, apierr.Invalid("DISPLAY_NAME_REQUIRED", "Display name is required", nil)
@@ -581,12 +591,29 @@ func (m *Service) UpdateSettings(ctx context.Context, id domain.ProjectID, in Up
 			return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", err.Error(), nil)
 		}
 	}
-	updated, err := m.store.UpdateProjectSettings(ctx, string(id), displayName, projectConfig)
+	updated, err := m.store.UpdateProjectSettings(ctx, string(id), displayName, projectConfig, in.ExpectedRoleMapSHA256)
 	if err != nil {
-		if errors.Is(err, domain.ErrProjectConfigUnreadable) {
+		switch {
+		case errors.Is(err, domain.ErrProjectConfigUnreadable):
 			return Project{}, unreadableProjectMutationError(id)
+		case errors.Is(err, domain.ErrProjectRoleMapConflict):
+			var conflict *domain.ProjectRoleMapConflictError
+			_ = errors.As(err, &conflict)
+			details := map[string]any{"projectId": id}
+			if in.ExpectedRoleMapSHA256 != nil {
+				details["expectedRoleMapSha256"] = *in.ExpectedRoleMapSHA256
+			}
+			if conflict != nil {
+				details["actualRoleMapSha256"] = conflict.ActualSHA256
+			}
+			return Project{}, apierr.Conflict(
+				"PROJECT_ROLE_MAP_CONFLICT",
+				"Role map changed since it was loaded; reload before saving",
+				details,
+			)
+		default:
+			return Project{}, apierr.Internal("PROJECT_SETTINGS_UPDATE_FAILED", "Failed to update project settings")
 		}
-		return Project{}, apierr.Internal("PROJECT_SETTINGS_UPDATE_FAILED", "Failed to update project settings")
 	}
 	if !updated {
 		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
@@ -679,6 +706,57 @@ func (m *Service) SetConfig(ctx context.Context, id domain.ProjectID, in SetConf
 			return Project{}, unreadableProjectMutationError(id)
 		}
 		return Project{}, apierr.Internal("PROJECT_CONFIG_UPDATE_FAILED", "Failed to update project config")
+	}
+	return m.projectFromRow(row), nil
+}
+
+// SetRoleMap validates and compare-and-swaps only the project-owned role map.
+// The store performs the read/compare/merge/write in one transaction so a
+// concurrent config update is preserved and a concurrent role edit conflicts.
+func (m *Service) SetRoleMap(ctx context.Context, id domain.ProjectID, in SetRoleMapInput) (Project, error) {
+	if err := validateProjectID(id); err != nil {
+		return Project{}, err
+	}
+	if !roleMapSHA256Pattern.MatchString(in.ExpectedRoleMapSHA256) {
+		return Project{}, apierr.Invalid(
+			"INVALID_ROLE_MAP_SHA256",
+			"expectedRoleMapSha256 must be a lowercase SHA-256 digest",
+			nil,
+		)
+	}
+	roleMap := in.RoleMap.WithDefaults()
+	if roleMap.IsZero() {
+		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", "roleMap: must not be empty", nil)
+	}
+	if err := roleMap.Validate(); err != nil {
+		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", "roleMap: "+err.Error(), nil)
+	}
+	if err := capabilities.ValidateRoleMap(roleMap); err != nil {
+		return Project{}, apierr.Invalid("INVALID_PROJECT_CONFIG", "roleMap: "+err.Error(), nil)
+	}
+	row, ok, err := m.store.UpdateProjectRoleMap(ctx, string(id), in.ExpectedRoleMapSHA256, roleMap)
+	if err != nil {
+		switch {
+		case errors.Is(err, domain.ErrProjectConfigUnreadable):
+			return Project{}, unreadableProjectMutationError(id)
+		case errors.Is(err, domain.ErrProjectRoleMapConflict):
+			var conflict *domain.ProjectRoleMapConflictError
+			_ = errors.As(err, &conflict)
+			details := map[string]any{"projectId": id, "expectedRoleMapSha256": in.ExpectedRoleMapSHA256}
+			if conflict != nil {
+				details["actualRoleMapSha256"] = conflict.ActualSHA256
+			}
+			return Project{}, apierr.Conflict(
+				"PROJECT_ROLE_MAP_CONFLICT",
+				"Role map changed since it was loaded; reload before saving",
+				details,
+			)
+		default:
+			return Project{}, apierr.Internal("PROJECT_ROLE_MAP_UPDATE_FAILED", "Failed to update project role map")
+		}
+	}
+	if !ok {
+		return Project{}, apierr.NotFound("PROJECT_NOT_FOUND", "Unknown project")
 	}
 	return m.projectFromRow(row), nil
 }
@@ -863,6 +941,11 @@ func (m *Service) projectFromRow(row domain.ProjectRecord) Project {
 		Agent:         string(m.defaultHarness),
 	}
 	p.Config = projectConfigPtr(row.Config)
+	// The zero map also has a revision so a legacy unconfigured project can use
+	// the same CAS endpoint to author its first map.
+	// RoleMap contains only JSON scalar/map/slice fields, so hashing cannot fail
+	// for a decoded config. Config validation remains the write boundary.
+	p.RoleMapSHA256, _ = row.Config.RoleMap.SHA256()
 	return p
 }
 
@@ -973,6 +1056,7 @@ func defaultProjectID(path string) domain.ProjectID {
 }
 
 var projectIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+var roleMapSHA256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func validateProjectID(id domain.ProjectID) error {
 	raw := string(id)

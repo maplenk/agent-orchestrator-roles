@@ -7,6 +7,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -410,6 +411,184 @@ func TestProjectConfigRoundTrips(t *testing.T) {
 	}
 }
 
+func TestUpdateProjectRoleMapCASPreservesLatestConfigAndRejectsStaleWriter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	initialMap := storeTestRoleMap(domain.HarnessCodex, "orchestrator")
+	initialSHA, err := initialMap.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "role-cas", Path: "/tmp/role-cas", DisplayName: "Original", RegisteredAt: now,
+		Config: domain.ProjectConfig{
+			DefaultBranch: "main",
+			Env:           map[string]string{"KEEP": "original"},
+			Symlinks:      []string{".env"},
+			RoleMap:       initialMap,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate an unrelated writer after the editor's GET. The role-map SHA is
+	// unchanged, so the role patch must merge into this latest config/name.
+	latestConfig := domain.ProjectConfig{
+		DefaultBranch: "develop",
+		Env:           map[string]string{"KEEP": "newer", "ADDED": "yes"},
+		Symlinks:      []string{".env", ".tool-versions"},
+		RoleMap:       initialMap,
+	}
+	if ok, err := s.UpdateProjectSettings(ctx, "role-cas", "Renamed elsewhere", latestConfig, &initialSHA); err != nil || !ok {
+		t.Fatalf("update unrelated config: ok=%v err=%v", ok, err)
+	}
+
+	nextMap := storeTestRoleMap(domain.HarnessClaudeCode, "orchestrator-next")
+	updated, ok, err := s.UpdateProjectRoleMap(ctx, "role-cas", initialSHA, nextMap)
+	if err != nil || !ok {
+		t.Fatalf("update role map: ok=%v err=%v", ok, err)
+	}
+	if updated.DisplayName != "Renamed elsewhere" || !reflect.DeepEqual(updated.Config.Env, latestConfig.Env) ||
+		!reflect.DeepEqual(updated.Config.Symlinks, latestConfig.Symlinks) || !reflect.DeepEqual(updated.Config.RoleMap, nextMap) {
+		t.Fatalf("merged row = %#v, want latest unrelated config plus next role map", updated)
+	}
+
+	// A settings form loaded before the role-map writer must not replace the
+	// winner by submitting its stale whole-config snapshot.
+	beforeSettingsConflict, _, err := s.GetProject(ctx, "role-cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err = s.UpdateProjectSettings(ctx, "role-cas", "Stale settings", latestConfig, &initialSHA)
+	if ok || !errors.Is(err, domain.ErrProjectRoleMapConflict) {
+		t.Fatalf("stale settings update: ok=%v err=%v, want conflict", ok, err)
+	}
+	afterSettingsConflict, _, err := s.GetProject(ctx, "role-cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterSettingsConflict, beforeSettingsConflict) {
+		t.Fatalf("stale settings update mutated row:\nafter  %#v\nbefore %#v", afterSettingsConflict, beforeSettingsConflict)
+	}
+
+	beforeConflict, _, err := s.GetProject(ctx, "role-cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ok, err = s.UpdateProjectRoleMap(ctx, "role-cas", initialSHA, initialMap)
+	if ok || !errors.Is(err, domain.ErrProjectRoleMapConflict) {
+		t.Fatalf("stale update: ok=%v err=%v, want conflict", ok, err)
+	}
+	afterConflict, _, err := s.GetProject(ctx, "role-cas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(afterConflict, beforeConflict) {
+		t.Fatalf("stale update mutated row:\nafter  %#v\nbefore %#v", afterConflict, beforeConflict)
+	}
+}
+
+func TestUpdateProjectRoleMapCASAllowsExactlyOneConcurrentWriter(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	initialMap := storeTestRoleMap(domain.HarnessCodex, "orchestrator")
+	initialSHA, err := initialMap.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "role-race", Path: "/tmp/role-race", DisplayName: "Role race", RegisteredAt: time.Now().UTC(),
+		Config: domain.ProjectConfig{Env: map[string]string{"KEEP": "yes"}, RoleMap: initialMap},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		ok  bool
+		err error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	for _, roleMap := range []domain.RoleMap{
+		storeTestRoleMap(domain.HarnessClaudeCode, "orchestrator-a"),
+		storeTestRoleMap(domain.HarnessCodex, "orchestrator-b"),
+	} {
+		roleMap := roleMap
+		go func() {
+			<-start
+			_, ok, err := s.UpdateProjectRoleMap(ctx, "role-race", initialSHA, roleMap)
+			results <- result{ok: ok, err: err}
+		}()
+	}
+	close(start)
+	successes, conflicts := 0, 0
+	for range 2 {
+		got := <-results
+		switch {
+		case got.err == nil && got.ok:
+			successes++
+		case errors.Is(got.err, domain.ErrProjectRoleMapConflict):
+			conflicts++
+		default:
+			t.Fatalf("unexpected writer result: ok=%v err=%v", got.ok, got.err)
+		}
+	}
+	if successes != 1 || conflicts != 1 {
+		t.Fatalf("successes=%d conflicts=%d, want 1/1", successes, conflicts)
+	}
+	got, ok, err := s.GetProject(ctx, "role-race")
+	if err != nil || !ok {
+		t.Fatalf("get winner: ok=%v err=%v", ok, err)
+	}
+	if got.Config.Env["KEEP"] != "yes" || got.DisplayName != "Role race" {
+		t.Fatalf("unrelated fields drifted: %#v", got)
+	}
+}
+
+func TestUpdateProjectSettingsArchivedReturnsNotFoundBeforeRoleMapCAS(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	roleMap := storeTestRoleMap(domain.HarnessCodex, "orchestrator")
+	if err := s.UpsertProject(ctx, domain.ProjectRecord{
+		ID: "archived-role-cas", Path: "/tmp/archived-role-cas", DisplayName: "Archived", RegisteredAt: time.Now().UTC(),
+		Config: domain.ProjectConfig{RoleMap: roleMap},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.ArchiveProject(ctx, "archived-role-cas", time.Now().UTC()); err != nil || !ok {
+		t.Fatalf("archive: ok=%v err=%v", ok, err)
+	}
+	staleSHA := strings.Repeat("0", 64)
+	ok, err := s.UpdateProjectSettings(
+		ctx,
+		"archived-role-cas",
+		"Must not update",
+		domain.ProjectConfig{RoleMap: roleMap},
+		&staleSHA,
+	)
+	if err != nil || ok {
+		t.Fatalf("archived settings update: ok=%v err=%v, want not found without conflict", ok, err)
+	}
+}
+
+func storeTestRoleMap(harness domain.AgentHarness, template string) domain.RoleMap {
+	return domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {
+				Template: template,
+				Harness:  harness,
+				Permissions: domain.RoleExecutionPolicy{
+					WorkspaceWrites: true,
+					CanSpawn:        true,
+				},
+			},
+		},
+	}
+}
+
 func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.T) {
 	dataDir := t.TempDir()
 	s := sqlitetest.MustOpenAt(t, dataDir)
@@ -501,7 +680,7 @@ func TestProjectConfigMalformedPersistedRoleBindingBlocksSCMStyleRMW(t *testing.
 			return s.ImportWorkspaceProject(ctx, domain.ProjectRecord{ID: "legacy-role", Path: "/tmp/legacy-role", RegisteredAt: now, Kind: domain.ProjectKindWorkspace}, nil)
 		},
 		"settings": func() error {
-			_, err := s.UpdateProjectSettings(ctx, "legacy-role", "changed", domain.ProjectConfig{})
+			_, err := s.UpdateProjectSettings(ctx, "legacy-role", "changed", domain.ProjectConfig{}, nil)
 			return err
 		},
 		"archive": func() error {

@@ -50,6 +50,26 @@ type ProjectRecord struct {
 // its existing durable config cannot be decoded without losing information.
 var ErrProjectConfigUnreadable = errors.New("project config unreadable")
 
+// ErrProjectRoleMapConflict classifies a role-map compare-and-swap refusal.
+// Callers must reload the current map rather than overwriting a newer edit.
+var ErrProjectRoleMapConflict = errors.New("project role map changed")
+
+// ProjectRoleMapConflictError carries the exact compare-and-swap values while
+// remaining classifiable with ErrProjectRoleMapConflict.
+type ProjectRoleMapConflictError struct {
+	ProjectID      string
+	ExpectedSHA256 string
+	ActualSHA256   string
+}
+
+func (e *ProjectRoleMapConflictError) Error() string {
+	return fmt.Sprintf("project %s: %s", e.ProjectID, ErrProjectRoleMapConflict)
+}
+
+func (e *ProjectRoleMapConflictError) Unwrap() error {
+	return ErrProjectRoleMapConflict
+}
+
 // ProjectConfigUnreadableError identifies the fenced project without exposing
 // its raw config bytes or decoder details through product surfaces.
 type ProjectConfigUnreadableError struct {

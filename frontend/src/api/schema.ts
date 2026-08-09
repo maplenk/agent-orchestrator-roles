@@ -417,6 +417,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/projects/{id}/role-map": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Compare-and-swap a project's role map without replacing unrelated config */
+        put: operations["setProjectRoleMap"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/projects/initialize": {
         parameters: {
             query?: never;
@@ -2098,6 +2115,7 @@ export interface components {
             name: string;
             path: string;
             repo: string;
+            roleMapSha256: string;
             workspaceRepos?: components["schemas"]["WorkspaceRepo"][];
         };
         ProjectConfig: {
@@ -2483,6 +2501,10 @@ export interface components {
         SetProjectConfigInput: {
             config: components["schemas"]["ProjectConfig"];
         };
+        SetProjectRoleMapInput: {
+            expectedRoleMapSha256: string;
+            roleMap: components["schemas"]["DomainRoleMap"];
+        };
         SetSessionMergePolicyRequest: {
             terminateOnPrMerge: boolean;
         };
@@ -2636,6 +2658,7 @@ export interface components {
         UpdateProjectSettingsInput: {
             config: components["schemas"]["ProjectConfig"];
             displayName: string;
+            expectedRoleMapSha256?: null | string;
         };
         UpdateSessionInterfaceRequest: {
             /** @enum {string} */
@@ -4131,6 +4154,69 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["SetProjectConfigInput"];
+            };
+        };
+        responses: {
+            /** @description OK */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Not Found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Conflict */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+            /** @description Internal Server Error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["APIError"];
+                };
+            };
+        };
+    };
+    setProjectRoleMap: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project identifier (registry key). */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetProjectRoleMapInput"];
             };
         };
         responses: {

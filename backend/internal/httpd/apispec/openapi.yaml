@@ -1125,6 +1125,57 @@ paths:
       summary: Replace a project's per-project config
       tags:
       - projects
+  /api/v1/projects/{id}/role-map:
+    put:
+      operationId: setProjectRoleMap
+      parameters:
+      - description: Project identifier (registry key).
+        in: path
+        name: id
+        required: true
+        schema:
+          description: Project identifier (registry key).
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetProjectRoleMapInput'
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectResponse'
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Not Found
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Conflict
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/APIError'
+          description: Internal Server Error
+      summary: Compare-and-swap a project's role map without replacing unrelated config
+      tags:
+      - projects
   /api/v1/projects/initialize:
     post:
       operationId: initializeProjectRepository
@@ -6147,6 +6198,8 @@ components:
           type: string
         repo:
           type: string
+        roleMapSha256:
+          type: string
         workspaceRepos:
           items:
             $ref: '#/components/schemas/WorkspaceRepo'
@@ -6158,6 +6211,7 @@ components:
       - path
       - repo
       - defaultBranch
+      - roleMapSha256
       type: object
     ProjectConfig:
       properties:
@@ -7164,6 +7218,16 @@ components:
       required:
       - config
       type: object
+    SetProjectRoleMapInput:
+      properties:
+        expectedRoleMapSha256:
+          type: string
+        roleMap:
+          $ref: '#/components/schemas/DomainRoleMap'
+      required:
+      - roleMap
+      - expectedRoleMapSha256
+      type: object
     SetSessionMergePolicyRequest:
       properties:
         terminateOnPrMerge:
@@ -7545,6 +7609,10 @@ components:
           maxLength: 20
           minLength: 1
           type: string
+        expectedRoleMapSha256:
+          type:
+          - "null"
+          - string
       required:
       - displayName
       - config

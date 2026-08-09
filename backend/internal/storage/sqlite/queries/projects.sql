@@ -41,5 +41,10 @@ UPDATE projects
 SET display_name = ?, config = ?
 WHERE id = ? AND archived_at IS NULL;
 
+-- name: UpdateProjectConfig :execrows
+UPDATE projects
+SET config = ?
+WHERE id = ? AND archived_at IS NULL;
+
 -- name: ArchiveProject :execrows
 UPDATE projects SET archived_at = ? WHERE id = ? AND archived_at IS NULL;

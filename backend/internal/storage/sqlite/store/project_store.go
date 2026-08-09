@@ -232,7 +232,12 @@ func (s *Store) ListProjects(ctx context.Context) ([]domain.ProjectRecord, error
 // UpdateProjectSettings atomically updates the user-facing display name and
 // config for an active project. It returns ok=false when the project is missing
 // or archived.
-func (s *Store) UpdateProjectSettings(ctx context.Context, id, displayName string, config domain.ProjectConfig) (bool, error) {
+func (s *Store) UpdateProjectSettings(
+	ctx context.Context,
+	id, displayName string,
+	config domain.ProjectConfig,
+	expectedRoleMapSHA256 *string,
+) (bool, error) {
 	encodedConfig, err := marshalProjectConfig(config)
 	if err != nil {
 		return false, err
@@ -241,10 +246,33 @@ func (s *Store) UpdateProjectSettings(ctx context.Context, id, displayName strin
 	defer s.writeMu.Unlock()
 	var rows int64
 	err = s.inTx(ctx, "update project settings", func(q *gen.Queries) error {
-		if err := ensureProjectConfigReadable(ctx, q, id); err != nil {
+		p, err := q.GetProject(ctx, domain.ProjectID(id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		var err error
+		row, err := projectRowFromGen(p)
+		if err != nil {
+			return err
+		}
+		if p.ArchivedAt.Valid {
+			return nil
+		}
+		if expectedRoleMapSHA256 != nil {
+			currentSHA, err := row.Config.RoleMap.SHA256()
+			if err != nil {
+				return fmt.Errorf("hash current role map: %w", err)
+			}
+			if currentSHA != *expectedRoleMapSHA256 {
+				return &domain.ProjectRoleMapConflictError{
+					ProjectID:      id,
+					ExpectedSHA256: *expectedRoleMapSHA256,
+					ActualSHA256:   currentSHA,
+				}
+			}
+		}
 		rows, err = q.UpdateProjectSettings(ctx, gen.UpdateProjectSettingsParams{
 			ID:          domain.ProjectID(id),
 			DisplayName: displayName,
@@ -256,6 +284,68 @@ func (s *Store) UpdateProjectSettings(ctx context.Context, id, displayName strin
 		return false, fmt.Errorf("update project settings %s: %w", id, err)
 	}
 	return rows > 0, nil
+}
+
+// UpdateProjectRoleMap compare-and-swaps only RoleMap inside the latest stored
+// config. The transaction preserves unrelated concurrent config/display-name
+// edits and refuses a stale role-map writer without changing any bytes.
+func (s *Store) UpdateProjectRoleMap(
+	ctx context.Context,
+	id, expectedRoleMapSHA256 string,
+	roleMap domain.RoleMap,
+) (domain.ProjectRecord, bool, error) {
+	s.writeMu.Lock()
+	defer s.writeMu.Unlock()
+	var updated domain.ProjectRecord
+	var found bool
+	err := s.inTx(ctx, "update project role map", func(q *gen.Queries) error {
+		p, err := q.GetProject(ctx, domain.ProjectID(id))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if p.ArchivedAt.Valid {
+			return nil
+		}
+		row, err := projectRowFromGen(p)
+		if err != nil {
+			return err
+		}
+		currentSHA, err := row.Config.RoleMap.SHA256()
+		if err != nil {
+			return fmt.Errorf("hash current role map: %w", err)
+		}
+		if currentSHA != expectedRoleMapSHA256 {
+			return &domain.ProjectRoleMapConflictError{
+				ProjectID:      id,
+				ExpectedSHA256: expectedRoleMapSHA256,
+				ActualSHA256:   currentSHA,
+			}
+		}
+		row.Config.RoleMap = roleMap
+		encodedConfig, err := marshalProjectConfig(row.Config)
+		if err != nil {
+			return err
+		}
+		rows, err := q.UpdateProjectConfig(ctx, gen.UpdateProjectConfigParams{
+			ID:     domain.ProjectID(id),
+			Config: encodedConfig,
+		})
+		if err != nil {
+			return err
+		}
+		found = rows > 0
+		if found {
+			updated = row
+		}
+		return nil
+	})
+	if err != nil {
+		return domain.ProjectRecord{}, false, fmt.Errorf("update project role map %s: %w", id, err)
+	}
+	return updated, found, nil
 }
 
 // CountProjectsIncludingArchived returns all registry rows, including projects

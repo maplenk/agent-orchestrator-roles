@@ -19,6 +19,8 @@ import (
 
 	"path/filepath"
 
+	"reflect"
+
 	"strings"
 
 	"testing"
@@ -219,6 +221,9 @@ func TestProjectsAPI_UpdateSettings(t *testing.T) {
 		t.Fatalf("update response = %#v", updated.Project)
 	}
 
+	body, status, _ = doRequest(t, srv, http.MethodPut, "/api/v1/projects/legacy-project", `{"displayName":"Friendly project","config":{"defaultBranch":"develop"},"expectedRoleMapSha256":"`+strings.Repeat("A", 64)+`"}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_ROLE_MAP_SHA256")
+
 	body, status, _ = doRequest(t, srv, "PUT", "/api/v1/projects/legacy-project", `{"displayName":"  ","config":{}}`)
 	assertErrorCode(t, body, status, http.StatusBadRequest, "DISPLAY_NAME_REQUIRED")
 
@@ -230,6 +235,116 @@ func TestProjectsAPI_UpdateSettings(t *testing.T) {
 
 	body, status, _ = doRequest(t, srv, "PUT", "/api/v1/projects/legacy-project", `{`)
 	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_JSON")
+}
+
+func TestProjectsAPI_SetRoleMapCASPreservesConcurrentConfigAndRejectsStaleEditor(t *testing.T) {
+	srv := newTestServer(t)
+	repo := gitRepo(t, "role-map-editor")
+	body, status, _ := doRequest(t, srv, http.MethodPost, "/api/v1/projects", `{"path":`+quote(repo)+`,"projectId":"role-map-editor"}`)
+	if status != http.StatusCreated {
+		t.Fatalf("seed create = %d, want 201; body=%s", status, body)
+	}
+	var created struct {
+		Project projectBody `json:"project"`
+	}
+	mustJSON(t, body, &created)
+	if len(created.Project.RoleMapSHA256) != 64 || created.Project.Config == nil {
+		t.Fatalf("created role-map revision/config = %#v", created.Project)
+	}
+	initialSHA := created.Project.RoleMapSHA256
+
+	// A non-role writer lands after the editor loaded its role-map SHA. The
+	// role-only endpoint must merge into this latest config and display name.
+	concurrentConfig := *created.Project.Config
+	concurrentConfig.DefaultBranch = "develop"
+	concurrentConfig.Env = map[string]string{"KEEP": "newer"}
+	settingsBody, err := json.Marshal(projectsvc.UpdateSettingsInput{
+		DisplayName:           "Renamed elsewhere",
+		Config:                concurrentConfig,
+		ExpectedRoleMapSHA256: &initialSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, status, _ = doRequest(t, srv, http.MethodPut, "/api/v1/projects/role-map-editor", string(settingsBody))
+	if status != http.StatusOK {
+		t.Fatalf("concurrent settings = %d; body=%s", status, body)
+	}
+
+	nextRoleMap := domain.RoleMap{
+		SchemaVersion:    domain.RoleMapSchemaVersion,
+		StrictDelegation: true,
+		OrchestratorRole: "orchestrator",
+		Roles: map[string]domain.RoleBinding{
+			"orchestrator": {
+				Template: "orchestrator", Harness: domain.HarnessClaudeCode,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: true},
+			},
+			"implementor": {
+				Template: "implementor", Harness: domain.HarnessCodex,
+				Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: false},
+			},
+		},
+	}
+	roleBody, err := json.Marshal(projectsvc.SetRoleMapInput{
+		RoleMap:               nextRoleMap,
+		ExpectedRoleMapSHA256: initialSHA,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, status, _ = doRequest(t, srv, http.MethodPut, "/api/v1/projects/role-map-editor/role-map", string(roleBody))
+	if status != http.StatusOK {
+		t.Fatalf("role-map update = %d, want 200; body=%s", status, body)
+	}
+	var updated struct {
+		Project projectBody `json:"project"`
+	}
+	mustJSON(t, body, &updated)
+	if updated.Project.Name != "Renamed elsewhere" || updated.Project.Config == nil ||
+		updated.Project.Config.Env["KEEP"] != "newer" || updated.Project.Config.DefaultBranch != "develop" ||
+		!reflect.DeepEqual(updated.Project.Config.RoleMap, nextRoleMap) ||
+		len(updated.Project.RoleMapSHA256) != 64 || updated.Project.RoleMapSHA256 == initialSHA {
+		t.Fatalf("role-map response lost concurrent state or revision: %#v", updated.Project)
+	}
+
+	// The earlier full-settings snapshot still contains the initial role map.
+	// Its matching token became stale when the role editor won, so replaying it
+	// must conflict and preserve the exact winning project state.
+	body, status, _ = doRequest(t, srv, http.MethodPut, "/api/v1/projects/role-map-editor", string(settingsBody))
+	assertErrorCode(t, body, status, http.StatusConflict, "PROJECT_ROLE_MAP_CONFLICT")
+	var settingsConflict errorBody
+	mustJSON(t, body, &settingsConflict)
+	if settingsConflict.Details["actualRoleMapSha256"] != updated.Project.RoleMapSHA256 {
+		t.Fatalf("settings conflict details = %#v, want actual revision", settingsConflict.Details)
+	}
+	body, status, _ = doRequest(t, srv, http.MethodGet, "/api/v1/projects/role-map-editor", "")
+	if status != http.StatusOK {
+		t.Fatalf("get after stale settings = %d; body=%s", status, body)
+	}
+	var afterSettingsConflict struct {
+		Project projectBody `json:"project"`
+	}
+	mustJSON(t, body, &afterSettingsConflict)
+	if !reflect.DeepEqual(afterSettingsConflict.Project, updated.Project) {
+		t.Fatalf("stale settings mutated winner:\nafter  %#v\nbefore %#v", afterSettingsConflict.Project, updated.Project)
+	}
+
+	// Reusing the stale token must leave the winner untouched.
+	body, status, _ = doRequest(t, srv, http.MethodPut, "/api/v1/projects/role-map-editor/role-map", string(roleBody))
+	assertErrorCode(t, body, status, http.StatusConflict, "PROJECT_ROLE_MAP_CONFLICT")
+	var conflict errorBody
+	mustJSON(t, body, &conflict)
+	if conflict.Details["actualRoleMapSha256"] != updated.Project.RoleMapSHA256 {
+		t.Fatalf("conflict details = %#v, want actual revision", conflict.Details)
+	}
+
+	invalidSHA, err := json.Marshal(projectsvc.SetRoleMapInput{RoleMap: nextRoleMap, ExpectedRoleMapSHA256: "stale"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, status, _ = doRequest(t, srv, http.MethodPut, "/api/v1/projects/role-map-editor/role-map", string(invalidSHA))
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_ROLE_MAP_SHA256")
 }
 
 func TestProjectsAPI_AddValidationAndConflicts(t *testing.T) {
@@ -546,6 +661,10 @@ type projectBody struct {
 	DefaultBranch string `json:"defaultBranch"`
 
 	Agent string `json:"agent"`
+
+	Config *domain.ProjectConfig `json:"config"`
+
+	RoleMapSHA256 string `json:"roleMapSha256"`
 }
 
 type errorBody struct {

@@ -120,6 +120,25 @@ func (q *Queries) ListProjects(ctx context.Context) ([]Project, error) {
 	return items, nil
 }
 
+const updateProjectConfig = `-- name: UpdateProjectConfig :execrows
+UPDATE projects
+SET config = ?
+WHERE id = ? AND archived_at IS NULL
+`
+
+type UpdateProjectConfigParams struct {
+	Config sql.NullString
+	ID     domain.ProjectID
+}
+
+func (q *Queries) UpdateProjectConfig(ctx context.Context, arg UpdateProjectConfigParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, updateProjectConfig, arg.Config, arg.ID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const updateProjectSettings = `-- name: UpdateProjectSettings :execrows
 UPDATE projects
 SET display_name = ?, config = ?

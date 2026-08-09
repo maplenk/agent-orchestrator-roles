@@ -243,6 +243,11 @@ func (f *fakeProjectManager) SetConfig(_ context.Context, id domain.ProjectID, i
 	return projectsvc.Project{ID: id, Config: &cfg}, nil
 }
 
+func (f *fakeProjectManager) SetRoleMap(_ context.Context, id domain.ProjectID, in projectsvc.SetRoleMapInput) (projectsvc.Project, error) {
+	cfg := domain.ProjectConfig{RoleMap: in.RoleMap}
+	return projectsvc.Project{ID: id, Config: &cfg}, nil
+}
+
 func (f *fakeProjectManager) Remove(context.Context, domain.ProjectID) (projectsvc.RemoveResult, error) {
 	return projectsvc.RemoveResult{}, nil
 }

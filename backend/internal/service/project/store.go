@@ -17,6 +17,7 @@ type Store interface {
 	UpsertProject(ctx context.Context, row domain.ProjectRecord) error
 	UpsertWorkspaceProject(ctx context.Context, row domain.ProjectRecord, repos []domain.WorkspaceRepoRecord) error
 	ListWorkspaceRepos(ctx context.Context, projectID string) ([]domain.WorkspaceRepoRecord, error)
-	UpdateProjectSettings(ctx context.Context, id string, displayName string, config domain.ProjectConfig) (bool, error)
+	UpdateProjectSettings(ctx context.Context, id string, displayName string, config domain.ProjectConfig, expectedRoleMapSHA256 *string) (bool, error)
+	UpdateProjectRoleMap(ctx context.Context, id, expectedRoleMapSHA256 string, roleMap domain.RoleMap) (domain.ProjectRecord, bool, error)
 	ArchiveProject(ctx context.Context, id string, at time.Time) (bool, error)
 }
