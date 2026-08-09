@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "vendor": "codex",
+  "harness": "codex",
+  "surface": "chat-app-server",
+  "transport": "JSON-RPC over stdio",
+  "fixtures": [
+    {
+      "file": "account_rate_limits_updated_0.146.0_not_reached.json",
+      "cliVersion": "0.146.0",
+      "method": "account/rateLimits/updated",
+      "direction": "server notification",
+      "capturedAt": "2026-08-02T11:18:23Z",
+      "sha256": "a0190ee2a85e225c210a023da0a305a34acb1016f7a65d2298e9cbc781c688ea",
+      "observedLimit": false,
+      "promotionEligible": false,
+      "sanitization": "Reassembled without value changes from the pre-existing verbatim params capture and its emittedAtMs provenance comment. The frame retains non-identifying plan, usage, reset, and credit telemetry but contains no user, account-identifying, session, path, prompt, or credential fields."
+    },
+    {
+      "file": "account_rate_limits_read_0.147.0_not_reached.json",
+      "cliVersion": "0.147.0",
+      "method": "account/rateLimits/read",
+      "direction": "server response",
+      "capturedAt": "2026-08-09T06:23:03Z",
+      "sha256": "84f8b803a2f15fae11c9955009ba31ed6a4de808457707011dd825b1814ccc3a",
+      "observedLimit": false,
+      "promotionEligible": false,
+      "sanitization": "The initialize response and unrelated remote-control notification were excluded. The committed rate-limit response otherwise retains the observed non-identifying plan, usage, reset, credit, and model-limit telemetry unchanged and contains no identity, path, prompt, or credential fields."
+    }
+  ],
+  "reason": "These real observations demonstrate machine-structured quota-state channels across Codex 0.146.0 and 0.147.0, but neither records a provider refusal or an exhausted window. A naturally reached/refused fixture is still required before Codex detector implementation or promotion."
+}
