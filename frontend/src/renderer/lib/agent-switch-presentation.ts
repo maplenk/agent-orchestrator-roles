@@ -1,6 +1,7 @@
+import type { components } from "../../api/schema";
 import type { MessageKey } from "../i18n/messages";
 import { agentSwitchErrorLabelKeys, type AgentSwitchErrorCode } from "../i18n/key-maps";
-import type { AgentSwitch, AgentSwitchOptionsReason } from "../hooks/useAgentSwitches";
+import type { AgentSwitch } from "../hooks/useAgentSwitches";
 
 const agentSwitchStateLabelKeys: Record<AgentSwitch["state"], MessageKey> = {
 	preparing_handoff: "switchAgent.state.preparingHandoff",
@@ -35,8 +36,10 @@ const actionErrorLabelKeys: Record<string, MessageKey> = {
 	WORKER_SESSION_REQUIRED: "switchAgent.error.workerOnly",
 };
 
-const optionsReasonLabelKeys: Record<AgentSwitchOptionsReason, MessageKey> = {
-	"": "switchAgent.error.unknown",
+const optionsReasonLabelKeys: Record<
+	NonNullable<components["schemas"]["AgentSwitchOptionsResponse"]["reason"]>,
+	MessageKey
+> = {
 	worker_session_required: "switchAgent.error.workerOnly",
 	terminated: "switchAgent.error.sourceSessionTerminated",
 	paused: "switchAgent.error.paused",
@@ -86,5 +89,9 @@ export function agentSwitchActionErrorCode(error: unknown): string | undefined {
 }
 
 export function agentSwitchOptionsReasonLabelKey(reason: string | undefined): MessageKey {
-	return optionsReasonLabelKeys[reason as AgentSwitchOptionsReason] ?? "switchAgent.error.unknown";
+	return (
+		optionsReasonLabelKeys[
+			reason as NonNullable<components["schemas"]["AgentSwitchOptionsResponse"]["reason"]>
+		] ?? "switchAgent.error.unknown"
+	);
 }

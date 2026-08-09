@@ -72,43 +72,18 @@ export function createSwitchAgentIdempotencyKey(): string {
 	return crypto.randomUUID();
 }
 
-type AgentSwitchMutationResponse = {
-	data?: { switch: AgentSwitch };
-	error?: unknown;
-	response?: Response;
-};
-
-// These canonical Phase 4 routes are owned by the API lane. Keep the temporary
-// cast isolated here so this branch can typecheck without editing generated
-// schema.ts; npm run api removes the schema lag when the lanes merge.
 async function postCanonicalAgentSwitch(
 	sessionId: string,
-	body: {
-		idempotencyKey: string;
-		note?: string;
-		targetHarness: SwitchAgentHarness;
-		targetModel?: string;
-	},
-): Promise<AgentSwitchMutationResponse> {
-	const post = apiClient.POST as unknown as (
-		path: "/api/v1/sessions/{sessionId}/agent-switches",
-		options: { params: { path: { sessionId: string } }; body: typeof body },
-	) => Promise<AgentSwitchMutationResponse>;
-	return post("/api/v1/sessions/{sessionId}/agent-switches", {
+	body: components["schemas"]["SwitchAgentRequest"],
+) {
+	return apiClient.POST("/api/v1/sessions/{sessionId}/agent-switches", {
 		params: { path: { sessionId } },
 		body,
 	});
 }
 
-async function postAgentSwitchRecovery(
-	sessionId: string,
-	switchId: string,
-): Promise<AgentSwitchMutationResponse> {
-	const post = apiClient.POST as unknown as (
-		path: "/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover",
-		options: { params: { path: { sessionId: string; switchId: string } } },
-	) => Promise<AgentSwitchMutationResponse>;
-	return post("/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover", {
+async function postAgentSwitchRecovery(sessionId: string, switchId: string) {
+	return apiClient.POST("/api/v1/sessions/{sessionId}/agent-switches/{switchId}/recover", {
 		params: { path: { sessionId, switchId } },
 	});
 }
@@ -118,12 +93,10 @@ export function useSwitchAgent() {
 	return useMutation({
 		mutationKey: switchAgentMutationKey,
 		mutationFn: async ({ session, targetHarness, targetModel, note, idempotencyKey }: SwitchAgentInput) => {
-			const body: {
-				targetHarness: SwitchAgentHarness;
-				targetModel?: string;
-				note?: string;
-				idempotencyKey: string;
-			} = { targetHarness, idempotencyKey };
+			const body: components["schemas"]["SwitchAgentRequest"] = {
+				targetHarness,
+				idempotencyKey,
+			};
 			const normalizedModel = targetModel?.trim();
 			if (normalizedModel) body.targetModel = normalizedModel;
 			const normalizedNote = note.trim();

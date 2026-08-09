@@ -4,31 +4,9 @@ import { apiClient, apiErrorMessage } from "../lib/api-client";
 import { usesPreviewWorkspaceData } from "../lib/preview-mode";
 
 type GeneratedAgentSwitch = components["schemas"]["AgentSwitch"];
+type AgentSwitchOptionsResponse = components["schemas"]["AgentSwitchOptionsResponse"];
 
-export type AgentSwitchTarget = {
-	harness: string;
-	model: string;
-};
-
-export type AgentSwitchOptionsReason =
-	| ""
-	| "worker_session_required"
-	| "terminated"
-	| "paused"
-	| "agent_switch_in_progress"
-	| "switch_chat_unsupported"
-	| "role_pin_required"
-	| "role_map_required"
-	| "role_not_in_map"
-	| "no_target";
-
-export type AgentSwitchOptions = {
-	available: boolean;
-	current: AgentSwitchTarget;
-	targets: AgentSwitchTarget[];
-	roleId?: string;
-	reason?: AgentSwitchOptionsReason;
-};
+export type AgentSwitchTarget = components["schemas"]["AgentSwitchTarget"];
 
 // Keep forward compatibility with newer daemons so unknown errors can fall
 // back to a generic label instead of becoming impossible to represent.
@@ -77,12 +55,8 @@ async function fetchAgentSwitches(sessionId: string): Promise<AgentSwitch[]> {
 	return data?.switches ?? [];
 }
 
-async function fetchAgentSwitchOptions(sessionId: string): Promise<AgentSwitchOptions> {
-	const get = apiClient.GET as unknown as (
-		path: "/api/v1/sessions/{sessionId}/agent-switch-options",
-		options: { params: { path: { sessionId: string } } },
-	) => Promise<{ data?: AgentSwitchOptions; error?: unknown }>;
-	const { data, error } = await get("/api/v1/sessions/{sessionId}/agent-switch-options", {
+async function fetchAgentSwitchOptions(sessionId: string): Promise<AgentSwitchOptionsResponse> {
+	const { data, error } = await apiClient.GET("/api/v1/sessions/{sessionId}/agent-switch-options", {
 		params: { path: { sessionId } },
 	});
 	if (error || !data) {
@@ -111,11 +85,11 @@ export function useAgentSwitchOptions(sessionId: string) {
 		enabled: Boolean(sessionId),
 		queryFn: () =>
 			usesPreviewWorkspaceData
-				? Promise.resolve({
+				? Promise.resolve<AgentSwitchOptionsResponse>({
 						available: false,
-						current: { harness: "", model: "" },
+						current: { harness: "claude-code", model: "" },
 						targets: [],
-						reason: "no_target" as const,
+						reason: "no_target",
 					})
 				: fetchAgentSwitchOptions(sessionId),
 		retry: 1,
