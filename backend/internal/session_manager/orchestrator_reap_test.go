@@ -121,6 +121,7 @@ func TestDrainReapQueue_LiveRuntimeFailsClosed(t *testing.T) {
 	m, st, rt, _ := reapHarness(t)
 	st.reapQueue = []domain.OrchestratorReapEntry{reapEntry("mer-1", "tmux-mer-1")}
 	rt.aliveByHandle["tmux-mer-1"] = true // survives the destroy attempt
+	rt.destroyLeavesAlive = true
 
 	err := m.DrainOrchestratorReapQueue(context.Background())
 	if !errors.Is(err, ErrReapUnconfirmed) {
@@ -175,7 +176,7 @@ func TestDrainReapQueue_UnclosableShellFailsClosed(t *testing.T) {
 // without probing at all. That is safe inside the switch saga but wrong here,
 // so the reaper must fall back explicitly and still fail closed.
 func TestDrainReapQueue_EmptyHandleProbesAdapterDerivedHandle(t *testing.T) {
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}, destroyLeavesAlive: true}
 	m, st, _ := reapHarnessWithRuntime(t, &tmuxNamingRuntime{fakeRuntime: rt})
 	st.reapQueue = []domain.OrchestratorReapEntry{reapEntry("mer-1", "")}
 	// A runtime named after the session outlived the cleared handle field.
@@ -211,7 +212,7 @@ func TestDrainReapQueue_EmptyHandleFallbackIsAdapterSanitized(t *testing.T) {
 		t.Fatalf("fixture is not exercising sanitisation: %q survived unchanged", rawID)
 	}
 
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{}}
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{}, destroyLeavesAlive: true}
 	m, st, _ := reapHarnessWithRuntime(t, &tmuxNamingRuntime{fakeRuntime: rt})
 	entry := reapEntry(rawID, "")
 	st.reapQueue = []domain.OrchestratorReapEntry{entry}
@@ -294,6 +295,7 @@ func TestDrainReapQueue_PartialDrainIsIdempotent(t *testing.T) {
 	}
 	rt.aliveByHandle["tmux-mer-1"] = false // dead
 	rt.aliveByHandle["tmux-mer-2"] = true  // still alive
+	rt.destroyLeavesAlive = true
 
 	err := m.DrainOrchestratorReapQueue(context.Background())
 	if !errors.Is(err, ErrReapUnconfirmed) {

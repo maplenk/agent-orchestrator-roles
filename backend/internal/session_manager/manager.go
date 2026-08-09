@@ -3965,7 +3965,9 @@ const (
 // the nudge exists for.
 func (m *Manager) confirmActive(ctx context.Context, guard *sessionguard.Guard, id domain.SessionID) {
 	m.confirmActiveWithNudge(ctx, id, nil, func(nudgeCtx context.Context) (sessionguard.Outcome, error) {
-		return guard.Deliver(nudgeCtx, id, "")
+		// A catch-up Enter is AO's own action even when the original message was
+		// user-originated. Keep it behind the durable pause fence.
+		return guard.DeliverAuto(nudgeCtx, id, "")
 	})
 }
 

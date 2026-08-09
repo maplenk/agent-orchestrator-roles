@@ -579,6 +579,9 @@ type fakeRuntime struct {
 	createErr          error
 	destroyErr         error
 	destroyErrSequence []error
+	// destroyLeavesAlive models a successful-but-ineffective external teardown;
+	// callers must still use the authoritative liveness probe.
+	destroyLeavesAlive bool
 	onDestroy          func(call int, handle ports.RuntimeHandle)
 	created, destroyed int
 	lastCfg            ports.RuntimeConfig
@@ -701,7 +704,7 @@ func (r *fakeRuntime) Destroy(_ context.Context, handle ports.RuntimeHandle) err
 	if destroyErr != nil {
 		return destroyErr
 	}
-	if r.aliveByHandle != nil {
+	if r.aliveByHandle != nil && !r.destroyLeavesAlive {
 		r.aliveByHandle[handle.ID] = false
 	}
 	return nil

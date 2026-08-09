@@ -389,7 +389,7 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		preAgent := st.sessions[id].Metadata.AgentSessionID
 		preLaunch := st.sessions[id].Metadata.RuntimeLaunchID
 
-		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}, destroyLeavesAlive: true}
 		m := dogfoodManager(st, rt)
 		_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
 		if err == nil {
@@ -424,7 +424,7 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
 		st.updateFailAfter = 2
 		st.updateErr = errors.New("disk full")
-		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}, destroyLeavesAlive: true}
 		m := dogfoodManager(st, rt)
 		_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
 		if !errors.Is(err, ErrSwitchUncertain) {

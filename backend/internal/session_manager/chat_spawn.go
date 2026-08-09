@@ -167,11 +167,13 @@ func (m *Manager) launchChatController(ctx context.Context, in chatSpawn) (domai
 		if completionErr != nil || controllerCommitted {
 			m.stopChatBestEffort(ctx, id)
 			m.rollbackPreparedSpawnWorkspace(ctx, in.record, in.workspace, in.workspaceProject, true)
-			m.markSpawnFailedTerminated(ctx, id)
+			cleanupErr := m.markSpawnFailedTerminated(ctx, id)
 			if completionErr != nil {
-				return domain.SessionRecord{}, fmt.Errorf("spawn %s: completed: %w", id, completionErr)
+				return domain.SessionRecord{}, fmt.Errorf("spawn %s: completed: %w", id,
+					errors.Join(completionErr, cleanupErr))
 			}
-			return domain.SessionRecord{}, fmt.Errorf("spawn %s: chat controller: %w", id, err)
+			return domain.SessionRecord{}, fmt.Errorf("spawn %s: chat controller: %w", id,
+				errors.Join(err, cleanupErr))
 		}
 		// No controller exists, so nothing provider-side needs closing. The
 		// runtime was never touched, hence runtimeDestroyed=false.

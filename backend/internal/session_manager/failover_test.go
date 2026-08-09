@@ -718,6 +718,7 @@ func TestContinueAutomaticFailover_DuplicateAfterPreStopFailureDoesNotSpendSecon
 	)
 	enableAutomaticFailover(t, st, m, id)
 	rt.aliveByHandle = map[string]bool{"rt-1": true}
+	rt.destroyLeavesAlive = true
 
 	first, err := m.ContinueAutomaticFailover(context.Background(), id,
 		AutomaticFailoverRequest{IncidentID: "inc-1"})
@@ -1239,6 +1240,7 @@ func TestReconcile_AutomaticTerminalFailureNeverAdvancesAnotherRung(t *testing.T
 	st, rt, m, id := failoverFixture(t)
 	enableAutomaticFailover(t, st, m, id)
 	rt.aliveByHandle = map[string]bool{"rt-1": true}
+	rt.destroyLeavesAlive = true
 	if _, err := m.ContinueAutomaticFailover(context.Background(), id,
 		AutomaticFailoverRequest{IncidentID: "inc-1"}); err == nil {
 		t.Fatal("expected the first pre-stop failure")
@@ -1668,6 +1670,7 @@ func TestContinueFailover_PausedDeadSourceWorks(t *testing.T) {
 func TestContinueFailover_PreStopFailureIsTerminalAndKeepsPause(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	rt.aliveByHandle = map[string]bool{"rt-1": true} // survives destroy
+	rt.destroyLeavesAlive = true
 
 	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
 	if err == nil {

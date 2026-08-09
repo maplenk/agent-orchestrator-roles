@@ -1047,7 +1047,7 @@ func TestSwitchWorker_RollbackFailWrapsErrSwitchUncertain(t *testing.T) {
 	st.updateFailAfter = 2
 	st.updateErr = errors.New("disk full on rollback")
 
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}, destroyLeavesAlive: true}
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},
