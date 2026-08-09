@@ -521,6 +521,9 @@ func assertMuseManagedHooks(t *testing.T, path string) {
 		"PermissionRequest": "permission-request",
 		"Stop":              "stop",
 	}
+	if len(file.Hooks) != len(want) {
+		t.Fatalf("managed hook groups = %#v, want only top-level Muse lifecycle hooks", file.Hooks)
+	}
 	for nativeEvent, aoEvent := range want {
 		groups := file.Hooks[nativeEvent]
 		if len(groups) != 1 || len(groups[0].Hooks) != 1 {

@@ -78,6 +78,13 @@ func TestMuseDerivesManagedHookActivity(t *testing.T) {
 			}
 		})
 	}
+	for _, event := range []string{"pre-tool-use", "post-tool-use"} {
+		t.Run("background-"+event+"-is-ignored", func(t *testing.T) {
+			if got, ok := Derive("muse", event, []byte(`{}`)); ok {
+				t.Fatalf("Derive(muse, %q) = (%q, true), want no top-level activity signal", event, got)
+			}
+		})
+	}
 	if got, ok := Derive("muse", "session-start", []byte(`{}`)); ok {
 		t.Fatalf("Derive(muse, session-start) = (%q, true), want metadata-only", got)
 	}
