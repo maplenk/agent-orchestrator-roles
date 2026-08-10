@@ -24,7 +24,7 @@ merge).
 
 **Promotion target:** `roles/multi-sub-v1`.
 
-**Promotion PR:** **PENDING — root will insert the PR URL after creation.**
+**Promotion PR:** [maplenk/agent-orchestrator-roles#2](https://github.com/maplenk/agent-orchestrator-roles/pull/2)
 
 **Integration merge:** `c7889415fe0b757a2158ebf830771fa33fd8dc08`
 with parents `ecf45bccd015575be5d90ee3241adf746f42826f` and the immutable
@@ -458,7 +458,7 @@ test failures:
   real-xterm reproduction, 86 focused Vitest tests, both TypeScript typechecks,
   and a second isolated native Electron launch all passed without the renderer
   exception.
-- **Promotion PR:** **PENDING — root will insert the PR URL here.**
+- **Promotion PR:** [maplenk/agent-orchestrator-roles#2](https://github.com/maplenk/agent-orchestrator-roles/pull/2)
 - `npx @redwoodjs/agent-ci run --all` could not run because this host has no
   Docker binary or socket.
 - ConPTY cross-compilation passed, but a real Windows execution run remains
