@@ -274,6 +274,8 @@ engine convergence gate passes.
   side wholesale.
 - Keep upstream `0085` unchanged. Add a new `900x` migration only for
   fork-specific compatibility or backfill.
+- The reviewed fork migration high-water mark is `9012_session_role_results.sql`;
+  advance the append-only ledger and migration guard together for every later file.
 - Prove a fresh database migrates successfully.
 - Prove a copied fork database already through migration `9008` applies `0085`
   through `goose.WithAllowMissing`, preserves data and passes a second

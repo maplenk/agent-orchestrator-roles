@@ -14,7 +14,7 @@ import (
 )
 
 func TestComposeSystemPromptWithRole_FailClosed(t *testing.T) {
-	_, err := composeSystemPromptWithRole("base", roleApplyResult{Applied: true})
+	_, err := composeSystemPromptWithRole("base", roleApplyResult{Applied: true}, domain.KindWorker)
 	if !errors.Is(err, ErrRolePromptRequired) {
 		t.Fatalf("err = %v, want ErrRolePromptRequired", err)
 	}
@@ -178,7 +178,7 @@ func TestComposeSystemPromptWithRole_AppendsAuthoritativeFooter(t *testing.T) {
 		ExtraSystem: []string{"ROLE", "CONTRACT"},
 		Binding:     domain.SessionRoleBinding{RoleID: "implementor", ResolvedHarness: domain.HarnessCodex},
 		Policy:      domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: false},
-	})
+	}, domain.KindOrchestrator)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,6 +187,30 @@ func TestComposeSystemPromptWithRole_AppendsAuthoritativeFooter(t *testing.T) {
 	}
 	if !strings.Contains(got, "AUTHORITATIVE ROLE FOOTER") {
 		t.Fatalf("missing footer: %q", got)
+	}
+	if strings.Contains(got, "<ao-role-result>") {
+		t.Fatalf("orchestrator received worker result protocol: %q", got)
+	}
+}
+
+func TestComposeSystemPromptWithRole_AppendsWorkerResultProtocol(t *testing.T) {
+	got, err := composeSystemPromptWithRole("base", roleApplyResult{
+		Applied:     true,
+		ExtraSystem: []string{"verify only"},
+		Binding:     domain.SessionRoleBinding{RoleID: "verifier", ResolvedHarness: domain.HarnessCodex},
+		Policy:      domain.RoleExecutionPolicy{WorkspaceWrites: false, CanSpawn: false},
+	}, domain.KindWorker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"REQUIRED ROLE RESULT",
+		`<ao-role-result>{"schemaVersion":1,"state":"completed|blocked|failed","summary":"concise outcome"}</ao-role-result>`,
+		"agent-reported result",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("worker prompt missing %q:\n%s", want, got)
+		}
 	}
 }
 
@@ -222,7 +246,7 @@ func TestComposeSystemPromptWithRole_FooterAuthoritative(t *testing.T) {
 		ExtraSystem: []string{"## Role: Reviewer\nreview only"},
 		Binding:     domain.SessionRoleBinding{RoleID: "reviewer", ResolvedHarness: domain.HarnessCodex},
 		Policy:      domain.RoleExecutionPolicy{WorkspaceWrites: true, CanSpawn: false},
-	})
+	}, domain.KindWorker)
 	if err != nil {
 		t.Fatal(err)
 	}

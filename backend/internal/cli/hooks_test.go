@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
 )
 
 type activityCapture struct {
@@ -437,6 +439,63 @@ func TestHooks_ActivityAlsoReportsNativeSessionID(t *testing.T) {
 	want := setActivityAPIRequest{State: "idle", Event: "stop", AgentSessionID: "claude-session-1"}
 	if req != want {
 		t.Fatalf("body = %+v, want %+v", req, want)
+	}
+}
+
+func TestHooks_StopReportsTrailingRoleResult(t *testing.T) {
+	for _, agent := range []string{"codex", "grok"} {
+		t.Run(agent, func(t *testing.T) {
+			t.Setenv("AO_SESSION_ID", "ao-7")
+			cfg := setConfigEnv(t)
+			srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+			writeRunFileFor(t, cfg, srv)
+			payload, err := json.Marshal(map[string]string{
+				"session_id":             agent + "-session-1",
+				"last_assistant_message": `Finished.\n\n<ao-role-result>{"schemaVersion":1,"state":"completed","summary":"Focused checks passed."}</ao-role-result>`,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, _, err = executeCLI(t, Deps{
+				In:           strings.NewReader(string(payload)),
+				ProcessAlive: func(int) bool { return true },
+			}, "hooks", agent, "stop")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			var req setActivityAPIRequest
+			if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+				t.Fatalf("decode body: %v\nbody=%s", err, capture.body)
+			}
+			if req.RoleResult == nil || req.RoleResult.State != domain.RoleResultCompleted || req.RoleResult.Summary != "Focused checks passed." {
+				t.Fatalf("role result = %#v", req.RoleResult)
+			}
+		})
+	}
+}
+
+func TestHooks_NonTrailingRoleResultIsNotReported(t *testing.T) {
+	t.Setenv("AO_SESSION_ID", "ao-7")
+	cfg := setConfigEnv(t)
+	srv, capture := activityServer(t, http.StatusOK, `{"ok":true}`)
+	writeRunFileFor(t, cfg, srv)
+	payload, err := json.Marshal(map[string]string{
+		"last_assistant_message": `<ao-role-result>{"schemaVersion":1,"state":"completed","summary":"done"}</ao-role-result> trailing`,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = executeCLI(t, Deps{In: strings.NewReader(string(payload)), ProcessAlive: func(int) bool { return true }}, "hooks", "claude-code", "stop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var req setActivityAPIRequest
+	if err := json.Unmarshal([]byte(capture.body), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.RoleResult != nil {
+		t.Fatalf("non-trailing result reported: %#v", req.RoleResult)
 	}
 }
 

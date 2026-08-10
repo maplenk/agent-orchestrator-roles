@@ -159,9 +159,12 @@ type SessionRecord struct {
 	IsTerminated  bool      `json:"isTerminated"`
 	// TerminateOnPRMerge is a user-controlled lifecycle policy. When enabled,
 	// completing the session's PR set through a merge tears down the session.
-	TerminateOnPRMerge bool            `json:"terminateOnPrMerge"`
-	AutoInjectReview   bool            `json:"autoInjectReview"`
-	Metadata           SessionMetadata `json:"-"`
+	TerminateOnPRMerge bool `json:"terminateOnPrMerge"`
+	AutoInjectReview   bool `json:"autoInjectReview"`
+	// RoleResult is the last structured outcome reported by a role-pinned
+	// worker. Superseded results remain visible with current=false.
+	RoleResult *SessionRoleResult `json:"roleResult,omitempty"`
+	Metadata   SessionMetadata    `json:"-"`
 	// CleanupGeneration is a monotonic counter bumped each time the session is
 	// un-terminated (spawn/restore). The terminal-resource reconciler stamps its
 	// durable cleanup facts with the generation they were written for so a
@@ -178,7 +181,7 @@ type SessionRecord struct {
 // plus derived display facts. Neither Status nor SCMStatus is persisted.
 type Session struct {
 	SessionRecord
-	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,exited,idle,terminated,no_signal"`
+	Status           SessionStatus `json:"status" enum:"working,pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged,needs_input,completed,failed,exited,idle,terminated,no_signal"`
 	SCMStatus        SessionStatus `json:"scmStatus,omitempty" enum:"pr_open,draft,ci_failed,review_pending,changes_requested,approved,mergeable,merged"`
 	TerminalHandleID string        `json:"terminalHandleId,omitempty"`
 	// PRs are the session's attributed pull requests (one session can own many).

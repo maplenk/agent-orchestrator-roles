@@ -16,6 +16,8 @@ const (
 	StatusMergeable        SessionStatus = "mergeable"
 	StatusMerged           SessionStatus = "merged"
 	StatusNeedsInput       SessionStatus = "needs_input"
+	StatusCompleted        SessionStatus = "completed"
+	StatusFailed           SessionStatus = "failed"
 	StatusExited           SessionStatus = "exited"
 	StatusIdle             SessionStatus = "idle"
 	StatusTerminated       SessionStatus = "terminated"

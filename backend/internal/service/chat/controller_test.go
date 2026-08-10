@@ -785,6 +785,54 @@ func TestProjectsAFullTurnIntoDurableRows(t *testing.T) {
 	}
 }
 
+func TestRoleResultIsReportedOnlyAfterSuccessfulChatTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		turnState  domain.TurnState
+		wantResult bool
+	}{
+		{name: "completed", turnState: domain.TurnStateCompleted, wantResult: true},
+		{name: "failed", turnState: domain.TurnStateFailed, wantResult: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			if _, err := h.svc.Send(context.Background(), testSession, ports.ChatUserMessage{
+				Text: "verify", ClientMessageID: "client-role-result", Origin: domain.MessageOriginHuman,
+			}); err != nil {
+				t.Fatalf("Send: %v", err)
+			}
+			final := `Done.\n\n<ao-role-result>{"schemaVersion":1,"state":"completed","summary":"Chat verification passed."}</ao-role-result>`
+			h.conv.emit(
+				ports.ChatEvent{Kind: ports.ChatEventTurnStarted, ProviderTurnID: "provider-turn-1"},
+				ports.ChatEvent{Kind: ports.ChatEventMessageCompleted, ProviderTurnID: "provider-turn-1", ProviderItemID: "msg-result", Text: final},
+				ports.ChatEvent{Kind: ports.ChatEventTurnCompleted, ProviderTurnID: "provider-turn-1", TurnState: tc.turnState},
+			)
+			h.awaitSnapshot(t, func(s store.ConversationSnapshot) bool {
+				return len(s.Turns) == 1 && s.Turns[0].State.Terminal()
+			})
+
+			deadline := time.Now().Add(2 * time.Second)
+			for time.Now().Before(deadline) {
+				for _, signal := range h.activity.snapshot() {
+					if signal.Event != "chat.turn.completed" {
+						continue
+					}
+					if tc.wantResult {
+						if signal.RoleResult == nil || signal.RoleResult.State != domain.RoleResultCompleted || signal.RoleResult.Summary != "Chat verification passed." {
+							t.Fatalf("completion signal role result = %#v", signal.RoleResult)
+						}
+					} else if signal.RoleResult != nil {
+						t.Fatalf("failed turn reported result %#v", signal.RoleResult)
+					}
+					return
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			t.Fatal("chat.turn.completed activity was not reported")
+		})
+	}
+}
+
 func TestControllerCloseHonorsContextWhenProviderStreamStaysOpen(t *testing.T) {
 	providerErr := errors.New("provider close failed")
 	conv := &stuckConversation{fakeConversation: newFakeConversation(), closeErr: providerErr}

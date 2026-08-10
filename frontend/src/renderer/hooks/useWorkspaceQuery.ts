@@ -107,6 +107,7 @@ async function fetchWorkspaces(): Promise<WorkspaceSummary[]> {
 						createdAt: session.createdAt,
 						updatedAt: session.updatedAt,
 						activity,
+						roleResult: session.roleResult ?? undefined,
 						previewUrl: session.previewUrl,
 						previewRevision: session.previewRevision,
 						isPinned: session.isPinned ?? false,

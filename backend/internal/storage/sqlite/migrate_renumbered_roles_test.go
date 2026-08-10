@@ -163,8 +163,8 @@ func TestRolesMigrationsStartInTheForkRange(t *testing.T) {
 	if rolesLowest != forkRangeStart {
 		t.Fatalf("lowest fork migration = %d, want %d", rolesLowest, forkRangeStart)
 	}
-	if maxSeen != 9011 {
-		t.Fatalf("highest migration = %d, want 9011; update this test and UPSTREAM_SYNC3_PLAN.md together", maxSeen)
+	if maxSeen != 9012 {
+		t.Fatalf("highest migration = %d, want 9012; update this test and UPSTREAM_SYNC3_PLAN.md together", maxSeen)
 	}
 }
 

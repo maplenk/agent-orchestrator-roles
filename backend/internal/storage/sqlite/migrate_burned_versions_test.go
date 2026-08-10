@@ -108,6 +108,7 @@ var shippedMigrations = map[int64]string{
 	9009: "9009_agent_switch_contract_guards.sql",
 	9010: "9010_agent_switch_authorized_intent.sql",
 	9011: "9011_failover_authorized_role_snapshot.sql",
+	9012: "9012_session_role_results.sql",
 }
 
 // forkRenumbered maps the fork's abandoned 0053-0060 numbers to the 9000-series

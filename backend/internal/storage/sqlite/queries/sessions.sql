@@ -13,13 +13,15 @@ INSERT INTO sessions (
     latest_user_prompt, latest_assistant_update, native_transcript_path,
     preview_url, preview_revision, terminate_on_pr_merge, cleanup_generation, browser_capability_verifier,
     session_mode, provider_conversation_id, controller_generation,
+    role_result_state, role_result_summary, role_result_reported_at,
+    role_result_generation_id, role_result_current,
     created_at, updated_at, is_pinned, pinned_at, auto_inject_review
 ) VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    ?, ?, ?, ?, ?, ?, ?, ?, ?
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
 );
 
 -- name: UpdateSession :exec
@@ -34,13 +36,16 @@ UPDATE sessions SET
     latest_user_prompt = ?, latest_assistant_update = ?, native_transcript_path = ?,
     preview_url = ?, preview_revision = ?, terminate_on_pr_merge = ?,
     cleanup_generation = ?, browser_capability_verifier = ?,
-    provider_conversation_id = ?, controller_generation = ?, updated_at = ?,
+    provider_conversation_id = ?, controller_generation = ?,
+    role_result_state = ?, role_result_summary = ?, role_result_reported_at = ?,
+    role_result_generation_id = ?, role_result_current = ?, updated_at = ?,
     is_pinned = ?, pinned_at = ?, auto_inject_review = ?
 WHERE id = ?;
 
 -- name: RecordSessionLatestUserPrompt :execrows
 UPDATE sessions SET
     latest_user_prompt = sqlc.arg(latest_user_prompt),
+    role_result_current = 0,
     updated_at = sqlc.arg(updated_at)
 WHERE id = sqlc.arg(id)
   AND is_terminated = 0

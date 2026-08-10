@@ -102,6 +102,7 @@ func uniqueConstraintColumns(err error) string {
 // only when the signal still belongs to the session's active harness launch.
 func (s *Store) UpdateSessionFromActivitySignal(ctx context.Context, rec domain.SessionRecord) (bool, error) {
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
+	resultState, resultSummary, resultAt, resultGeneration, resultCurrent := roleResultColumns(rec.RoleResult)
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	rows, err := s.qw.UpdateSessionFromActivitySignal(ctx, gen.UpdateSessionFromActivitySignalParams{
@@ -111,6 +112,11 @@ func (s *Store) UpdateSessionFromActivitySignal(ctx context.Context, rec domain.
 		AgentSessionID:               rec.Metadata.AgentSessionID,
 		LatestUserPrompt:             rec.Metadata.LatestUserPrompt,
 		LatestAssistantUpdate:        rec.Metadata.LatestAssistantUpdate,
+		RoleResultState:              resultState,
+		RoleResultSummary:            resultSummary,
+		RoleResultReportedAt:         resultAt,
+		RoleResultGenerationID:       resultGeneration,
+		RoleResultCurrent:            resultCurrent,
 		NativeTranscriptPath:         rec.Metadata.NativeTranscriptPath,
 		UpdatedAt:                    rec.UpdatedAt,
 		ID:                           rec.ID,
@@ -125,8 +131,9 @@ func (s *Store) UpdateSessionFromActivitySignal(ctx context.Context, rec domain.
 	return rows > 0, nil
 }
 
-// RecordSessionLatestUserPrompt persists the latest real user direction without
-// rewriting lifecycle state that another goroutine may have advanced.
+// RecordSessionLatestUserPrompt persists the latest real user direction and
+// supersedes any prior semantic result after delivery. It does not rewrite
+// lifecycle ownership/state that another goroutine may have advanced.
 func (s *Store) RecordSessionLatestUserPrompt(ctx context.Context, id domain.SessionID, prompt string, updatedAt time.Time) (bool, error) {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
@@ -529,6 +536,10 @@ func rowToRecord(row gen.Session) (domain.SessionRecord, error) {
 	if err != nil {
 		return domain.SessionRecord{}, err
 	}
+	roleResult, err := roleResultFromSessionRow(row, role)
+	if err != nil {
+		return domain.SessionRecord{}, err
+	}
 
 	return domain.SessionRecord{
 		ID:              row.ID,
@@ -549,6 +560,7 @@ func rowToRecord(row gen.Session) (domain.SessionRecord, error) {
 		PinnedAt:           nullTimeToTimePtr(row.PinnedAt),
 		TerminateOnPRMerge: row.TerminateOnPRMerge,
 		AutoInjectReview:   row.AutoInjectReview,
+		RoleResult:         roleResult,
 		Metadata: domain.SessionMetadata{
 			Branch:                    row.Branch,
 			WorkspacePath:             row.WorkspacePath,
@@ -652,6 +664,7 @@ func recordToInsert(rec domain.SessionRecord, num int64) (gen.InsertSessionParam
 	activity := normalActivity(rec.Activity, rec.CreatedAt)
 	role := rec.Metadata.Role
 	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
+	resultState, resultSummary, resultAt, resultGeneration, resultCurrent := roleResultColumns(rec.RoleResult)
 	return gen.InsertSessionParams{
 		ID:                        rec.ID,
 		ProjectID:                 rec.ProjectID,
@@ -702,6 +715,11 @@ func recordToInsert(rec domain.SessionRecord, num int64) (gen.InsertSessionParam
 		SessionMode:               domain.NormalizeSessionMode(rec.Mode),
 		ProviderConversationID:    rec.Metadata.ProviderConversationID,
 		ControllerGeneration:      rec.Metadata.ControllerGeneration,
+		RoleResultState:           resultState,
+		RoleResultSummary:         resultSummary,
+		RoleResultReportedAt:      resultAt,
+		RoleResultGenerationID:    resultGeneration,
+		RoleResultCurrent:         resultCurrent,
 	}, nil
 }
 
@@ -714,6 +732,7 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 	activity := normalActivity(rec.Activity, rec.UpdatedAt)
 	role := rec.Metadata.Role
 	writes, spawn := roleWriteFlags(role.ResolvedPermissions)
+	resultState, resultSummary, resultAt, resultGeneration, resultCurrent := roleResultColumns(rec.RoleResult)
 	return gen.UpdateSessionParams{
 		ID:                        rec.ID,
 		IssueID:                   rec.IssueID,
@@ -759,7 +778,50 @@ func recordToUpdate(rec domain.SessionRecord) gen.UpdateSessionParams {
 		UpdatedAt:                 rec.UpdatedAt,
 		ProviderConversationID:    rec.Metadata.ProviderConversationID,
 		ControllerGeneration:      rec.Metadata.ControllerGeneration,
+		RoleResultState:           resultState,
+		RoleResultSummary:         resultSummary,
+		RoleResultReportedAt:      resultAt,
+		RoleResultGenerationID:    resultGeneration,
+		RoleResultCurrent:         resultCurrent,
 	}
+}
+
+func roleResultColumns(result *domain.SessionRoleResult) (string, string, sql.NullTime, string, int64) {
+	if result == nil {
+		return "", "", sql.NullTime{}, "", 0
+	}
+	current := int64(0)
+	if result.Current {
+		current = 1
+	}
+	return string(result.State), result.Summary, timeToNullTime(result.ReportedAt), result.GenerationID, current
+}
+
+func roleResultFromSessionRow(row gen.Session, role domain.SessionRoleBinding) (*domain.SessionRoleResult, error) {
+	if row.RoleResultState == "" && row.RoleResultSummary == "" && !row.RoleResultReportedAt.Valid &&
+		row.RoleResultGenerationID == "" && row.RoleResultCurrent == 0 {
+		return nil, nil
+	}
+	report, err := domain.NormalizeRoleResultReport(domain.RoleResultReport{
+		SchemaVersion: domain.RoleResultSchemaVersion,
+		State:         domain.RoleResultState(row.RoleResultState),
+		Summary:       row.RoleResultSummary,
+	})
+	if err != nil || !row.RoleResultReportedAt.Valid || strings.TrimSpace(row.RoleResultGenerationID) == "" || strings.TrimSpace(role.RoleID) == "" {
+		return nil, fmt.Errorf("corrupt role result for session %s", row.ID)
+	}
+	activeGeneration := row.RuntimeLaunchID
+	if domain.NormalizeSessionMode(row.SessionMode) == domain.SessionModeChat {
+		activeGeneration = row.ControllerGeneration
+	}
+	return &domain.SessionRoleResult{
+		RoleID:       role.RoleID,
+		State:        report.State,
+		Summary:      report.Summary,
+		ReportedAt:   row.RoleResultReportedAt.Time,
+		GenerationID: row.RoleResultGenerationID,
+		Current:      row.RoleResultCurrent != 0 && activeGeneration != "" && row.RoleResultGenerationID == activeGeneration,
+	}, nil
 }
 
 // roleFromSessionRow maps sessions role columns to domain.SessionRoleBinding.

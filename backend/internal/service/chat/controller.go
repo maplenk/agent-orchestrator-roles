@@ -132,7 +132,11 @@ type Controller struct {
 	// turn-started notification arriving. Interrupt needs the distinction: a
 	// provider refuses to cancel a turn it has not acknowledged yet.
 	ackedTurnID string
-	state       ports.ChatControllerState
+	// pendingRoleResults retains only the latest settled assistant message's
+	// strict result envelope for a turn. It is committed to the session only if
+	// the provider later reports that exact turn completed successfully.
+	pendingRoleResults map[string]domain.RoleResultReport
+	state              ports.ChatControllerState
 	// settings are the provider choices applied to the next dispatch. Held here as
 	// well as on disk so a dispatch does not need a read, and updated together with
 	// the row so the two cannot drift.
@@ -189,19 +193,20 @@ func newController(
 	now Clock,
 ) *Controller {
 	c := &Controller{
-		sessionID:    sessionID,
-		conversation: conversation,
-		generation:   generation,
-		conv:         conv,
-		store:        store,
-		activity:     activity,
-		log:          log,
-		newID:        newID,
-		now:          now,
-		state:        ports.ChatControllerReady,
-		settings:     conversation.Settings,
-		mcpServers:   map[string]domain.ConversationMCPServer{},
-		stopped:      make(chan struct{}),
+		sessionID:          sessionID,
+		conversation:       conversation,
+		generation:         generation,
+		conv:               conv,
+		store:              store,
+		activity:           activity,
+		log:                log,
+		newID:              newID,
+		now:                now,
+		state:              ports.ChatControllerReady,
+		settings:           conversation.Settings,
+		mcpServers:         map[string]domain.ConversationMCPServer{},
+		pendingRoleResults: map[string]domain.RoleResultReport{},
+		stopped:            make(chan struct{}),
 	}
 	// Seeded from the durable row so a reconnect merges onto what is already known
 	// rather than starting from blank and reporting a conversation as having no
@@ -1279,6 +1284,7 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 		// it. Until this arrives, it will not.
 		c.ackedTurnID = event.ProviderTurnID
 		c.state = ports.ChatControllerBusy
+		delete(c.pendingRoleResults, event.ProviderTurnID)
 		c.mu.Unlock()
 		// A turn AO dispatched already has a row, bound in dispatch. This covers the
 		// turn AO did NOT dispatch: a compaction, or work the provider resumed from its
@@ -1337,8 +1343,22 @@ func (c *Controller) apply(ctx context.Context, event ports.ChatEvent) error {
 			event.ProviderItemID, event.ProviderTurnID, event.Delta, c.newID(), now)
 
 	case ports.ChatEventMessageCompleted:
-		return c.store.SettleAssistantMessage(ctx, c.conversation.ID,
-			event.ProviderItemID, event.ProviderTurnID, event.Text, c.newID(), now)
+		if err := c.store.SettleAssistantMessage(ctx, c.conversation.ID,
+			event.ProviderItemID, event.ProviderTurnID, event.Text, c.newID(), now); err != nil {
+			return err
+		}
+		if event.ProviderTurnID != "" {
+			c.mu.Lock()
+			if report, ok := domain.ParseRoleResultEnvelope(event.Text); ok {
+				c.pendingRoleResults[event.ProviderTurnID] = report
+			} else {
+				// The latest completed assistant message is authoritative. A result
+				// embedded in an earlier message is not the trailing turn result.
+				delete(c.pendingRoleResults, event.ProviderTurnID)
+			}
+			c.mu.Unlock()
+		}
+		return nil
 
 	case ports.ChatEventCommandOutputDelta:
 		// Appended to the command's own activity row, not added to the timeline: a
@@ -1660,7 +1680,17 @@ func (c *Controller) afterProject(ctx context.Context, event ports.ChatEvent) {
 	case ports.ChatEventTurnStarted:
 		c.reportActivity(ctx, domain.ActivityActive, "chat.turn.started", now)
 	case ports.ChatEventTurnCompleted:
-		c.reportActivity(ctx, domain.ActivityIdle, "chat.turn.completed", now)
+		var roleResult *domain.RoleResultReport
+		c.mu.Lock()
+		if event.TurnState == domain.TurnStateCompleted {
+			if report, ok := c.pendingRoleResults[event.ProviderTurnID]; ok {
+				settledReport := report
+				roleResult = &settledReport
+			}
+		}
+		delete(c.pendingRoleResults, event.ProviderTurnID)
+		c.mu.Unlock()
+		c.reportActivityWithRoleResult(ctx, domain.ActivityIdle, "chat.turn.completed", now, roleResult)
 		// The settled turn is committed before another queued turn can dispatch.
 		c.drain(ctx)
 	case ports.ChatEventApprovalRequested:
@@ -2058,6 +2088,16 @@ func (c *Controller) reportActivity(
 	event string,
 	now time.Time,
 ) {
+	c.reportActivityWithRoleResult(ctx, state, event, now, nil)
+}
+
+func (c *Controller) reportActivityWithRoleResult(
+	ctx context.Context,
+	state domain.ActivityState,
+	event string,
+	now time.Time,
+	roleResult *domain.RoleResultReport,
+) {
 	if c.activity == nil {
 		return
 	}
@@ -2066,6 +2106,7 @@ func (c *Controller) reportActivity(
 		State:                state,
 		Timestamp:            now,
 		Event:                event,
+		RoleResult:           roleResult,
 		ControllerGeneration: c.generation,
 	}); err != nil {
 		c.log.Debug("chat activity signal rejected",

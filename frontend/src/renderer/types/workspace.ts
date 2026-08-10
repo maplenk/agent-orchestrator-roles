@@ -14,6 +14,8 @@ export type SessionStatus =
 	| "mergeable"
 	| "merged"
 	| "needs_input"
+	| "completed"
+	| "failed"
 	| "exited"
 	| "no_signal"
 	| "idle"
@@ -31,6 +33,8 @@ const sessionStatuses = new Set<SessionStatus>([
 	"mergeable",
 	"merged",
 	"needs_input",
+	"completed",
+	"failed",
 	"exited",
 	"no_signal",
 	"idle",
@@ -145,6 +149,9 @@ export type SessionPause = {
  * block breaks this file instead of silently diverging from the daemon.
  */
 export type SessionFailoverView = NonNullable<components["schemas"]["SessionFailoverView"]>;
+
+/** Latest agent-reported semantic result for the current or a superseded turn. */
+export type SessionRoleResult = NonNullable<components["schemas"]["SessionRoleResult"]>;
 
 /**
  * The next failover rung, already resolved by the host. The renderer treats both
@@ -323,6 +330,8 @@ export type WorkspaceSession = {
 	pinnedAt?: string;
 	/** Raw agent lifecycle activity from the daemon. */
 	activity?: SessionActivity;
+	/** Agent-reported semantic result. Claims are informational, not verified evidence. */
+	roleResult?: SessionRoleResult;
 	/**
 	 * Durable pause pin from the daemon; absent means not paused.
 	 *

@@ -36,6 +36,11 @@ func chatRec(rec domain.SessionRecord) domain.SessionRecord {
 
 func statusPR(facts domain.PRFacts) []domain.PRFacts { return []domain.PRFacts{facts} }
 
+func withRoleResult(rec domain.SessionRecord, state domain.RoleResultState, current bool) domain.SessionRecord {
+	rec.RoleResult = &domain.SessionRoleResult{State: state, Summary: "reported outcome", Current: current}
+	return rec
+}
+
 func TestServiceDerivesStatusFromSessionFactsAndPR(t *testing.T) {
 	tests := []struct {
 		name string
@@ -60,6 +65,16 @@ func TestServiceDerivesStatusFromSessionFactsAndPR(t *testing.T) {
 		{"pr-open", statusRec(domain.ActivityIdle, false), statusPR(domain.PRFacts{}), false, domain.StatusPROpen},
 		{"working", statusRec(domain.ActivityActive, false), nil, false, domain.StatusWorking},
 		{"idle", statusRec(domain.ActivityIdle, false), nil, false, domain.StatusIdle},
+		{"role-completed", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultCompleted, true), nil, false, domain.StatusCompleted},
+		{"role-failed", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultFailed, true), nil, false, domain.StatusFailed},
+		{"role-blocked", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultBlocked, true), nil, false, domain.StatusNeedsInput},
+		{"stale-role-result", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultCompleted, false), nil, false, domain.StatusIdle},
+		{"completed-yields-to-pr", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultCompleted, true), statusPR(domain.PRFacts{CI: domain.CIFailing}), false, domain.StatusCIFailed},
+		{"failed-overrides-pr", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultFailed, true), statusPR(domain.PRFacts{Mergeability: domain.MergeMergeable}), false, domain.StatusFailed},
+		{"blocked-overrides-pr", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultBlocked, true), statusPR(domain.PRFacts{Mergeability: domain.MergeMergeable}), false, domain.StatusNeedsInput},
+		{"failed-overrides-merged", withRoleResult(statusRec(domain.ActivityIdle, false), domain.RoleResultFailed, true), statusPR(domain.PRFacts{Merged: true}), false, domain.StatusFailed},
+		{"active-overrides-result", withRoleResult(statusRec(domain.ActivityActive, false), domain.RoleResultCompleted, true), nil, false, domain.StatusWorking},
+		{"result-overrides-exited", withRoleResult(statusRec(domain.ActivityExited, false), domain.RoleResultCompleted, true), nil, false, domain.StatusCompleted},
 
 		// A live session whose hook-capable agent never signaled is no_signal
 		// once the grace passes — never a confident idle.

@@ -1109,7 +1109,7 @@ describe("SessionsBoard", () => {
 		const laneScrollers = screen
 			.getAllByTestId("board-column")
 			.flatMap((column) => Array.from(column.querySelectorAll<HTMLElement>(".overflow-y-auto")));
-		expect(laneScrollers).toHaveLength(4);
+		expect(laneScrollers).toHaveLength(5);
 		for (const scroller of laneScrollers) {
 			expect(scroller).toHaveClass("board-scrollbar", "overflow-y-auto");
 		}

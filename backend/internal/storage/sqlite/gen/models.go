@@ -422,6 +422,11 @@ type Session struct {
 	SpawnCapabilityHash       string
 	SwitchPendingJson         string
 	PauseJson                 string
+	RoleResultState           string
+	RoleResultSummary         string
+	RoleResultReportedAt      sql.NullTime
+	RoleResultGenerationID    string
+	RoleResultCurrent         int64
 }
 
 type SessionCleanupFact struct {

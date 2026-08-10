@@ -741,6 +741,92 @@ func TestActivity_SameStateSignalStillStoresAgentSessionID(t *testing.T) {
 	}
 }
 
+func TestActivity_TUIRoleResultPersistsAndNewPromptSupersedes(t *testing.T) {
+	now := time.Date(2026, 8, 10, 8, 0, 0, 0, time.UTC)
+	m, st, _ := newManager()
+	m.clock = func() time.Time { return now }
+	rec := working("mer-1")
+	rec.Kind = domain.KindWorker
+	rec.FirstSignalAt = now.Add(-time.Minute)
+	rec.Metadata.RuntimeLaunchID = "launch-1"
+	rec.Metadata.Role = domain.SessionRoleBinding{RoleID: "reviewer"}
+	st.sessions[rec.ID] = rec
+
+	if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
+		Valid: true, State: domain.ActivityIdle, Event: "stop", LaunchID: "launch-1", Timestamp: now,
+		RoleResult: &domain.RoleResultReport{SchemaVersion: 1, State: domain.RoleResultCompleted, Summary: "No findings."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := st.sessions[rec.ID]
+	if got.RoleResult == nil || !got.RoleResult.Current || got.RoleResult.GenerationID != "launch-1" || got.RoleResult.RoleID != "reviewer" {
+		t.Fatalf("current role result = %#v", got.RoleResult)
+	}
+
+	if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
+		Valid: true, State: domain.ActivityActive, Event: "user-prompt-submit", LaunchID: "launch-1", Timestamp: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got = st.sessions[rec.ID]
+	if got.RoleResult == nil || got.RoleResult.Current || got.RoleResult.Summary != "No findings." {
+		t.Fatalf("superseded role result = %#v", got.RoleResult)
+	}
+}
+
+func TestActivity_RoleResultRejectsStaleGenerationAndRolelessWorker(t *testing.T) {
+	m, st, _ := newManager()
+	rec := working("mer-1")
+	rec.Kind = domain.KindWorker
+	rec.Metadata.RuntimeLaunchID = "launch-2"
+	rec.Metadata.Role = domain.SessionRoleBinding{RoleID: "verifier"}
+	st.sessions[rec.ID] = rec
+	report := &domain.RoleResultReport{SchemaVersion: 1, State: domain.RoleResultFailed, Summary: "Checks failed."}
+
+	if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
+		Valid: true, State: domain.ActivityIdle, Event: "stop", LaunchID: "launch-1", RoleResult: report,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.sessions[rec.ID].RoleResult; got != nil {
+		t.Fatalf("stale generation stored role result %#v", got)
+	}
+
+	roleless := working("mer-2")
+	roleless.Kind = domain.KindWorker
+	roleless.Metadata.RuntimeLaunchID = "launch-2"
+	st.sessions[roleless.ID] = roleless
+	if err := m.ApplyActivitySignal(ctx, roleless.ID, ports.ActivitySignal{
+		Valid: true, State: domain.ActivityIdle, Event: "stop", LaunchID: "launch-2", RoleResult: report,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.sessions[roleless.ID].RoleResult; got != nil {
+		t.Fatalf("roleless worker stored role result %#v", got)
+	}
+}
+
+func TestActivity_ChatRoleResultUsesControllerGeneration(t *testing.T) {
+	m, st, _ := newManager()
+	rec := working("mer-1")
+	rec.Kind = domain.KindWorker
+	rec.Mode = domain.SessionModeChat
+	rec.Metadata.ControllerGeneration = "controller-1"
+	rec.Metadata.Role = domain.SessionRoleBinding{RoleID: "implementor"}
+	st.sessions[rec.ID] = rec
+
+	if err := m.ApplyActivitySignal(ctx, rec.ID, ports.ActivitySignal{
+		Valid: true, State: domain.ActivityIdle, Event: "chat.turn.completed", ControllerGeneration: "controller-1",
+		RoleResult: &domain.RoleResultReport{SchemaVersion: 1, State: domain.RoleResultBlocked, Summary: "Need product input."},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got := st.sessions[rec.ID].RoleResult
+	if got == nil || !got.Current || got.GenerationID != "controller-1" || got.State != domain.RoleResultBlocked {
+		t.Fatalf("chat role result = %#v", got)
+	}
+}
+
 func TestActivity_TerminalReconciliationRequiresUnchangedSnapshot(t *testing.T) {
 	m, st, _ := newManager()
 	updatedAt := time.Unix(100, 0).UTC()

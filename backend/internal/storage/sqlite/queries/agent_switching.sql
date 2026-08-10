@@ -211,6 +211,11 @@ UPDATE sessions SET
     ) THEN sessions.agent_session_id ELSE sqlc.arg(agent_session_id) END,
     latest_user_prompt = sqlc.arg(latest_user_prompt),
     latest_assistant_update = sqlc.arg(latest_assistant_update),
+    role_result_state = sqlc.arg(role_result_state),
+    role_result_summary = sqlc.arg(role_result_summary),
+    role_result_reported_at = sqlc.arg(role_result_reported_at),
+    role_result_generation_id = sqlc.arg(role_result_generation_id),
+    role_result_current = sqlc.arg(role_result_current),
     native_transcript_path = CASE WHEN EXISTS (
         SELECT 1 FROM agent_switches AS delivering_switch
         WHERE delivering_switch.session_id = sessions.id

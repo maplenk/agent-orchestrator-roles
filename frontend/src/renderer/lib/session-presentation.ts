@@ -83,6 +83,8 @@ const sessionStatusLabelKeys: Record<SessionStatus, MessageKey> = {
 	working: "status.working",
 	idle: "status.idle",
 	needs_input: "status.needs_input",
+	completed: "status.completed",
+	failed: "status.failed",
 	exited: "status.exited",
 	no_signal: "status.no_signal",
 	ci_failed: "status.ci_failed",
@@ -101,6 +103,8 @@ const sessionStatusStyles: Record<SessionStatus, Omit<SessionStatusView, "label"
 	working: { className: "text-status-working" },
 	idle: { className: "text-status-idle" },
 	needs_input: { className: "text-status-needs-you" },
+	completed: { className: "text-status-ready" },
+	failed: { className: "text-status-exited" },
 	exited: { className: "text-status-exited" },
 	no_signal: { className: "text-status-unknown" },
 	ci_failed: { className: "text-status-exited" },
@@ -187,7 +191,7 @@ const attentionZoneBases: Record<AttentionZone, AttentionZoneBase> = {
 };
 
 export const attentionZoneOrder: AttentionZone[] = ["merge", "action", "pending", "working", "done"];
-export const boardAttentionZoneOrder: AttentionZone[] = ["working", "action", "pending", "merge"];
+export const boardAttentionZoneOrder: AttentionZone[] = ["working", "action", "pending", "merge", "done"];
 
 /** Live labels for the current locale (getters re-resolve on each access). */
 export const attentionZoneLabel: Record<AttentionZone, string> = {
@@ -216,8 +220,10 @@ export function attentionZone(input: SessionStatus | Pick<WorkspaceSession, "sta
 		case "mergeable":
 			return "merge";
 		case "terminated":
+		case "completed":
 			return "done";
 		case "needs_input":
+		case "failed":
 		case "exited":
 		case "no_signal":
 		case "ci_failed":
