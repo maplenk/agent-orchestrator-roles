@@ -1,0 +1,446 @@
+name: Upstream watch
+
+on:
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build the report without updating the mirror or tracker
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+# The job needs write access only to advance the fork-owned mirror ref and to
+# maintain its single tracking issue. The canonical remote is fetched without
+# credentials and has an intentionally unusable push URL.
+permissions: {}
+
+jobs:
+  watch:
+    if: github.repository == 'maplenk/agent-orchestrator-roles'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      issues: write
+    env:
+      CANONICAL_REPO: Untrivial-ai/agent-orchestrator
+      CANONICAL_FETCH_URL: https://github.com/Untrivial-ai/agent-orchestrator.git
+      FORK_BRANCH: roles/multi-sub-v1
+      MIRROR_BRANCH: upstream-main
+      TRACKER_LABEL: upstream-sync
+      TRACKER_TITLE: "[Upstream sync] Canonical drift tracker"
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+    steps:
+      - name: Check out protected fork trunk with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: roles/multi-sub-v1
+
+      - name: Fetch canonical main and inventory drift
+        id: inventory
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REPOSITORY" == "$CANONICAL_REPO" ]]; then
+            echo "::error::This workflow must never run with a token scoped to canonical upstream."
+            exit 1
+          fi
+
+          state_dir="$RUNNER_TEMP/upstream-watch"
+          install -d -m 0700 "$state_dir"
+          : >"$state_dir/commits.txt"
+          : >"$state_dir/changed-files.txt"
+          : >"$state_dir/high-risk-categories.txt"
+          : >"$state_dir/high-risk-summary.txt"
+          : >"$state_dir/new-migrations.txt"
+
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "$CANONICAL_FETCH_URL"
+          else
+            git remote add upstream "$CANONICAL_FETCH_URL"
+          fi
+          git remote set-url --push upstream disabled://canonical-upstream-is-fetch-only
+
+          upstream_push_url="$(git remote get-url --push upstream)"
+          if [[ "$upstream_push_url" != "disabled://canonical-upstream-is-fetch-only" ]]; then
+            echo "::error::Canonical upstream does not have the required disabled push URL."
+            exit 1
+          fi
+
+          # Do not make GH_TOKEN available to this command. Canonical main is
+          # public and is deliberately fetched without credentials.
+          env -u GH_TOKEN -u GITHUB_TOKEN \
+            git -c credential.helper= fetch --no-tags --prune upstream \
+              +refs/heads/main:refs/remotes/upstream/main
+
+          fork_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          origin_basic="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git_origin() {
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${origin_basic}" "$@"
+          }
+
+          git_origin fetch --no-tags "$fork_url" \
+            "+refs/heads/${FORK_BRANCH}:refs/remotes/origin/${FORK_BRANCH}"
+
+          mirror_sha="$(
+            git_origin ls-remote --heads "$fork_url" "refs/heads/${MIRROR_BRANCH}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ -n "$mirror_sha" ]]; then
+            git_origin fetch --no-tags "$fork_url" \
+              "+refs/heads/${MIRROR_BRANCH}:refs/remotes/origin/${MIRROR_BRANCH}"
+          fi
+
+          canonical_sha="$(git rev-parse 'refs/remotes/upstream/main^{commit}')"
+          fork_sha="$(git rev-parse "refs/remotes/origin/${FORK_BRANCH}^{commit}")"
+          canonical_date="$(git show -s --format=%cI "$canonical_sha")"
+          canonical_subject="$(git show -s --format=%s "$canonical_sha")"
+
+          mirror_safe=true
+          if [[ -n "$mirror_sha" ]] && ! git merge-base --is-ancestor "$mirror_sha" "$canonical_sha"; then
+            mirror_safe=false
+            printf '%s\n' \
+              "REFUSED: origin/${MIRROR_BRANCH} at ${mirror_sha} cannot fast-forward to ${canonical_sha}." \
+              >"$state_dir/mirror-result.txt"
+          elif [[ -z "$mirror_sha" ]]; then
+            printf '%s\n' \
+              "Pending: origin/${MIRROR_BRANCH} does not exist and will be created at ${canonical_sha}." \
+              >"$state_dir/mirror-result.txt"
+          elif [[ "$mirror_sha" == "$canonical_sha" ]]; then
+            printf '%s\n' \
+              "Current: origin/${MIRROR_BRANCH} already equals ${canonical_sha}." \
+              >"$state_dir/mirror-result.txt"
+          else
+            printf '%s\n' \
+              "Pending: origin/${MIRROR_BRANCH} will fast-forward from ${mirror_sha} to ${canonical_sha}." \
+              >"$state_dir/mirror-result.txt"
+          fi
+
+          read -r fork_ahead fork_behind < <(
+            git rev-list --left-right --count "${fork_sha}...${canonical_sha}"
+          )
+
+          git log --reverse --date=iso-strict \
+            --format='%H%x09%cI%x09%s' "${fork_sha}..${canonical_sha}" \
+            >"$state_dir/commits.txt"
+          classify_risk() {
+            local path="$1"
+            case "$path" in
+              backend/internal/storage/sqlite/migrations/*)
+                printf '%s' 'migrations'
+                ;;
+              backend/internal/storage/*)
+                printf '%s' 'storage'
+                ;;
+              backend/internal/domain/*)
+                printf '%s' 'domain'
+                ;;
+              backend/internal/ports/*)
+                printf '%s' 'ports'
+                ;;
+              backend/internal/session_manager/*)
+                printf '%s' 'session manager'
+                ;;
+              backend/internal/adapters/runtime/*)
+                printf '%s' 'runtime adapters'
+                ;;
+              backend/internal/httpd/controllers/*|backend/internal/httpd/apispec/*)
+                printf '%s' 'controllers/OpenAPI'
+                ;;
+              frontend/src/api/schema.ts)
+                printf '%s' 'generated frontend schema'
+                ;;
+              package.json|package-lock.json|flake.nix|flake.lock|packages/*|scripts/*|frontend/forge.config.ts|frontend/vite.*.config.ts|frontend/makers/*|frontend/scripts/*|frontend/assets/*|test/cli/*)
+                printf '%s' 'distribution'
+                ;;
+              .github/workflows/*|.github/actions/*)
+                printf '%s' 'workflows'
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          while IFS=$'\t' read -r status path; do
+            if category="$(classify_risk "$path")"; then
+              printf '%s\t%s\t[HIGH-RISK: %s]\n' "$status" "$path" "$category" \
+                >>"$state_dir/changed-files.txt"
+              printf '%s\n' "$category" >>"$state_dir/high-risk-categories.txt"
+            else
+              printf '%s\t%s\n' "$status" "$path" >>"$state_dir/changed-files.txt"
+            fi
+          done < <(
+            git -c core.quotePath=true diff --name-status --no-renames \
+              "$fork_sha" "$canonical_sha"
+          )
+          if [[ -s "$state_dir/high-risk-categories.txt" ]]; then
+            LC_ALL=C sort "$state_dir/high-risk-categories.txt" | uniq -c \
+              >"$state_dir/high-risk-summary.txt"
+          fi
+
+          comm -23 \
+            <(git ls-tree -r --name-only "$canonical_sha" \
+                backend/internal/storage/sqlite/migrations | LC_ALL=C sort) \
+            <(git ls-tree -r --name-only "$fork_sha" \
+                backend/internal/storage/sqlite/migrations | LC_ALL=C sort) |
+            while IFS= read -r migration; do
+              [[ -n "$migration" ]] || continue
+              filename="${migration##*/}"
+              number="${filename%%_*}"
+              printf '%s\t%s\n' "$number" "$migration"
+            done >"$state_dir/new-migrations.txt"
+
+          baseline_file="$(
+            git show "${fork_sha}:docs/roles/AO_BASELINE_SHA.txt" 2>/dev/null || true
+          )"
+          baseline="$(awk 'NR == 1 { print $1 }' <<<"$baseline_file")"
+          if [[ ! "$baseline" =~ ^[0-9a-f]{40}$ ]]; then
+            baseline="invalid-or-missing"
+          fi
+
+          baseline_current=false
+          if [[ "$baseline" == "$canonical_sha" ]]; then
+            baseline_current=true
+          fi
+
+          {
+            printf 'canonical_sha=%s\n' "$canonical_sha"
+            printf 'fork_sha=%s\n' "$fork_sha"
+            printf 'mirror_sha=%s\n' "${mirror_sha:-missing}"
+            printf 'canonical_date=%s\n' "$canonical_date"
+            printf 'canonical_subject=%s\n' "$canonical_subject"
+            printf 'fork_ahead=%s\n' "$fork_ahead"
+            printf 'fork_behind=%s\n' "$fork_behind"
+            printf 'baseline=%s\n' "$baseline"
+            printf 'baseline_current=%s\n' "$baseline_current"
+            printf 'mirror_safe=%s\n' "$mirror_safe"
+            printf 'state_dir=%s\n' "$state_dir"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Fast-forward fork-owned upstream mirror
+        id: mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANONICAL_SHA: ${{ steps.inventory.outputs.canonical_sha }}
+          MIRROR_SHA: ${{ steps.inventory.outputs.mirror_sha }}
+          MIRROR_SAFE: ${{ steps.inventory.outputs.mirror_safe }}
+          STATE_DIR: ${{ steps.inventory.outputs.state_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "$MIRROR_SAFE" != "true" ]]; then
+            echo "Mirror update refused before push because it is not a fast-forward."
+            exit 0
+          fi
+
+          if [[ "$DRY_RUN" == "true" ]]; then
+            if [[ "$MIRROR_SHA" == "$CANONICAL_SHA" ]]; then
+              printf '%s\n' \
+                "Dry run: origin/${MIRROR_BRANCH} already equals ${CANONICAL_SHA}." \
+                >"$STATE_DIR/mirror-result.txt"
+            else
+              printf '%s\n' \
+                "Dry run: origin/${MIRROR_BRANCH} would be fast-forwarded to ${CANONICAL_SHA}." \
+                >"$STATE_DIR/mirror-result.txt"
+            fi
+            exit 0
+          fi
+
+          fork_url="https://github.com/${GITHUB_REPOSITORY}.git"
+          origin_basic="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          git_origin() {
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${origin_basic}" "$@"
+          }
+
+          # This is deliberately an ordinary, one-ref push. There is no force
+          # option and no refspec capable of updating the protected fork trunk.
+          if ! git_origin push --porcelain "$fork_url" \
+            "${CANONICAL_SHA}:refs/heads/${MIRROR_BRANCH}" \
+            >"$STATE_DIR/mirror-push.txt" 2>&1; then
+            printf '%s\n' \
+              "FAILED: origin/${MIRROR_BRANCH} rejected the fast-forward-only push to ${CANONICAL_SHA}." \
+              >"$STATE_DIR/mirror-result.txt"
+            cat "$STATE_DIR/mirror-push.txt"
+            exit 0
+          fi
+
+          mirrored_sha="$(
+            git_origin ls-remote --heads "$fork_url" "refs/heads/${MIRROR_BRANCH}" |
+              awk 'NR == 1 { print $1 }'
+          )"
+          if [[ "$mirrored_sha" != "$CANONICAL_SHA" ]]; then
+            printf '%s\n' \
+              "FAILED: origin/${MIRROR_BRANCH} resolved to ${mirrored_sha:-missing}, expected ${CANONICAL_SHA}." \
+              >"$STATE_DIR/mirror-result.txt"
+            exit 0
+          fi
+
+          printf '%s\n' \
+            "Mirrored: origin/${MIRROR_BRANCH} now equals ${CANONICAL_SHA} via a fast-forward-only push." \
+            >"$STATE_DIR/mirror-result.txt"
+
+      - name: Build exact upstream drift report
+        id: report
+        env:
+          BASELINE: ${{ steps.inventory.outputs.baseline }}
+          BASELINE_CURRENT: ${{ steps.inventory.outputs.baseline_current }}
+          CANONICAL_DATE: ${{ steps.inventory.outputs.canonical_date }}
+          CANONICAL_SHA: ${{ steps.inventory.outputs.canonical_sha }}
+          CANONICAL_SUBJECT: ${{ steps.inventory.outputs.canonical_subject }}
+          FORK_AHEAD: ${{ steps.inventory.outputs.fork_ahead }}
+          FORK_BEHIND: ${{ steps.inventory.outputs.fork_behind }}
+          FORK_SHA: ${{ steps.inventory.outputs.fork_sha }}
+          STATE_DIR: ${{ steps.inventory.outputs.state_dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mirror_result="$(<"$STATE_DIR/mirror-result.txt")"
+          canonical_subject_md="${CANONICAL_SUBJECT//|/\\|}"
+          tracker_state=drift
+          if [[ "$mirror_result" == REFUSED:* || "$mirror_result" == FAILED:* ]]; then
+            tracker_state=mirror-failure
+          elif [[ "$BASELINE_CURRENT" == "true" ]]; then
+            tracker_state=current
+          fi
+
+          report="$STATE_DIR/report.md"
+          {
+            printf '<!-- ao-upstream-watch-tracker -->\n'
+            printf '# Canonical upstream watch\n\n'
+            printf '| Field | Value |\n'
+            printf '|---|---|\n'
+            printf '| Status | `%s` |\n' "$tracker_state"
+            printf '| Canonical tip | `%s` |\n' "$CANONICAL_SHA"
+            printf '| Canonical date | `%s` |\n' "$CANONICAL_DATE"
+            printf '| Canonical subject | %s |\n' "$canonical_subject_md"
+            printf '| Protected fork tip | `%s` |\n' "$FORK_SHA"
+            printf '| Recorded accepted baseline | `%s` |\n' "$BASELINE"
+            printf '| Fork ahead of canonical | `%s` commit(s) |\n' "$FORK_AHEAD"
+            printf '| Fork behind canonical | `%s` commit(s) |\n' "$FORK_BEHIND"
+            printf '| Mirror | %s |\n\n' "$mirror_result"
+
+            printf '## Canonical commits not reachable from the protected fork\n\n```text\n'
+            if [[ -s "$STATE_DIR/commits.txt" ]]; then
+              cat "$STATE_DIR/commits.txt"
+            else
+              printf '(none)\n'
+            fi
+            printf '```\n\n'
+
+            printf '## Changed files: protected fork tip to canonical tip\n\n'
+            printf 'Every path is listed once; specified sensitive surfaces carry an inline `HIGH-RISK` flag.\n\n```text\n'
+            if [[ -s "$STATE_DIR/changed-files.txt" ]]; then
+              cat "$STATE_DIR/changed-files.txt"
+            else
+              printf '(none)\n'
+            fi
+            printf '```\n\n'
+
+            printf '## Newly introduced canonical migration numbers\n\n```text\n'
+            if [[ -s "$STATE_DIR/new-migrations.txt" ]]; then
+              cat "$STATE_DIR/new-migrations.txt"
+            else
+              printf '(none)\n'
+            fi
+            printf '```\n\n'
+
+            printf '## High-risk category summary\n\n'
+            printf 'Categories: migrations, storage, domain, ports, session manager, runtime adapters, controllers/OpenAPI, generated frontend schema, distribution, and workflows.\n\n'
+            printf '```text\n'
+            if [[ -s "$STATE_DIR/high-risk-summary.txt" ]]; then
+              cat "$STATE_DIR/high-risk-summary.txt"
+            else
+              printf '(none)\n'
+            fi
+            printf '```\n\n'
+            printf '_Detection only: this workflow does not merge, cherry-pick, regenerate, publish, edit migrations, or accept a sync._\n'
+          } >"$report"
+
+          report_bytes="$(wc -c <"$report" | tr -d ' ')"
+          if (( report_bytes > 65000 )); then
+            echo "::error::Exact upstream report is ${report_bytes} bytes and exceeds the issue body limit."
+            exit 1
+          fi
+
+          cat "$report" >>"$GITHUB_STEP_SUMMARY"
+          printf 'tracker_state=%s\n' "$tracker_state" >>"$GITHUB_OUTPUT"
+          printf 'report=%s\n' "$report" >>"$GITHUB_OUTPUT"
+
+      - name: Create or update the stable upstream tracker
+        if: env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ steps.report.outputs.report }}
+          TRACKER_STATE: ${{ steps.report.outputs.tracker_state }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! gh api "repos/${GITHUB_REPOSITORY}/labels/${TRACKER_LABEL}" >/dev/null 2>&1; then
+            gh api --method POST "repos/${GITHUB_REPOSITORY}/labels" \
+              -f name="$TRACKER_LABEL" \
+              -f color=1d76db \
+              -f description='Canonical upstream drift tracked by automation' \
+              >/dev/null
+          fi
+
+          issues_json="$(
+            gh issue list --repo "$GITHUB_REPOSITORY" --state all \
+              --limit 1000 \
+              --json number,state,title
+          )"
+          tracker_number="$(
+            jq -r --arg title "$TRACKER_TITLE" \
+              '[.[] | select(.title == $title)] | sort_by(.number) | .[0].number // empty' \
+              <<<"$issues_json"
+          )"
+
+          if [[ -z "$tracker_number" ]]; then
+            tracker_url="$(
+              gh issue create --repo "$GITHUB_REPOSITORY" \
+                --title "$TRACKER_TITLE" --label "$TRACKER_LABEL" --body-file "$REPORT"
+            )"
+            tracker_number="${tracker_url##*/}"
+          else
+            gh issue edit "$tracker_number" --repo "$GITHUB_REPOSITORY" \
+              --title "$TRACKER_TITLE" --add-label "$TRACKER_LABEL" --body-file "$REPORT" \
+              >/dev/null
+          fi
+
+          tracker_state="$(
+            gh issue view "$tracker_number" --repo "$GITHUB_REPOSITORY" \
+              --json state --jq .state
+          )"
+          if [[ "$TRACKER_STATE" == "current" && "$tracker_state" == "OPEN" ]]; then
+            gh issue close "$tracker_number" --repo "$GITHUB_REPOSITORY" \
+              --reason completed >/dev/null
+          elif [[ "$TRACKER_STATE" != "current" && "$tracker_state" == "CLOSED" ]]; then
+            gh issue reopen "$tracker_number" --repo "$GITHUB_REPOSITORY" >/dev/null
+          fi
+
+          echo "Tracker: https://github.com/${GITHUB_REPOSITORY}/issues/${tracker_number}"
+
+      - name: Enforce fast-forward-only mirror policy
+        env:
+          TRACKER_STATE: ${{ steps.report.outputs.tracker_state }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$TRACKER_STATE" == "mirror-failure" ]]; then
+            echo "::error::The fork-owned upstream mirror was not a clean fast-forward to canonical main."
+            exit 1
+          fi

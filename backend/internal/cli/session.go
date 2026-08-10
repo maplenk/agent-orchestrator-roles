@@ -153,6 +153,9 @@ func newSessionCommand(ctx *commandContext) *cobra.Command {
 	cmd.AddCommand(newSessionSwitchCommand(ctx))
 	cmd.AddCommand(newSessionContinueCommand(ctx))
 	cmd.AddCommand(newSessionFreshCommand(ctx))
+	cmd.AddCommand(newSessionSwitchAgentCommand(ctx))
+	cmd.AddCommand(newSessionAgentSwitchCommand(ctx))
+	cmd.AddCommand(newSessionHandoffCommand(ctx))
 	return cmd
 }
 
@@ -309,7 +312,7 @@ func newSessionFreshCommand(ctx *commandContext) *cobra.Command {
 	var opts sessionFreshOptions
 	cmd := &cobra.Command{
 		Use:   "fresh",
-		Short: "Start a same-harness fresh conversation with host-compiled handoff",
+		Short: "Start a same-harness fresh conversation with host-compiled context",
 		Args:  noArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return ctx.freshSession(cmd.Context(), cmd, opts)

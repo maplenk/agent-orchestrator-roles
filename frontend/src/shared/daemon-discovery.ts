@@ -74,7 +74,8 @@ export type RunFileInfo = {
 	 * undefined/empty = headless `ao start` daemon.
 	 */
 	owner?: string;
-	browserRuntimeToken?: string;
+	/** Desktop launch that supplied this daemon's private browser token. */
+	appRunId?: string;
 	browserRuntimeAddress?: string;
 	/**
 	 * Daemon-launch operator spawn credential for privileged desktop API calls.
@@ -93,13 +94,13 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		return null;
 	}
 	if (typeof raw !== "object" || raw === null) return null;
-	const { pid, port, startedAt, owner, browserRuntimeToken, browserRuntimeAddress, operatorSpawnToken } =
+	const { pid, port, startedAt, owner, appRunId, browserRuntimeAddress, operatorSpawnToken } =
 		raw as {
 			pid?: unknown;
 			port?: unknown;
 			startedAt?: unknown;
 			owner?: unknown;
-			browserRuntimeToken?: unknown;
+			appRunId?: unknown;
 			browserRuntimeAddress?: unknown;
 			operatorSpawnToken?: unknown;
 		};
@@ -110,7 +111,7 @@ export function parseRunFile(contents: string): RunFileInfo | null {
 		port,
 		startedAtMs: Number.isNaN(startedAtMs) ? 0 : startedAtMs,
 		owner: typeof owner === "string" ? owner : undefined,
-		browserRuntimeToken: typeof browserRuntimeToken === "string" ? browserRuntimeToken : undefined,
+		appRunId: typeof appRunId === "string" ? appRunId : undefined,
 		browserRuntimeAddress: typeof browserRuntimeAddress === "string" ? browserRuntimeAddress : undefined,
 		operatorSpawnToken: typeof operatorSpawnToken === "string" ? operatorSpawnToken : undefined,
 	};

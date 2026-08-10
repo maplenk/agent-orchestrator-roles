@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,6 +40,106 @@ type failoverFakeStore struct {
 	// reaches SwitchWorker. It exposes the crash/race window without weakening
 	// the production ordering being tested.
 	afterAppend func()
+}
+
+type agentSwitchReservedFailoverStore struct {
+	*failoverFakeStore
+	active    domain.AgentSwitch
+	activeErr error
+}
+
+// canonicalFailoverStore composes the canonical switch fake with the durable
+// failover-attempt surface so tests exercise the production convergence path.
+type canonicalFailoverStore struct {
+	*switchTestStore
+	attempts    []domain.FailoverAttempt
+	appendCalls int
+	afterAppend func()
+}
+
+func (s *canonicalFailoverStore) AppendSessionFailoverAttemptWithLedger(
+	ctx context.Context, attempt domain.FailoverAttempt, ledger domain.LifecycleLedgerRecord,
+) error {
+	s.appendCalls++
+	for _, existing := range s.attempts {
+		if existing.ID == attempt.ID {
+			return fmt.Errorf("duplicate attempt %s", attempt.ID)
+		}
+	}
+	if err := s.AppendLifecycleLedger(ctx, ledger); err != nil {
+		return err
+	}
+	s.attempts = append(s.attempts, attempt)
+	if s.afterAppend != nil {
+		s.afterAppend()
+	}
+	return nil
+}
+
+func (s *canonicalFailoverStore) ListSessionFailoverAttemptsByIncident(
+	_ context.Context, id domain.SessionID, incident string,
+) ([]domain.FailoverAttempt, error) {
+	var out []domain.FailoverAttempt
+	for _, attempt := range s.attempts {
+		if attempt.SessionID == id && attempt.IncidentID == incident {
+			out = append(out, attempt)
+		}
+	}
+	return out, nil
+}
+
+func (s *canonicalFailoverStore) ListSessionFailoverAttemptsBySession(
+	_ context.Context, id domain.SessionID,
+) ([]domain.FailoverAttempt, error) {
+	var out []domain.FailoverAttempt
+	for _, attempt := range s.attempts {
+		if attempt.SessionID == id {
+			out = append(out, attempt)
+		}
+	}
+	return out, nil
+}
+
+func (s *canonicalFailoverStore) UpdateSessionFailoverAttemptState(
+	_ context.Context, attemptID string, from, to domain.FailoverAttemptState, at time.Time,
+) (bool, error) {
+	for i := range s.attempts {
+		if s.attempts[i].ID != attemptID || s.attempts[i].State != from {
+			continue
+		}
+		s.attempts[i].State = to
+		s.attempts[i].UpdatedAt = at
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *canonicalFailoverStore) ActivateAgentSwitchTarget(
+	ctx context.Context, activation domain.AgentSwitchTargetActivation,
+) (bool, error) {
+	activated, err := s.switchTestStore.ActivateAgentSwitchTarget(ctx, activation)
+	if err != nil || !activated {
+		return activated, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sw := s.switches[activation.SwitchID]
+	rec := s.sessions[activation.SessionID]
+	rec.Metadata.Role = sw.RoleSnapshot
+	s.sessions[activation.SessionID] = rec
+	return true, nil
+}
+
+func (s *agentSwitchReservedFailoverStore) GetActiveAgentSwitch(
+	_ context.Context, sessionID domain.SessionID,
+) (domain.AgentSwitch, bool, error) {
+	if s.activeErr != nil {
+		return domain.AgentSwitch{}, false, s.activeErr
+	}
+	if s.active.SessionID != sessionID || s.active.State.Terminal() {
+		return domain.AgentSwitch{}, false, nil
+	}
+	return s.active, true, nil
 }
 
 func (f *failoverFakeStore) GetSession(
@@ -215,6 +316,44 @@ func failoverFixture(t *testing.T) (*failoverFakeStore, *fakeRuntime, *Manager, 
 	return st, rt, m, id
 }
 
+func canonicalFailoverFixture(t *testing.T) (*canonicalFailoverStore, *fakeRestartRuntime, *Manager, domain.SessionID) {
+	t.Helper()
+	runtime := &fakeRestartRuntime{fakeRuntime: &fakeRuntime{}}
+	testPolicy, switchStore, _ := newSwitchTestManager(t, runtime)
+	manager := testPolicy.Manager
+	id := domain.SessionID("proj-1")
+	rec := switchStore.sessions[id]
+	rec.Metadata.Role = domain.SessionRoleBinding{
+		RoleID: "implementor", ResolvedHarness: domain.HarnessClaudeCode,
+		ResolvedModel:       "claude-model",
+		ResolvedPermissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+	}
+	rec.Metadata.Pause = &domain.SessionPause{
+		IncidentID: "inc-1", Reason: domain.PauseReasonOperator,
+		DetectedBy: domain.PauseDetectionOperator, Harness: rec.Harness,
+		PausedAt: time.Date(2026, 8, 10, 1, 0, 0, 0, time.UTC),
+	}
+	switchStore.sessions[id] = rec
+	switchStore.projects["proj"] = domain.ProjectRecord{ID: "proj", Config: domain.ProjectConfig{
+		RoleMap: domain.RoleMap{
+			SchemaVersion: domain.RoleMapSchemaVersion,
+			Roles: map[string]domain.RoleBinding{
+				"implementor": {
+					Template: "implementor", Harness: domain.HarnessClaudeCode, Model: "claude-model",
+					Permissions: domain.RoleExecutionPolicy{WorkspaceWrites: true},
+				},
+			},
+			Failover: domain.FailoverConfig{Mode: domain.FailoverModeManual, Roles: map[string][]domain.FailoverTarget{
+				"implementor": {{Harness: domain.HarnessCodex, Model: "gpt-5"}},
+			}},
+		},
+	}}
+	store := &canonicalFailoverStore{switchTestStore: switchStore}
+	switchStore.agentSwitchStore = store
+	manager.store = store
+	return store, runtime, manager, id
+}
+
 type blockingDestroyRuntime struct {
 	*fakeRuntime
 	entered chan struct{}
@@ -260,6 +399,316 @@ func TestAutomaticFailoverFenceIsScopedToTheExactIncident(t *testing.T) {
 		t.Fatal("a newer incident was suppressed by the older incident's still-unwinding fence")
 	}
 	m.endAutomaticFailover(id, "inc-b")
+}
+
+func TestContinueFailover_NonterminalAgentSwitchReservesRungBeforeMutation(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	reserved := &agentSwitchReservedFailoverStore{
+		failoverFakeStore: st,
+		active: domain.AgentSwitch{
+			ID: "switch-active", SessionID: id,
+			State: domain.AgentSwitchDelivering, TargetGenerationID: "agent-switch-gen-1",
+		},
+	}
+	m.store = reserved
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("error = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if reserved.appendCalls != 0 || len(reserved.attempts) != 0 {
+		t.Fatalf("reserved switch spent a failover rung: append calls=%d attempts=%+v",
+			reserved.appendCalls, reserved.attempts)
+	}
+	if len(rt.destroyedIDs) != 0 || rt.created != 0 {
+		t.Fatalf("reserved switch touched runtimes: creates=%d destroys=%v", rt.created, rt.destroyedIDs)
+	}
+}
+
+func TestContinueFailover_ActiveAgentSwitchReadFailureIsFailClosed(t *testing.T) {
+	st, rt, m, id := failoverFixture(t)
+	reserved := &agentSwitchReservedFailoverStore{
+		failoverFakeStore: st,
+		activeErr:         errors.New("injected active switch read failure"),
+	}
+	m.store = reserved
+
+	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err == nil || !strings.Contains(err.Error(), "injected active switch read failure") {
+		t.Fatalf("error = %v, want active switch read failure", err)
+	}
+	if reserved.appendCalls != 0 || len(reserved.attempts) != 0 || rt.created != 0 || len(rt.destroyedIDs) != 0 {
+		t.Fatalf("failed reservation read mutated state: append=%d attempts=%d creates=%d destroys=%v",
+			reserved.appendCalls, len(reserved.attempts), rt.created, rt.destroyedIDs)
+	}
+}
+
+func TestContinueFailover_CanonicalSagaSharesExactAttemptIntent(t *testing.T) {
+	store, runtime, manager, id := canonicalFailoverFixture(t)
+
+	result, err := manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(store.attempts) != 1 || len(store.switches) != 1 {
+		t.Fatalf("attempts/sagas = %d/%d, want 1/1", len(store.attempts), len(store.switches))
+	}
+	attempt := store.attempts[0]
+	var saga domain.AgentSwitch
+	for _, current := range store.switches {
+		saga = current
+		break
+	}
+	if attempt.State != domain.FailoverAttemptAcked || saga.State != domain.AgentSwitchCompleted ||
+		!agentSwitchMatchesFailoverAttempt(saga, attempt) {
+		t.Fatalf("attempt/saga did not converge: attempt=%+v saga=%+v", attempt, saga)
+	}
+	if attempt.SourceGenerationID != "source-generation" ||
+		attempt.RoleSnapshot.ResolvedHarness != domain.HarnessCodex ||
+		attempt.RoleSnapshot.ResolvedModel != "gpt-5" ||
+		result.GenerationID != attempt.GenerationID || result.Target != attempt.Target() {
+		t.Fatalf("exact intent mismatch: result=%+v attempt=%+v", result, attempt)
+	}
+	if result.Session.Metadata.Pause != nil || result.Session.Harness != domain.HarnessCodex ||
+		result.Session.Metadata.Role.ResolvedModel != "gpt-5" {
+		t.Fatalf("target promotion/pause = %+v", result.Session)
+	}
+	if runtime.created != 1 || runtime.destroyed != 1 {
+		t.Fatalf("runtime creates/destroys = %d/%d, want 1/1", runtime.created, runtime.destroyed)
+	}
+}
+
+func TestContinueFailover_AdmissionGatePreventsManualSagaFromSpendingRung(t *testing.T) {
+	store, _, manager, id := canonicalFailoverFixture(t)
+	var competingErr error
+	store.afterAppend = func() {
+		_, competingErr = manager.SwitchAgent(context.Background(), id, SwitchAgentConfig{
+			TargetHarness: domain.HarnessCodex, TargetModel: "gpt-5",
+			IdempotencyKey:             "competing-manual-switch",
+			AllocateTargetGeneration:   func() domain.AgentGenerationID { return "manual-generation" },
+			ExpectedSourceGenerationID: "source-generation",
+		})
+	}
+
+	_, err := manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(competingErr, ErrSwitchOperationInProgress) {
+		t.Fatalf("competing manual switch error = %v, want ErrSwitchOperationInProgress", competingErr)
+	}
+	if len(store.attempts) != 1 || len(store.switches) != 1 {
+		t.Fatalf("gate admitted duplicate ownership: attempts=%d sagas=%d", len(store.attempts), len(store.switches))
+	}
+	for _, saga := range store.switches {
+		if saga.FailoverAttemptID != store.attempts[0].ID {
+			t.Fatalf("winning saga = %+v, want failover-owned", saga)
+		}
+	}
+}
+
+func TestContinueFailover_NonterminalCanonicalSagaCannotSpendNextRung(t *testing.T) {
+	store, runtime, manager, id := canonicalFailoverFixture(t)
+	rec := store.sessions[id]
+	roleSnapshot, err := manager.failoverAgentSwitchRoleSnapshot(context.Background(), rec, domain.FailoverAttempt{
+		RoleID: "implementor", ToHarness: domain.HarnessCodex, ToModel: "gpt-5",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: rec.ProjectID,
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor",
+		FromHarness: domain.HarnessClaudeCode, FromModel: "claude-model",
+		ToHarness: domain.HarnessCodex, ToModel: "gpt-5", RungIndex: 0,
+		GenerationID: "reserved-target-generation", SourceGenerationID: "source-generation",
+		RoleSnapshot: roleSnapshot, State: domain.FailoverAttemptRequested,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store.attempts = []domain.FailoverAttempt{attempt}
+	saga := domain.AgentSwitch{
+		ID: "switch-reserved", SessionID: id,
+		IdempotencyKey: failoverAgentSwitchIDKey(attempt),
+		RequestFingerprint: domain.ComputeAuthorizedAgentSwitchRequestFingerprint(
+			id, attempt.ToHarness, attempt.ToModel, failoverAgentSwitchNote(attempt)),
+		FromHarness: attempt.FromHarness, TargetHarness: attempt.ToHarness, TargetModel: attempt.ToModel,
+		RoleSnapshot: attempt.RoleSnapshot, FailoverAttemptID: attempt.ID,
+		SourceGenerationID: domain.AgentGenerationID(attempt.SourceGenerationID),
+		TargetGenerationID: domain.AgentGenerationID(attempt.GenerationID),
+		State:              domain.AgentSwitchDelivering, RequestedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store.switches[saga.ID] = saga
+
+	_, err = manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("error = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if len(store.attempts) != 1 || store.appendCalls != 0 || runtime.created != 0 {
+		t.Fatalf("nonterminal saga spent another rung: attempts=%d appends=%d creates=%d",
+			len(store.attempts), store.appendCalls, runtime.created)
+	}
+	if store.attempts[0].GenerationID != attempt.GenerationID ||
+		store.attempts[0].RungIndex != attempt.RungIndex ||
+		store.attempts[0].State != domain.FailoverAttemptPostStop {
+		t.Fatalf("reserved attempt identity changed: %+v", store.attempts[0])
+	}
+}
+
+func TestContinueFailover_DeliveringCrashRestartRecoversSameAttemptWithoutRedelivery(t *testing.T) {
+	store, runtime, manager, id := canonicalFailoverFixture(t)
+	store.panicAfterUpdateState = domain.AgentSwitchDelivering
+
+	var crash any
+	func() {
+		defer func() { crash = recover() }()
+		_, _ = manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	}()
+	if crash == nil {
+		t.Fatal("attempt 1 did not stop at the simulated post-delivery durable crash boundary")
+	}
+	if len(store.attempts) != 1 || len(store.switches) != 1 || store.appendCalls != 1 {
+		t.Fatalf("crashed attempt/saga/appends = %d/%d/%d, want 1/1/1",
+			len(store.attempts), len(store.switches), store.appendCalls)
+	}
+	attempt := store.attempts[0]
+	var saga domain.AgentSwitch
+	for _, current := range store.switches {
+		saga = current
+		break
+	}
+	if saga.State != domain.AgentSwitchDelivering || !agentSwitchMatchesFailoverAttempt(saga, attempt) {
+		t.Fatalf("attempt 1 did not reach exact durable delivery intent: attempt=%+v saga=%+v", attempt, saga)
+	}
+	if runtime.created != 1 {
+		t.Fatalf("attempt 1 target runtimes = %d, want 1", runtime.created)
+	}
+	originalAttemptID := attempt.ID
+	originalRung := attempt.RungIndex
+	originalGeneration := attempt.GenerationID
+	originalRuntimeHandle := saga.TargetRuntimeHandleID
+
+	_, err := manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) {
+		t.Fatalf("attempt 2 error = %v, want ErrFailoverRecoveryRequired", err)
+	}
+	if len(store.attempts) != 1 || store.appendCalls != 1 || runtime.created != 1 {
+		t.Fatalf("attempt 2 spent a rung or launched a target: attempts=%d appends=%d creates=%d",
+			len(store.attempts), store.appendCalls, runtime.created)
+	}
+	if got := store.attempts[0]; got.ID != originalAttemptID || got.RungIndex != originalRung ||
+		got.GenerationID != originalGeneration {
+		t.Fatalf("attempt 2 changed reserved identity: got=%+v want id=%s rung=%d generation=%s",
+			got, originalAttemptID, originalRung, originalGeneration)
+	}
+
+	restartMessenger := &fakeMessenger{}
+	restarted := New(Deps{
+		Runtime: runtime, Agents: manager.agents, Workspace: manager.workspace,
+		Store: store, Messenger: restartMessenger, Lifecycle: manager.lcm,
+		DataDir: manager.dataDir, Clock: manager.clock, LookPath: manager.lookPath,
+		Executable: manager.executable,
+		NewLaunchID: func() string {
+			t.Fatal("restart recovery allocated a second target generation")
+			return ""
+		},
+	})
+	recovered, err := restarted.RecoverAgentSwitch(context.Background(), id, saga.ID)
+	if err != nil {
+		t.Fatalf("restart recovery: %v", err)
+	}
+	if recovered.State != domain.AgentSwitchFailed ||
+		recovered.ErrorCode != domain.AgentSwitchErrorDeliveryUnconfirmed {
+		t.Fatalf("recovered saga = %+v, want failed delivery_unconfirmed", recovered)
+	}
+	if err := restarted.ReconcileFailoverAttempts(context.Background(), id); err != nil {
+		t.Fatalf("reconcile recovered failover attempt: %v", err)
+	}
+	if got := store.attempts[0]; got.ID != originalAttemptID || got.RungIndex != originalRung ||
+		got.GenerationID != originalGeneration || got.State != domain.FailoverAttemptFailed {
+		t.Fatalf("recovered attempt changed identity: got=%+v want id=%s rung=%d generation=%s failed",
+			got, originalAttemptID, originalRung, originalGeneration)
+	}
+	if runtime.created != 1 || recovered.TargetRuntimeHandleID != originalRuntimeHandle {
+		t.Fatalf("restart recovery changed target runtime: creates=%d handle=%q want=%q",
+			runtime.created, recovered.TargetRuntimeHandleID, originalRuntimeHandle)
+	}
+	if len(restartMessenger.msgs) != 0 {
+		t.Fatalf("restart recovery redelivered ambiguous continuation: %#v", restartMessenger.msgs)
+	}
+}
+
+func TestContinueFailover_LegacyAttemptWithoutSourceRefusesExistingSaga(t *testing.T) {
+	store, runtime, manager, id := canonicalFailoverFixture(t)
+	rec := store.sessions[id]
+	attempt := domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: rec.ProjectID,
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor",
+		FromHarness: rec.Harness, FromModel: "claude-model",
+		ToHarness: domain.HarnessCodex, ToModel: "gpt-5", RungIndex: 0,
+		GenerationID: "legacy-target-generation", State: domain.FailoverAttemptRequested,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store.attempts = []domain.FailoverAttempt{attempt}
+	saga := domain.AgentSwitch{
+		ID: "switch-legacy", SessionID: id, IdempotencyKey: failoverAgentSwitchIDKey(attempt),
+		RequestFingerprint: domain.ComputeAuthorizedAgentSwitchRequestFingerprint(
+			id, attempt.ToHarness, attempt.ToModel, failoverAgentSwitchNote(attempt)),
+		FromHarness: attempt.FromHarness, TargetHarness: attempt.ToHarness, TargetModel: attempt.ToModel,
+		FailoverAttemptID: attempt.ID, SourceGenerationID: "source-generation",
+		TargetGenerationID: domain.AgentGenerationID(attempt.GenerationID), State: domain.AgentSwitchPreparingHandoff,
+		RequestedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store.switches[saga.ID] = saga
+
+	_, err := manager.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
+	if !errors.Is(err, ErrFailoverRecoveryRequired) ||
+		!strings.Contains(err.Error(), "no durable source generation") {
+		t.Fatalf("error = %v, want legacy source recovery refusal", err)
+	}
+	if len(store.attempts) != 1 || store.appendCalls != 0 || runtime.created != 0 || runtime.destroyed != 0 {
+		t.Fatalf("ambiguous legacy attempt mutated state: attempts=%d appends=%d creates=%d destroys=%d",
+			len(store.attempts), store.appendCalls, runtime.created, runtime.destroyed)
+	}
+}
+
+func TestReconcileFailoverAttempts_UsesCanonicalSagaState(t *testing.T) {
+	store, _, manager, id := canonicalFailoverFixture(t)
+	rec := store.sessions[id]
+	roleSnapshot, err := manager.failoverAgentSwitchRoleSnapshot(context.Background(), rec, domain.FailoverAttempt{
+		RoleID: "implementor", ToHarness: domain.HarnessCodex, ToModel: "gpt-5",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt := domain.FailoverAttempt{
+		ID: domain.FailoverAttemptID(id, "inc-1", 1), SessionID: id, ProjectID: rec.ProjectID,
+		IncidentID: "inc-1", Seq: 1, RoleID: "implementor",
+		FromHarness: rec.Harness, FromModel: "claude-model",
+		ToHarness: domain.HarnessCodex, ToModel: "gpt-5", RungIndex: 0,
+		GenerationID: "completed-target-generation", SourceGenerationID: rec.Metadata.RuntimeLaunchID,
+		RoleSnapshot: roleSnapshot, State: domain.FailoverAttemptRequested,
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store.attempts = []domain.FailoverAttempt{attempt}
+	saga := domain.AgentSwitch{
+		ID: "switch-completed", SessionID: id, IdempotencyKey: failoverAgentSwitchIDKey(attempt),
+		RequestFingerprint: domain.ComputeAuthorizedAgentSwitchRequestFingerprint(
+			id, attempt.ToHarness, attempt.ToModel, failoverAgentSwitchNote(attempt)),
+		FromHarness: attempt.FromHarness, TargetHarness: attempt.ToHarness, TargetModel: attempt.ToModel,
+		RoleSnapshot: attempt.RoleSnapshot, FailoverAttemptID: attempt.ID,
+		SourceGenerationID: domain.AgentGenerationID(attempt.SourceGenerationID),
+		TargetGenerationID: domain.AgentGenerationID(attempt.GenerationID), State: domain.AgentSwitchCompleted,
+		RequestedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	store.switches[saga.ID] = saga
+
+	if err := manager.ReconcileFailoverAttempts(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if got := store.attempts[0]; got.State != domain.FailoverAttemptAcked ||
+		got.GenerationID != attempt.GenerationID || got.RoleSnapshot != attempt.RoleSnapshot {
+		t.Fatalf("reconciled attempt = %+v, want acked exact intent", got)
+	}
 }
 
 func TestContinueAutomaticFailover_OwnershipRefusesRealRestartAcrossFirstAttemptWindow(t *testing.T) {
@@ -718,6 +1167,7 @@ func TestContinueAutomaticFailover_DuplicateAfterPreStopFailureDoesNotSpendSecon
 	)
 	enableAutomaticFailover(t, st, m, id)
 	rt.aliveByHandle = map[string]bool{"rt-1": true}
+	rt.destroyLeavesAlive = true
 
 	first, err := m.ContinueAutomaticFailover(context.Background(), id,
 		AutomaticFailoverRequest{IncidentID: "inc-1"})
@@ -861,9 +1311,9 @@ func TestContinueAutomaticFailover_RacingManualAdopterOwnsSharedAttempt(t *testi
 		t.Fatal("manual adopter did not acquire switch ownership")
 	}
 	close(releaseAppend)
-	if err := <-autoDone; !errors.Is(err, ErrSwitchInProgress) {
+	if err := <-autoDone; !errors.Is(err, ErrSwitchOperationInProgress) {
 		close(blocking.release)
-		t.Fatalf("losing automatic owner error = %v, want ErrSwitchInProgress", err)
+		t.Fatalf("losing automatic owner error = %v, want ErrSwitchOperationInProgress", err)
 	}
 	if state := st.only(t).State; state != domain.FailoverAttemptRequested {
 		close(blocking.release)
@@ -1239,6 +1689,7 @@ func TestReconcile_AutomaticTerminalFailureNeverAdvancesAnotherRung(t *testing.T
 	st, rt, m, id := failoverFixture(t)
 	enableAutomaticFailover(t, st, m, id)
 	rt.aliveByHandle = map[string]bool{"rt-1": true}
+	rt.destroyLeavesAlive = true
 	if _, err := m.ContinueAutomaticFailover(context.Background(), id,
 		AutomaticFailoverRequest{IncidentID: "inc-1"}); err == nil {
 		t.Fatal("expected the first pre-stop failure")
@@ -1668,6 +2119,7 @@ func TestContinueFailover_PausedDeadSourceWorks(t *testing.T) {
 func TestContinueFailover_PreStopFailureIsTerminalAndKeepsPause(t *testing.T) {
 	st, rt, m, id := failoverFixture(t)
 	rt.aliveByHandle = map[string]bool{"rt-1": true} // survives destroy
+	rt.destroyLeavesAlive = true
 
 	_, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
 	if err == nil {
@@ -1784,8 +2236,8 @@ func TestContinueFailover_UnrelatedSwitchFenceReturnsConflictWithoutMutation(t *
 	defer m.endSwitch(id)
 
 	res, err := m.ContinueFailover(context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"})
-	if !errors.Is(err, ErrSwitchInProgress) {
-		t.Fatalf("continue with unrelated switch fence error = %v, want ErrSwitchInProgress", err)
+	if !errors.Is(err, ErrSwitchOperationInProgress) {
+		t.Fatalf("continue with unrelated switch fence error = %v, want ErrSwitchOperationInProgress", err)
 	}
 	if res != (ContinueFailoverResult{}) {
 		t.Fatalf("conflicted Continue returned false success: %+v", res)
@@ -1806,7 +2258,7 @@ func TestContinueFailover_UnrelatedSwitchFenceReturnsConflictWithoutMutation(t *
 
 // A product-real duplicate: the first Continue has persisted switch_pending
 // and pre_stop, holds beginSwitch, and is blocked destroying the source. The
-// duplicate must report ErrSwitchInProgress without promoting the OUTER
+// duplicate must report ErrSwitchOperationInProgress without promoting the OUTER
 // failover attempt to post_stop. That phase belongs to the switch ledger;
 // moving the attempt while the first saga still owns it makes the first
 // requested->acked CAS lose after a completely successful target_ack. Returning
@@ -1861,8 +2313,8 @@ func TestContinueFailover_DuplicateDuringDestroyDoesNotStealAttemptPromotion(t *
 		t.Fatal("first Continue did not finish after Destroy was released")
 	}
 
-	if !errors.Is(duplicateErr, ErrSwitchInProgress) {
-		t.Fatalf("duplicate Continue error = %v, want ErrSwitchInProgress", duplicateErr)
+	if !errors.Is(duplicateErr, ErrSwitchOperationInProgress) {
+		t.Fatalf("duplicate Continue error = %v, want ErrSwitchOperationInProgress", duplicateErr)
 	}
 	if duplicate != (ContinueFailoverResult{}) {
 		t.Fatalf("duplicate returned false success while first saga was pre-ack: %+v", duplicate)
@@ -1961,9 +2413,9 @@ func TestContinueFailover_DuplicateDuringDestroyFirstLaterFailsTruthfully(t *tes
 		context.Background(), id, ContinueFailoverRequest{IncidentID: "inc-1"},
 	)
 	duringDestroy := st.only(t)
-	if !errors.Is(duplicateErr, ErrSwitchInProgress) {
+	if !errors.Is(duplicateErr, ErrSwitchOperationInProgress) {
 		close(blocking.release)
-		t.Fatalf("duplicate Continue error = %v, want ErrSwitchInProgress", duplicateErr)
+		t.Fatalf("duplicate Continue error = %v, want ErrSwitchOperationInProgress", duplicateErr)
 	}
 	if duplicate != (ContinueFailoverResult{}) {
 		close(blocking.release)

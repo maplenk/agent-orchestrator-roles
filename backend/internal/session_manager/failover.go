@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/aoagents/agent-orchestrator/backend/internal/domain"
+	"github.com/aoagents/agent-orchestrator/backend/internal/ports"
 )
 
 // Phase 3B failover (PHASE3B_MVP_CONTRACT sections 6, 6a, 6b).
@@ -42,6 +43,16 @@ type failoverAttemptStore interface {
 	ListSessionFailoverAttemptsByIncident(ctx context.Context, sessionID domain.SessionID, incidentID string) ([]domain.FailoverAttempt, error)
 	ListSessionFailoverAttemptsBySession(ctx context.Context, sessionID domain.SessionID) ([]domain.FailoverAttempt, error)
 	UpdateSessionFailoverAttemptState(ctx context.Context, attemptID string, from, to domain.FailoverAttemptState, updatedAt time.Time) (bool, error)
+}
+
+// activeAgentSwitchReader is deliberately narrower than ports.AgentSwitchStore:
+// failover only needs the durable reservation fact. Keeping the read optional
+// preserves focused manager fakes while the production SQLite store supplies
+// it. A nonterminal canonical agent-switch saga owns the session and its target
+// runtime, so the legacy failover path must not insert an attempt or spend a
+// ladder rung while that ownership is unresolved.
+type activeAgentSwitchReader interface {
+	GetActiveAgentSwitch(context.Context, domain.SessionID) (domain.AgentSwitch, bool, error)
 }
 
 func (m *Manager) failoverStore() (failoverAttemptStore, error) {
@@ -140,6 +151,15 @@ func (m *Manager) continueFailover(
 	if err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read attempts: %w", id, err)
 	}
+	var activeAgentSwitch domain.AgentSwitch
+	var hasActiveAgentSwitch bool
+	if reader, ok := m.store.(activeAgentSwitchReader); ok {
+		activeAgentSwitch, hasActiveAgentSwitch, err = reader.GetActiveAgentSwitch(ctx, id)
+		if err != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: read active agent switch: %w", id, err)
+		}
+	}
+	_, canonicalAgentSwitchEngine := m.store.(ports.AgentSwitchStore)
 
 	// Idempotence, BEFORE anything durable (contract section 6 rule 5). Keyed on
 	// Terminal() via ActiveFailoverAttempt, not on == requested: a post_stop is
@@ -153,7 +173,22 @@ func (m *Manager) continueFailover(
 				return ContinueFailoverResult{}, errAutomaticFailoverDisabled
 			}
 		}
+		if hasActiveAgentSwitch && !agentSwitchMatchesFailoverAttempt(activeAgentSwitch, active) {
+			return ContinueFailoverResult{}, fmt.Errorf(
+				"continue %s: %w: active agent switch %s does not own failover attempt %s",
+				id, ErrFailoverRecoveryRequired, activeAgentSwitch.ID, active.ID)
+		}
+		if canonicalAgentSwitchEngine &&
+			(hasActiveAgentSwitch || strings.TrimSpace(active.RoleSnapshot.RoleID) != "") {
+			return m.continueCanonicalFailoverAttempt(ctx, store, rec, active, nil)
+		}
 		return m.adoptFailoverAttempt(ctx, store, rec, active)
+	}
+	if hasActiveAgentSwitch {
+		return ContinueFailoverResult{}, fmt.Errorf(
+			"continue %s: %w: agent switch %s is %s on generation %s",
+			id, ErrFailoverRecoveryRequired, activeAgentSwitch.ID,
+			activeAgentSwitch.State, activeAgentSwitch.TargetGenerationID)
 	}
 	// D5's convergence branch. `acked` is terminal, so the check above will not
 	// catch it, but a crash between the ack and the pin clear leaves exactly
@@ -240,38 +275,65 @@ func (m *Manager) continueFailover(
 	// write, and pinned into the saga. That is what lets the attempt row carry
 	// its generation from its very first write.
 	generation := m.newSwitchGeneration()
+	sourceGeneration := strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+	if canonicalAgentSwitchEngine && sourceGeneration == "" {
+		return ContinueFailoverResult{}, fmt.Errorf(
+			"continue %s: %w: source generation is unavailable", id, ErrFailoverRecoveryRequired)
+	}
 	seq := domain.NextFailoverSeq(attempts)
 	now := m.clock()
+	roleSnapshot := domain.SessionRoleBinding{}
+	if canonicalAgentSwitchEngine {
+		roleSnapshot, err = m.failoverAgentSwitchRoleSnapshot(ctx, rec, domain.FailoverAttempt{
+			RoleID: roleID, ToHarness: target.Harness, ToModel: target.Model,
+		})
+		if err != nil {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: snapshot authorized role: %w", id, err)
+		}
+	}
 
 	attempt := domain.FailoverAttempt{
-		ID:           domain.FailoverAttemptID(id, incident, seq),
-		SessionID:    id,
-		ProjectID:    rec.ProjectID,
-		IncidentID:   incident,
-		Seq:          seq,
-		RoleID:       roleID,
-		FromHarness:  rec.Harness,
-		FromModel:    current.Model,
-		ToHarness:    target.Harness,
-		ToModel:      target.Model,
-		RungIndex:    rungIndex,
-		GenerationID: generation,
-		State:        domain.FailoverAttemptRequested,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                 domain.FailoverAttemptID(id, incident, seq),
+		SessionID:          id,
+		ProjectID:          rec.ProjectID,
+		IncidentID:         incident,
+		Seq:                seq,
+		RoleID:             roleID,
+		FromHarness:        rec.Harness,
+		FromModel:          current.Model,
+		ToHarness:          target.Harness,
+		ToModel:            target.Model,
+		RungIndex:          rungIndex,
+		GenerationID:       generation,
+		SourceGenerationID: sourceGeneration,
+		RoleSnapshot:       roleSnapshot,
+		State:              domain.FailoverAttemptRequested,
+		CreatedAt:          now,
+		UpdatedAt:          now,
 	}
 
-	// ONE transaction for the ledger row and the attempt row (section 6 rule 1),
-	// both durable before the saga touches the runtime.
-	if err := store.AppendSessionFailoverAttemptWithLedger(ctx, attempt,
-		m.failoverLedgerRecord(attempt, domain.LifecyclePhaseRequested)); err != nil {
+	admitAttempt := func(admitCtx context.Context) error {
+		// ONE transaction for the ledger row and the attempt row (section 6
+		// rule 1). The canonical engine invokes this under its per-session gate,
+		// after active-saga and source-generation checks but before preserving
+		// native state or creating the saga.
+		if err := store.AppendSessionFailoverAttemptWithLedger(admitCtx, attempt,
+			m.failoverLedgerRecord(attempt, domain.LifecyclePhaseRequested)); err != nil {
+			return err
+		}
+		m.logger.Info("failover continue requested",
+			"sessionID", id, "incident", incident, "seq", seq, "generation", generation,
+			"sourceGeneration", sourceGeneration, "role", roleID,
+			"from", string(rec.Harness), "to", string(target.Harness),
+			"toModel", target.Model, "rung", rungIndex)
+		return nil
+	}
+	if canonicalAgentSwitchEngine {
+		return m.continueCanonicalFailoverAttempt(ctx, store, rec, attempt, admitAttempt)
+	}
+	if err := admitAttempt(ctx); err != nil {
 		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, err)
 	}
-
-	m.logger.Info("failover continue requested",
-		"sessionID", id, "incident", incident, "seq", seq, "generation", generation,
-		"role", roleID, "from", string(rec.Harness), "to", string(target.Harness),
-		"toModel", target.Model, "rung", rungIndex)
 
 	// One relaunch path: the existing worker switch entry point.
 	res, switchErr := m.SwitchWorker(ctx, SwitchRequest{
@@ -301,12 +363,175 @@ func (m *Manager) continueFailover(
 		// the switch ownership fence between our append and SwitchWorker. That
 		// caller owns the shared attempt now. Marking it failed here can race its
 		// target ack and leave a live target behind a terminal-failed row.
-		if errors.Is(switchErr, ErrSwitchInProgress) {
+		if errors.Is(switchErr, ErrSwitchOperationInProgress) {
 			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", id, switchErr)
 		}
 		return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
 	}
 	return m.completeFailoverAttempt(ctx, store, rec, attempt, res, false)
+}
+
+func failoverAgentSwitchIDKey(attempt domain.FailoverAttempt) string {
+	return "failover:" + attempt.ID
+}
+
+func failoverAgentSwitchNote(attempt domain.FailoverAttempt) string {
+	return "failover attempt " + attempt.ID
+}
+
+func agentSwitchMatchesFailoverAttempt(sw domain.AgentSwitch, attempt domain.FailoverAttempt) bool {
+	if sw.FailoverAttemptID != attempt.ID || sw.SessionID != attempt.SessionID ||
+		sw.IdempotencyKey != failoverAgentSwitchIDKey(attempt) ||
+		sw.TargetHarness != attempt.ToHarness || strings.TrimSpace(sw.TargetModel) != strings.TrimSpace(attempt.ToModel) ||
+		string(sw.TargetGenerationID) != strings.TrimSpace(attempt.GenerationID) {
+		return false
+	}
+	if strings.TrimSpace(attempt.RoleSnapshot.RoleID) != "" && sw.RoleSnapshot != attempt.RoleSnapshot {
+		return false
+	}
+	return attempt.SourceGenerationID == "" ||
+		string(sw.SourceGenerationID) == strings.TrimSpace(attempt.SourceGenerationID)
+}
+
+func (m *Manager) failoverAgentSwitchRoleSnapshot(
+	ctx context.Context,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+) (domain.SessionRoleBinding, error) {
+	project, err := m.loadProject(ctx, rec.ProjectID)
+	if err != nil {
+		return domain.SessionRoleBinding{}, err
+	}
+	roleMap := project.Config.RoleMap.WithDefaults()
+	binding, ok := roleMap.Roles[attempt.RoleID]
+	if !ok {
+		return domain.SessionRoleBinding{}, ErrFailoverRecoveryRequired
+	}
+	sha, err := roleMap.SHA256()
+	if err != nil {
+		return domain.SessionRoleBinding{}, err
+	}
+	snapshot := rec.Metadata.Role
+	snapshot.RoleID = attempt.RoleID
+	snapshot.RoleMapSchemaVersion = roleMap.SchemaVersion
+	snapshot.RoleMapSHA256 = sha
+	snapshot.ResolvedHarness = attempt.ToHarness
+	snapshot.ResolvedModel = strings.TrimSpace(attempt.ToModel)
+	snapshot.ResolvedPermissions = binding.Permissions
+	return snapshot, nil
+}
+
+func (m *Manager) continueCanonicalFailoverAttempt(
+	ctx context.Context,
+	store failoverAttemptStore,
+	rec domain.SessionRecord,
+	attempt domain.FailoverAttempt,
+	admit func(context.Context) error,
+) (ContinueFailoverResult, error) {
+	agentStore, ok := m.store.(ports.AgentSwitchStore)
+	if !ok {
+		return ContinueFailoverResult{}, ErrFailoverNotWired
+	}
+
+	sourceGeneration := strings.TrimSpace(attempt.SourceGenerationID)
+	roleSnapshot := attempt.RoleSnapshot
+	if existing, found, err := agentStore.GetAgentSwitchByIdempotencyKey(
+		ctx, attempt.SessionID, failoverAgentSwitchIDKey(attempt)); err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read failover saga: %w", rec.ID, err)
+	} else if found {
+		if !agentSwitchMatchesFailoverAttempt(existing, attempt) {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: saga %s does not match attempt %s",
+				rec.ID, ErrFailoverRecoveryRequired, existing.ID, attempt.ID)
+		}
+		if sourceGeneration == "" {
+			return ContinueFailoverResult{}, fmt.Errorf(
+				"continue %s: %w: legacy attempt %s has a saga but no durable source generation",
+				rec.ID, ErrFailoverRecoveryRequired, attempt.ID)
+		}
+		if existing.RoleSnapshot != attempt.RoleSnapshot {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: saga %s role snapshot differs from attempt %s",
+				rec.ID, ErrFailoverRecoveryRequired, existing.ID, attempt.ID)
+		}
+	} else {
+		// Upgraded legacy requested attempts can lack the source fence. Re-drive
+		// only while the source record still matches every durable attempt fact;
+		// otherwise a human must resolve which runtime owns the session.
+		if sourceGeneration == "" {
+			if rec.Harness != attempt.FromHarness ||
+				strings.TrimSpace(rec.Metadata.Role.ResolvedModel) != strings.TrimSpace(attempt.FromModel) {
+				return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: legacy attempt source changed",
+					rec.ID, ErrFailoverRecoveryRequired)
+			}
+			sourceGeneration = strings.TrimSpace(rec.Metadata.RuntimeLaunchID)
+		}
+		if sourceGeneration == "" {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: source generation is unavailable",
+				rec.ID, ErrFailoverRecoveryRequired)
+		}
+		if strings.TrimSpace(roleSnapshot.RoleID) == "" ||
+			roleSnapshot.ResolvedHarness != attempt.ToHarness ||
+			strings.TrimSpace(roleSnapshot.ResolvedModel) != strings.TrimSpace(attempt.ToModel) {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: attempt %s has no exact role snapshot",
+				rec.ID, ErrFailoverRecoveryRequired, attempt.ID)
+		}
+	}
+
+	admitted := admit == nil
+	admitUnderGate := admit
+	if admit != nil {
+		admitUnderGate = func(admitCtx context.Context) error {
+			if err := admit(admitCtx); err != nil {
+				return err
+			}
+			admitted = true
+			return nil
+		}
+	}
+	sw, switchErr := m.switchAgentWithAdmission(ctx, rec.ID, SwitchAgentConfig{
+		TargetHarness:              attempt.ToHarness,
+		TargetModel:                attempt.ToModel,
+		Note:                       failoverAgentSwitchNote(attempt),
+		IdempotencyKey:             failoverAgentSwitchIDKey(attempt),
+		RequiredTargetGenerationID: domain.AgentGenerationID(attempt.GenerationID),
+		ExpectedSourceGenerationID: domain.AgentGenerationID(sourceGeneration),
+		RoleSnapshot:               roleSnapshot,
+		FailoverAttemptID:          attempt.ID,
+	}, admitUnderGate)
+	if switchErr != nil {
+		if !admitted {
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w", rec.ID, switchErr)
+		}
+		if sw.ID != "" && !sw.State.Terminal() {
+			if attempt.State == domain.FailoverAttemptRequested {
+				_, _ = store.UpdateSessionFailoverAttemptState(ctx, attempt.ID,
+					attempt.State, domain.FailoverAttemptPostStop, m.clock())
+			}
+			return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: %w",
+				rec.ID, ErrFailoverRecoveryRequired, switchErr)
+		}
+		return m.recordFailoverFailure(ctx, store, rec, attempt, switchErr)
+	}
+	if !agentSwitchMatchesFailoverAttempt(sw, attempt) {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: saga %s does not match attempt %s",
+			rec.ID, ErrFailoverRecoveryRequired, sw.ID, attempt.ID)
+	}
+	if sw.State != domain.AgentSwitchCompleted {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: saga %s remains %s",
+			rec.ID, ErrFailoverRecoveryRequired, sw.ID, sw.State)
+	}
+	current, found, err := m.store.GetSession(ctx, rec.ID)
+	if err != nil {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: read promoted session: %w", rec.ID, err)
+	}
+	if !found || current.Harness != attempt.ToHarness ||
+		strings.TrimSpace(current.Metadata.Role.ResolvedModel) != strings.TrimSpace(attempt.ToModel) ||
+		strings.TrimSpace(current.Metadata.RuntimeLaunchID) != strings.TrimSpace(attempt.GenerationID) {
+		return ContinueFailoverResult{}, fmt.Errorf("continue %s: %w: completed saga did not promote exact attempt intent",
+			rec.ID, ErrFailoverRecoveryRequired)
+	}
+	return m.completeFailoverAttempt(ctx, store, rec, attempt, SwitchResult{
+		Session: current, GenerationID: attempt.GenerationID, Kind: domain.LifecycleKindFailover,
+	}, admit == nil)
 }
 
 // failoverEligible refuses the session kinds that cannot enter the saga at all.
@@ -332,7 +557,7 @@ func failoverEligible(rec domain.SessionRecord) error {
 // Continue never starts a new attempt, and an incomplete post_stop belonging to
 // an abandoned attempt is COMPLETED on the same generation instead of being
 // redone on a fresh rung. A live owner is different: it returns
-// ErrSwitchInProgress without mutating the attempt because fence occupancy does
+// ErrSwitchOperationInProgress without mutating the attempt because fence occupancy does
 // not prove that owner's switch will eventually acknowledge the target.
 //
 // No path advances the ladder. An abandoned attempt is finished on its stored
@@ -364,7 +589,7 @@ func (m *Manager) adoptFailoverAttempt(
 		//
 		// beginSwitch is the discriminator, and it is exactly the right one
 		// because it is in-memory: a live saga holds it and refuses with
-		// ErrSwitchInProgress, while after a crash it is free and the re-drive
+		// ErrSwitchOperationInProgress, while after a crash it is free and the re-drive
 		// proceeds. Nothing durable can tell these apart, which is why the old
 		// code could not.
 		//
@@ -383,7 +608,7 @@ func (m *Manager) adoptFailoverAttempt(
 				NativeSessionID:  rec.Metadata.AgentSessionID,
 			},
 		})
-		if errors.Is(switchErr, ErrSwitchInProgress) {
+		if errors.Is(switchErr, ErrSwitchOperationInProgress) {
 			// A live fence distinguishes an abandoned requested attempt from a
 			// transition running right now, but it does not prove the owner is
 			// this attempt or that it will eventually succeed. Preserve the
@@ -407,7 +632,7 @@ func (m *Manager) adoptFailoverAttempt(
 	}
 
 	res, err := m.RecoverSwitchFromPostStop(ctx, rec.ID)
-	if errors.Is(err, ErrSwitchInProgress) {
+	if errors.Is(err, ErrSwitchOperationInProgress) {
 		// The matching generation belongs to the live saga that still owns the
 		// switch fence. A duplicate Continue observes its durable pending pin,
 		// but must not promote the OUTER attempt while the first caller is still
@@ -687,7 +912,7 @@ func (m *Manager) recordFailoverFailure(
 			}
 			return ContinueFailoverResult{}, errors.Join(
 				fmt.Errorf("continue %s: %w", rec.ID, switchErr),
-				fmt.Errorf("continue %s: %w", rec.ID, ErrSwitchInProgress),
+				fmt.Errorf("continue %s: %w", rec.ID, ErrSwitchOperationInProgress),
 			)
 		}
 		return ContinueFailoverResult{}, errors.Join(
@@ -808,6 +1033,43 @@ func (m *Manager) ReconcileFailoverAttempts(ctx context.Context, id domain.Sessi
 	}
 
 	for _, a := range pending {
+		if agentStore, ok := m.store.(ports.AgentSwitchStore); ok {
+			sw, found, readErr := agentStore.GetAgentSwitchByIdempotencyKey(
+				ctx, a.SessionID, failoverAgentSwitchIDKey(a))
+			if readErr != nil {
+				return fmt.Errorf("reconcile failover %s: read agent saga for attempt %s: %w", id, a.ID, readErr)
+			}
+			if found {
+				if !agentSwitchMatchesFailoverAttempt(sw, a) {
+					return fmt.Errorf("reconcile failover %s: %w: saga %s does not match attempt %s",
+						id, ErrFailoverRecoveryRequired, sw.ID, a.ID)
+				}
+				var next domain.FailoverAttemptState
+				switch {
+				case sw.State == domain.AgentSwitchCompleted:
+					next = domain.FailoverAttemptAcked
+				case sw.State == domain.AgentSwitchFailed:
+					next = domain.FailoverAttemptFailed
+				case a.State == domain.FailoverAttemptRequested &&
+					(sw.State == domain.AgentSwitchSourceStopped || sw.State == domain.AgentSwitchStartingTarget ||
+						sw.State == domain.AgentSwitchTargetReady || sw.State == domain.AgentSwitchDelivering):
+					next = domain.FailoverAttemptPostStop
+				}
+				if next == "" || next == a.State {
+					continue
+				}
+				changed, updateErr := store.UpdateSessionFailoverAttemptState(ctx, a.ID, a.State, next, m.clock())
+				if updateErr != nil {
+					return fmt.Errorf("reconcile failover %s: attempt %s from agent saga: %w", id, a.ID, updateErr)
+				}
+				if changed {
+					m.logger.Info("failover attempt reconciled from agent switch",
+						"sessionID", id, "attempt", a.ID, "switchID", sw.ID,
+						"generation", a.GenerationID, "from", string(a.State), "to", string(next))
+				}
+				continue
+			}
+		}
 		next, ok := reconciledFailoverState(a, acked, postStopped, failedGen)
 		if !ok {
 			continue

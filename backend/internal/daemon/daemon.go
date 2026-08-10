@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -81,19 +80,18 @@ func Run() error {
 	defer func() { _ = dataLease.Close() }()
 	log.Info("data-dir ownership acquired", "lock", dataLease.Path(), "pid", dataLease.PID())
 
-	browserRuntimeToken := strings.TrimSpace(os.Getenv(browserruntime.RuntimeTokenEnv))
+	var browserRuntimeToken string
+	if os.Getenv(browserruntime.RuntimeTokenStdinEnv) == "1" {
+		browserRuntimeToken, err = browserruntime.ReadRuntimeToken(os.Stdin)
+		if err != nil {
+			return err
+		}
+	}
 	if browserRuntimeToken == "" {
 		browserRuntimeToken, err = browserruntime.NewToken()
 		if err != nil {
 			return err
 		}
-		if err := os.Setenv(browserruntime.RuntimeTokenEnv, browserRuntimeToken); err != nil {
-			return fmt.Errorf("set browser runtime token: %w", err)
-		}
-	}
-	browserAuthority, err := browsersvc.LoadAuthority(cfg.DataDir)
-	if err != nil {
-		return fmt.Errorf("load browser capability authority: %w", err)
 	}
 	operatorSpawn, operatorSpawnToken, err := spawncred.NewOperator()
 	if err != nil {
@@ -101,6 +99,7 @@ func Run() error {
 	}
 	// Token is held only for API validation + runfile publication (desktop main).
 	// Never os.Setenv: tmux/ConPTY merge os.Environ() into workers.
+	browserAuthority := browsersvc.NewAuthority()
 	browserBroker := browserruntime.New(log, browserRuntimeToken)
 
 	// Fail fast only if a daemon is genuinely still serving the recorded port.
@@ -260,7 +259,7 @@ func Run() error {
 		NewID:    uuid.NewString,
 	})
 
-	sessionSvc, reviewSvc, sessMgr, err := startSession(cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
+	sessionSvc, reviewSvc, sessMgr, err := startSession(ctx, cfg, runtimeAdapter, store, lcStack.LCM, messenger, telemetrySink, agents, managedPreview, browserBroker, browserAuthority, chatLauncher{svc: chatSvc}, settingsSvc, log)
 	if err != nil {
 		stop()
 		lcStack.Stop()
@@ -273,8 +272,11 @@ func Run() error {
 	// sessionLifecycle requires AllowTerminalInput (compile-time); wire directly.
 	termMgr.SetInputGate(sessMgr)
 	sessMgr.SetTerminalInputGate(termMgr)
-	lifecycleMessenger.Bind(sessMgr)
+	lifecycleMessenger.Bind(sessionLifecycleMessenger{sessMgr})
 	lcStack.LCM.SetCompletionTerminator(sessMgr)
+	lcStack.LCM.SetSessionInputLease(sessMgr)
+	lcStack.LCM.SetSessionOperationGate(sessMgr)
+	termMgr.SetSessionInputLease(sessMgr)
 	projectSvc := projectsvc.NewWithDeps(projectsvc.Deps{Store: store, Sessions: sessionSvc, DefaultHarness: domain.AgentHarness(cfg.Agent), Telemetry: telemetrySink})
 	if err := seedScratchProjectOnBoot(ctx, cfg, projectSvc); err != nil {
 		stop()
@@ -444,6 +446,7 @@ func Run() error {
 	} else {
 		prActions = prsvc.NewActionService(prsvc.ActionDeps{Store: store, Merger: mergeProvider, Reader: mergeProvider})
 	}
+
 	// Push-device registry: persisted phones that receive OS push notifications.
 	// A load failure must not block boot — degrade to no push rather than refusing
 	// to start the daemon. pushRegistry (interface) is assigned only when load
@@ -551,7 +554,6 @@ func Run() error {
 	if usagePipeline != nil {
 		usageDone = usagePipeline.Start(ctx)
 	}
-
 	// ponytail: 5s tolerates a brief frontend restart; tune if dev hot-reload trips it.
 	const supervisorGrace = 5 * time.Second
 

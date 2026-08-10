@@ -98,7 +98,7 @@ func (m *Manager) SwitchWorker(ctx context.Context, req SwitchRequest) (SwitchRe
 // running the saga with an inverted lock order.
 func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, ownershipHeld bool) (SwitchResult, error) {
 	if !m.beginSwitch(req.SessionID) {
-		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchInProgress)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchOperationInProgress)
 	}
 	defer m.endSwitch(req.SessionID)
 
@@ -173,7 +173,8 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 	}
 	if rec.Metadata.SwitchPending != nil {
 		// In-flight saga: only recovery may continue (do not start a nested switch).
-		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID, ErrSwitchInProgress)
+		return SwitchResult{}, fmt.Errorf("switch %s: %w", req.SessionID,
+			legacySwitchRecoveryError(req.SessionID, rec.Metadata.SwitchPending.GenerationID))
 	}
 	meta := rec.Metadata
 	if meta.WorkspacePath == "" || meta.RuntimeHandleID == "" {
@@ -346,8 +347,9 @@ func (m *Manager) switchUnderOwnership(ctx context.Context, req SwitchRequest, o
 		return SwitchResult{}, fmt.Errorf("switch %s: pre-stop: source runtime still alive after destroy", req.SessionID)
 	}
 
-	// Source dead: clear live handle/ids (pending still carries intent + payload).
-	rec.Metadata.AgentSessionID = ""
+	// Source dead: clear only runtime ownership. The scalar native-session id
+	// mirrors the last acknowledged provider conversation until the exact target
+	// acknowledgement promotes it.
 	rec.Metadata.RuntimeHandleID = ""
 	rec.Metadata.RuntimeLaunchID = ""
 	rec.UpdatedAt = m.clock()
@@ -422,7 +424,7 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 	}
 
 	if !m.beginSwitch(sessionID) {
-		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchInProgress)
+		return SwitchResult{}, fmt.Errorf("recover switch %s: %w", sessionID, ErrSwitchOperationInProgress)
 	}
 	defer m.endSwitch(sessionID)
 
@@ -682,7 +684,8 @@ func (m *Manager) RecoverSwitchFromPostStop(ctx context.Context, sessionID domai
 		pending.PayloadJSON = payloadRaw
 	}
 	rec.Metadata.SwitchPending = pending
-	rec.Metadata.AgentSessionID = ""
+	// Keep the last acknowledged provider conversation while target ownership is
+	// unresolved. Runtime/saga facts, not scalar emptiness, drive recovery.
 	// Prefer existing composed prompt when it already contains the handoff;
 	// only recompose when we have compiled text and the prompt is missing it.
 	if compiledText != "" {

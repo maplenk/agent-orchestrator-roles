@@ -210,6 +210,9 @@ func TestCommandBuilders(t *testing.T) {
 	if got, want := capturePaneArgs("sess-1", 10), []string{"capture-pane", "-t", "sess-1", "-p", "-S", "-10"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("capturePaneArgs = %#v, want %#v", got, want)
 	}
+	if got, want := capturePaneStyledArgs("sess-1", 10), []string{"capture-pane", "-e", "-t", "sess-1", "-p", "-S", "-10"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("capturePaneStyledArgs = %#v, want %#v", got, want)
+	}
 }
 
 // -- session name sanitization --
@@ -397,7 +400,7 @@ func TestCreateLaunchCommandContainsKeepAliveShell(t *testing.T) {
 	// The launch command is the last argument to new-session (after shellPath -c).
 	args := fr.calls[0].args
 	launchCmd := args[len(args)-1]
-	if !strings.Contains(launchCmd, `exec "${SHELL:-/bin/sh}" -i`) {
+	if !strings.HasSuffix(launchCmd, `; exec "${SHELL:-/bin/sh}" -i`) {
 		t.Fatalf("launch command missing keep-alive shell: %q", launchCmd)
 	}
 	if !strings.HasPrefix(launchCmd, "cd '/tmp/ws' || exit; ") {
@@ -405,6 +408,98 @@ func TestCreateLaunchCommandContainsKeepAliveShell(t *testing.T) {
 	}
 	if !strings.Contains(launchCmd, "'myagent'") {
 		t.Fatalf("launch command missing quoted argv: %q", launchCmd)
+	}
+}
+
+func TestBuildLaunchCommandSupervisedParksOnExactNonInterpretingSink(t *testing.T) {
+	launchCmd := buildLaunchCommand(ports.RuntimeConfig{
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"myagent"},
+		Env:           map[string]string{"AO_SUPERVISED_PROCESS": "1"},
+	})
+
+	if !strings.HasSuffix(launchCmd, `; exec cat >/dev/null`) {
+		t.Fatalf("supervised launch command suffix = %q, want exact exec-cat sink", launchCmd)
+	}
+	if strings.Contains(launchCmd, `exec "${SHELL:-/bin/sh}" -i`) {
+		t.Fatalf("supervised launch command starts a post-agent interpreter: %q", launchCmd)
+	}
+}
+
+func TestSupervisedExitRaceInputCannotBecomeShellCommands(t *testing.T) {
+	shellPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skipf("POSIX shell unavailable: %v", err)
+	}
+
+	dir := t.TempDir()
+	agentExited := filepath.Join(dir, "agent-exited")
+	raceCommandRan := filepath.Join(dir, "race-command-ran")
+	launchCmd := buildLaunchCommand(ports.RuntimeConfig{
+		WorkspacePath: dir,
+		Argv:          []string{shellPath, "-c", ": > " + shellQuote(agentExited)},
+		Env:           map[string]string{"AO_SUPERVISED_PROCESS": "1"},
+	})
+
+	cmd := exec.Command(shellPath, "-c", launchCmd)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	waitC := make(chan error, 1)
+	go func() { waitC <- cmd.Wait() }()
+	finished := false
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		if !finished {
+			_ = cmd.Process.Kill()
+			select {
+			case <-waitC:
+			case <-time.After(time.Second):
+			}
+		}
+	})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(agentExited); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("agent did not exit before deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if _, err := stdin.Write([]byte(": > " + shellQuote(raceCommandRan) + "\n")); err != nil {
+		t.Fatalf("write input racing agent exit: %v", err)
+	}
+	select {
+	case err := <-waitC:
+		finished = true
+		t.Fatalf("supervised sink exited while input was still open: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if _, err := os.Stat(raceCommandRan); !os.IsNotExist(err) {
+		t.Fatalf("post-exit input was interpreted as a shell command (stat err = %v)", err)
+	}
+
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-waitC:
+		finished = true
+		if err != nil {
+			t.Fatalf("supervised launch command exit: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("supervised sink did not exit after stdin closed")
 	}
 }
 
@@ -638,7 +733,7 @@ func TestCreatePreflightsLaunchCommandSize(t *testing.T) {
 		}
 		// The budget belongs in the message: without it nobody can tell how much
 		// prompt to cut.
-		if !strings.Contains(err.Error(), strconv.Itoa(tmuxMaxCommandBytes-launchCommandArgvAllowance)) {
+		if !strings.Contains(err.Error(), strconv.Itoa(tmuxMaxCommandArgvBytes)) {
 			t.Fatalf("Create err = %v, want the allowed size named", err)
 		}
 		if len(fr.calls) != 0 {
@@ -663,16 +758,38 @@ func TestCreatePreflightsLaunchCommandSize(t *testing.T) {
 	})
 }
 
-// checkLaunchCommandSize is an off-by-one hazard: refusing a command that fits
-// costs a spawn that would have worked, so pin both sides of the budget.
-func TestCheckLaunchCommandSizeBoundary(t *testing.T) {
-	allowed := tmuxMaxCommandBytes - launchCommandArgvAllowance
-	if err := checkLaunchCommandSize(strings.Repeat("x", allowed)); err != nil {
-		t.Fatalf("a launch command exactly at the budget was refused: %v", err)
+// The tmux protocol encoding is an off-by-one hazard: every argv word includes
+// a terminating NUL and MSG_COMMAND consumes its own header. Pin both sides of
+// the exact payload limit rather than relying on a guessed launch allowance.
+func TestCheckTmuxCommandSizeBoundary(t *testing.T) {
+	args := []string{"new-session", "-d", ""}
+	launchBytes := tmuxMaxCommandArgvBytes - encodedTmuxCommandSize(args)
+	args[len(args)-1] = strings.Repeat("x", launchBytes)
+	if got := encodedTmuxCommandSize(args); got != tmuxMaxCommandArgvBytes {
+		t.Fatalf("encoded size = %d, want exact limit %d", got, tmuxMaxCommandArgvBytes)
 	}
-	err := checkLaunchCommandSize(strings.Repeat("x", allowed+1))
+	if err := checkTmuxCommandSize(args, launchBytes); err != nil {
+		t.Fatalf("a tmux command exactly at the protocol limit was refused: %v", err)
+	}
+	args[len(args)-1] += "x"
+	err := checkTmuxCommandSize(args, launchBytes+1)
 	if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
-		t.Fatalf("err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong one byte over the budget", err)
+		t.Fatalf("err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong one byte over the limit", err)
+	}
+}
+
+func TestPreflightCreateIsPure(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	err := r.PreflightCreate(ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"codex", "--flag"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.calls) != 0 {
+		t.Fatalf("PreflightCreate invoked tmux %d times", len(fr.calls))
 	}
 }
 
@@ -790,6 +907,39 @@ func TestRestartRejectsMismatchedSessionHandle(t *testing.T) {
 	}
 }
 
+func TestRestartPreflightsExactCommandSizeBeforeRuntimeIO(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	_, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"codex", "-c", "developer_instructions=" + strings.Repeat("x", tmuxMaxCommandBytes)},
+	})
+	if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("Restart err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong", err)
+	}
+	if len(fr.calls) != 0 {
+		t.Fatalf("tmux was invoked %d times; restart preflight must refuse before respawn-pane", len(fr.calls))
+	}
+}
+
+func TestRestartClassifiesTmuxCommandTooLong(t *testing.T) {
+	r, _ := newTestRuntime(0)
+	fr := &fakeRunnerSelectiveErr{
+		exitErrOn: "respawn-pane",
+		errOutput: []byte("command too long"),
+	}
+	r.runner = fr
+
+	_, err := r.Restart(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, ports.RuntimeConfig{
+		SessionID:     "sess-1",
+		WorkspacePath: "/tmp/ws",
+		Argv:          []string{"codex"},
+	})
+	if !errors.Is(err, ports.ErrRuntimeLaunchCommandTooLong) {
+		t.Fatalf("Restart err = %v, want wrapped ports.ErrRuntimeLaunchCommandTooLong", err)
+	}
+}
+
 // -- Destroy tests --
 
 func TestDestroyIsIdempotentWhenSessionMissing(t *testing.T) {
@@ -864,18 +1014,31 @@ func TestIsSupervisedProcessAliveFindsExactDescendant(t *testing.T) {
 }
 
 func TestIsSupervisedProcessAliveRejectsStaleAndUnrelatedProcesses(t *testing.T) {
-	entries, err := parseProcessTable("100 1 /bin/sh\n101 100 /opt/ao agent-process supervise --session sess-1 --launch launch-old -- codex\n200 1 /opt/ao agent-process supervise --session sess-1 --launch launch-new -- codex\n")
+	entries, err := parseProcessTable("100 1 /bin/sh\n101 100 /opt/ao agent-process supervise --session sess-1 --launch launch-old -- codex\n102 101 codex\n200 1 /opt/ao agent-process supervise --session sess-1 --launch launch-new -- codex\n201 200 codex\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if containsSupervisor(entries, 100, "sess-1", "launch-new") {
+	if containsExactSupervisedWorkload(entries, 100, "sess-1", "launch-new") {
 		t.Fatal("stale descendant or matching process outside the pane tree was accepted")
 	}
 	if containsManagedWorkload(entries, 100, "sess-1", "launch-new") {
 		t.Fatal("stale supervised generation was accepted as a manual workload")
 	}
-	if !containsSupervisor(entries, 100, "sess-1", "launch-old") {
+	if !containsExactSupervisedWorkload(entries, 100, "sess-1", "launch-old") {
 		t.Fatal("exact supervised descendant was not found")
+	}
+}
+
+func TestExactSupervisedWorkloadRejectsSupervisorReportingExitedChild(t *testing.T) {
+	entries, err := parseProcessTable("100 1 /bin/sh\n101 100 /opt/ao agent-process supervise --session sess-1 --launch launch-2 -- codex\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsExactSupervisedWorkload(entries, 100, "sess-1", "launch-2") {
+		t.Fatal("supervisor without a managed child was accepted as a live target")
+	}
+	if !containsManagedWorkload(entries, 100, "sess-1", "launch-2") {
+		t.Fatal("ordinary reaper should retain a supervisor while it reports the child exit")
 	}
 }
 
@@ -886,6 +1049,21 @@ func TestIsSupervisedProcessAliveFindsManualRelaunchFromPreservedShell(t *testin
 	}
 	if !containsManagedWorkload(entries, 100, "sess-1", "launch-2") {
 		t.Fatal("workload relaunched from the preserved shell was not found")
+	}
+}
+
+func TestIsExactSupervisedProcessAliveRejectsManualRelaunchFromPreservedShell(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{
+		[]byte("100\n"),
+		[]byte("100 1 /bin/zsh -i\n101 100 codex resume native-1\n102 101 codex worker\n"),
+	}
+	alive, err := r.IsExactSupervisedProcessAlive(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, ports.SupervisedProcessRef{
+		SessionID: "sess-1",
+		LaunchID:  "launch-2",
+	})
+	if err != nil || alive {
+		t.Fatalf("IsExactSupervisedProcessAlive = (%v, %v), want (false, nil)", alive, err)
 	}
 }
 
@@ -1208,6 +1386,19 @@ func TestInterruptSendsCtrlC(t *testing.T) {
 	}
 }
 
+func TestSendInputSendsEscapeWithoutEnter(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	if err := r.SendInput(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, "\x1b"); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+	if len(fr.calls) != 1 {
+		t.Fatalf("calls = %d, want 1", len(fr.calls))
+	}
+	if got, want := fr.calls[0].args, sendKeysLiteralArgs("sess-1", "\x1b"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("escape args = %#v, want %#v", got, want)
+	}
+}
+
 // -- GetOutput tests --
 
 func TestGetOutputValidatesLines(t *testing.T) {
@@ -1253,6 +1444,22 @@ func TestGetOutputArgs(t *testing.T) {
 		t.Fatalf("GetOutput: %v", err)
 	}
 	if got, want := fr.calls[0].args, capturePaneArgs("sess-1", 10); !reflect.DeepEqual(got, want) {
+		t.Fatalf("capture-pane args = %#v, want %#v", got, want)
+	}
+}
+
+func TestGetStyledOutputPreservesCaptureMode(t *testing.T) {
+	r, fr := newTestRuntime(0)
+	fr.outputs = [][]byte{[]byte("› \x1b[2mplaceholder\x1b[0m\n")}
+
+	out, err := r.GetStyledOutput(context.Background(), ports.RuntimeHandle{ID: "sess-1"}, 10)
+	if err != nil {
+		t.Fatalf("GetStyledOutput: %v", err)
+	}
+	if !strings.Contains(out, "\x1b[2m") {
+		t.Fatalf("styled output lost SGR sequence: %q", out)
+	}
+	if got, want := fr.calls[0].args, capturePaneStyledArgs("sess-1", 10); !reflect.DeepEqual(got, want) {
 		t.Fatalf("capture-pane args = %#v, want %#v", got, want)
 	}
 }

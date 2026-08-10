@@ -1,10 +1,10 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 
 // Regression guard for #366 (macOS): the sidebar's "Agent Orchestrator" brand
-// must never sit under the TitlebarNav cluster, and the wordmark must stay
-// readable. TitlebarNav now lives in the sidebar header below the traffic
-// lights (in-flow), so the brand is the next row — these tests lock that the
-// two boxes never overlap and the wordmark is not clipped.
+// must never sit under the fixed TitlebarNav cluster, and the wordmark must
+// stay readable. The sidebar reserves the traffic-light band above its brand;
+// these tests lock that the two boxes never overlap and the wordmark is not
+// clipped.
 //
 // macOS-only: TitlebarNav (and the bug) gate on navigator.userAgent looking like
 // a Mac, read once at module load. Force a Mac UA so this is deterministic
@@ -29,7 +29,7 @@ async function isTruncated(span: Locator) {
 }
 
 async function expectBrandClearsCluster(page: Page) {
-	const cluster = page.locator(".titlebar-nav");
+	const cluster = page.locator('[data-slot="titlebar-nav"]');
 	await expect(cluster).toBeVisible();
 	const span = brand(page);
 	await expect(span).toBeVisible();
@@ -54,7 +54,7 @@ test("project board route: brand clears the macOS titlebar cluster and stays rea
 	await expect(page.getByText("Projects")).toBeVisible();
 
 	// In-app nav to /projects/:id (a hard load boots the router at the board).
-	await page.locator('[data-sidebar="menu-button"]').filter({ hasText: "api-gateway" }).first().click();
+	await page.getByRole("button", { name: "ao-demo", exact: true }).click();
 	// The active project row marks itself aria-current=page once navigation lands.
 	await expect(page.locator('[aria-current="page"]')).toBeVisible();
 
@@ -68,8 +68,9 @@ test("brand stays put and readable when navigating board → session", async ({ 
 	const boardBrandBox = await brand(page).boundingBox();
 	expect(boardBrandBox).not.toBeNull();
 
-	await page.getByRole("button", { name: "Open Split terminal mux responsibilities" }).click();
-	await expect(page.getByRole("button", { name: "Open Kanban" })).toBeVisible();
+	await page.getByRole("button", { name: "Open Build screenshot-ready dashboard data" }).click();
+	await expect(page).toHaveURL(/sessions\/demo-working/);
+	await expect(page.getByTestId("session-detail")).toBeVisible();
 
 	const sessionBrandBox = await brand(page).boundingBox();
 	expect(sessionBrandBox).not.toBeNull();

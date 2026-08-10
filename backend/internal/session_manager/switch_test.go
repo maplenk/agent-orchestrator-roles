@@ -765,8 +765,8 @@ func TestOwnershipMutex_NoDeadlock(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 200; i++ {
-			if m.beginAgentResume(id) {
-				m.endAgentResume(id)
+			if m.beginOwnershipResume(id) {
+				m.endOwnershipResume(id)
 			}
 		}
 	}()
@@ -792,21 +792,21 @@ func TestAutomaticFailoverAndAgentResumeOwnershipAreMutuallyExclusive(t *testing
 		}
 		defer m.endAutomaticFailover(id, "limit-1")
 
-		if m.beginAgentResume(id) {
-			m.endAgentResume(id)
+		if m.beginOwnershipResume(id) {
+			m.endOwnershipResume(id)
 			t.Fatal("resume acquired ownership during automatic failover")
 		}
-		if !m.beginAgentResume(otherID) {
+		if !m.beginOwnershipResume(otherID) {
 			t.Fatal("automatic failover blocked resume for a different session")
 		}
-		m.endAgentResume(otherID)
+		m.endOwnershipResume(otherID)
 	})
 
 	t.Run("resume excludes automatic", func(t *testing.T) {
-		if !m.beginAgentResume(id) {
+		if !m.beginOwnershipResume(id) {
 			t.Fatal("resume did not acquire ownership")
 		}
-		defer m.endAgentResume(id)
+		defer m.endOwnershipResume(id)
 
 		if m.beginAutomaticFailover(id, "limit-2") {
 			m.endAutomaticFailover(id, "limit-2")
@@ -1024,8 +1024,12 @@ func TestAllowTerminalInput_BlocksByPendingSourceHandleAfterClear(t *testing.T) 
 	if err == nil {
 		t.Fatal("expected block by pending source handle after runtime handle clear")
 	}
-	if !errors.Is(err, ErrSwitchInProgress) {
-		t.Fatalf("err = %v, want ErrSwitchInProgress", err)
+	if !errors.Is(err, ErrSwitchRecoveryRequired) {
+		t.Fatalf("err = %v, want ErrSwitchRecoveryRequired", err)
+	}
+	var recovery *LegacySwitchRecoveryError
+	if !errors.As(err, &recovery) || recovery.GenerationID != "g-post" {
+		t.Fatalf("err = %v, want typed legacy recovery for g-post", err)
 	}
 }
 
@@ -1043,7 +1047,7 @@ func TestSwitchWorker_RollbackFailWrapsErrSwitchUncertain(t *testing.T) {
 	st.updateFailAfter = 2
 	st.updateErr = errors.New("disk full on rollback")
 
-	rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+	rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}, destroyLeavesAlive: true}
 	m := New(Deps{
 		Runtime: rt, Agents: singleAgent{agent: &recordingAgent{}}, Workspace: &fakeWorkspace{},
 		Store: st, Messenger: &fakeMessenger{}, Lifecycle: &fakeLCM{store: st},

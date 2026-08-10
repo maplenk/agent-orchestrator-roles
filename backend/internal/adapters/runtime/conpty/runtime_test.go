@@ -3,6 +3,7 @@ package conpty
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -26,6 +27,13 @@ func livePID() int { return os.Getpid() }
 // used in Destroy tests so the force-kill step is a safe no-op.
 // ponytail: PID 2147483647 (MaxInt32) is never a real process; signal-0 returns ESRCH.
 func deadPID() int { return 2147483647 }
+
+func TestRuntimeDoesNotAdvertiseStyledRenderedTerminalOutput(t *testing.T) {
+	var runtime any = New(Options{})
+	if _, ok := runtime.(ports.StyledTerminalOutputReader); ok {
+		t.Fatal("raw ConPTY history must not be used as rendered composer state")
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Test harness: in-process pty-host backed by a fakePTY.
@@ -159,6 +167,44 @@ func TestCreate_RegistersSession(t *testing.T) {
 	hosts["sess-abc"].cleanup(t)
 }
 
+func TestCreatePassesExactAgentArgvWithoutPostAgentInterpreter(t *testing.T) {
+	isolateRegistry(t)
+	wantArgv := []string{"agent.exe", "--prompt", "value with spaces", `quote"and\\slash`}
+	var gotArgv []string
+	var host *inProcHost
+	spawner := func(_ context.Context, sessionID, _ string, argv []string, _ map[string]string) (string, int, error) {
+		gotArgv = append([]string(nil), argv...)
+		host = startInProcHost(t, sessionID, livePID())
+		return host.addr, host.pid, nil
+	}
+	rt := New(Options{Spawner: spawner})
+
+	if _, err := rt.Create(context.Background(), ports.RuntimeConfig{
+		SessionID:     "sess-argv",
+		WorkspacePath: `C:\workspace with spaces`,
+		Argv:          wantArgv,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	defer host.cleanup(t)
+
+	if len(gotArgv) != len(wantArgv) {
+		t.Fatalf("spawner argv = %#v, want exact argv %#v", gotArgv, wantArgv)
+	}
+	for i := range wantArgv {
+		if gotArgv[i] != wantArgv[i] {
+			t.Fatalf("spawner argv[%d] = %q, want %q (full argv %#v)", i, gotArgv[i], wantArgv[i], gotArgv)
+		}
+	}
+	for _, interpreter := range []string{"cmd.exe", "powershell.exe", "pwsh.exe"} {
+		for _, arg := range gotArgv[1:] {
+			if strings.EqualFold(arg, interpreter) {
+				t.Fatalf("Create appended post-agent interpreter %q to argv %#v", interpreter, gotArgv)
+			}
+		}
+	}
+}
+
 // TestCreate_DuplicateErrors verifies a second Create for the same session id fails.
 func TestCreate_DuplicateErrors(t *testing.T) {
 	isolateRegistry(t)
@@ -266,6 +312,38 @@ func TestSendMessage_DeliversChunkedTextAndEnter(t *testing.T) {
 	}
 	if !bytes.Contains(received, []byte("\r")) {
 		t.Fatalf("PTY input = %q, missing trailing \\r", received)
+	}
+}
+
+func TestSendInputDeliversEscapeByte(t *testing.T) {
+	isolateRegistry(t)
+	hosts := map[string]*inProcHost{}
+	rt := New(Options{Spawner: fakeSpawnerFor(t, hosts, livePID())})
+	handle, err := rt.Create(context.Background(), ports.RuntimeConfig{
+		SessionID: "sess-escape", WorkspacePath: "/tmp/w", Argv: []string{"sh"},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := hosts["sess-escape"]
+	defer h.cleanup(t)
+
+	if err := rt.SendInput(context.Background(), handle, "\x1b"); err != nil {
+		t.Fatalf("SendInput: %v", err)
+	}
+	inputC := make(chan []byte, 1)
+	go func() {
+		buf := make([]byte, 8)
+		n, _ := h.pty.inR.Read(buf)
+		inputC <- append([]byte(nil), buf[:n]...)
+	}()
+	select {
+	case got := <-inputC:
+		if string(got) != "\x1b" {
+			t.Fatalf("input = %q, want Escape", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Escape input")
 	}
 }
 
@@ -407,6 +485,7 @@ func TestSupervisedProcessExitKeepsHostAlive(t *testing.T) {
 		SessionID:     "sess-supervised",
 		WorkspacePath: "/tmp/w",
 		Argv:          []string{"ao", "agent-process", "supervise"},
+		Env:           map[string]string{runtimeLaunchIDEnv: "launch-current"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -416,6 +495,18 @@ func TestSupervisedProcessExitKeepsHostAlive(t *testing.T) {
 
 	if alive, err := rt.IsSupervisedProcessAlive(ctx, handle, ports.SupervisedProcessRef{}); err != nil || !alive {
 		t.Fatalf("supervised process before exit = (%v, %v), want (true, nil)", alive, err)
+	}
+	if alive, err := rt.IsSupervisedProcessAlive(ctx, handle, ports.SupervisedProcessRef{SessionID: "sess-supervised", LaunchID: "launch-stale"}); err != nil || alive {
+		t.Fatalf("stale supervised generation = (%v, %v), want (false, nil)", alive, err)
+	}
+	if alive, err := rt.IsSupervisedProcessAlive(ctx, handle, ports.SupervisedProcessRef{SessionID: "sess-supervised", LaunchID: "launch-current"}); err != nil || !alive {
+		t.Fatalf("current supervised generation = (%v, %v), want (true, nil)", alive, err)
+	}
+	if alive, err := rt.IsExactSupervisedProcessAlive(ctx, handle, ports.SupervisedProcessRef{SessionID: "sess-supervised", LaunchID: "launch-current"}); err != nil || !alive {
+		t.Fatalf("exact current supervised generation = (%v, %v), want (true, nil)", alive, err)
+	}
+	if alive, err := rt.IsExactSupervisedProcessAlive(ctx, handle, ports.SupervisedProcessRef{SessionID: "sess-supervised", LaunchID: "launch-stale"}); err != nil || alive {
+		t.Fatalf("exact stale supervised generation = (%v, %v), want (false, nil)", alive, err)
 	}
 	h.pty.signalExit(42)
 
@@ -513,6 +604,33 @@ func TestDestroy_KillsHostAndCleansUp(t *testing.T) {
 	// Second Destroy must be idempotent (returns nil).
 	if err := rt.Destroy(ctx, handle); err != nil {
 		t.Fatalf("second Destroy: expected nil, got %v", err)
+	}
+}
+
+type processKillerFunc func() error
+
+func (f processKillerFunc) Kill() error { return f() }
+
+func TestDestroyRetainsSessionWhenPIDCannotBeStopped(t *testing.T) {
+	isolateRegistry(t)
+	rt := New(Options{})
+	rt.sessions["sess-stuck"] = &hostSession{addr: "127.0.0.1:1", pid: 424242}
+	rt.killHost = func(string) error { return errors.New("graceful transport failed") }
+	rt.pidIsAlive = func(int) bool { return true }
+	rt.processFinder = func(int) (processKiller, error) {
+		return processKillerFunc(func() error { return errors.New("access denied") }), nil
+	}
+	rt.destroyWait = 0
+
+	err := rt.Destroy(context.Background(), ports.RuntimeHandle{ID: "sess-stuck"})
+	if err == nil || !strings.Contains(err.Error(), "still alive") || !strings.Contains(err.Error(), "access denied") {
+		t.Fatalf("Destroy error = %v, want force-kill and final-liveness evidence", err)
+	}
+	rt.mu.Lock()
+	_, retained := rt.sessions["sess-stuck"]
+	rt.mu.Unlock()
+	if !retained {
+		t.Fatal("Destroy removed a session whose PID may still be alive")
 	}
 }
 

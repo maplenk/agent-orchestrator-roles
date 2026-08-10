@@ -14,21 +14,25 @@ import (
 func failoverAttempt(sess domain.SessionID, incident string, seq int, gen string) domain.FailoverAttempt {
 	now := time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC)
 	return domain.FailoverAttempt{
-		ID:           string(sess) + ":" + incident + ":" + strconv.Itoa(seq),
-		SessionID:    sess,
-		ProjectID:    "mer",
-		IncidentID:   incident,
-		Seq:          seq,
-		RoleID:       "implementor",
-		FromHarness:  domain.HarnessClaudeCode,
-		FromModel:    "opus",
-		ToHarness:    domain.HarnessCodex,
-		ToModel:      "",
-		RungIndex:    0,
-		GenerationID: gen,
-		State:        domain.FailoverAttemptRequested,
-		CreatedAt:    now,
-		UpdatedAt:    now,
+		ID:                 string(sess) + ":" + incident + ":" + strconv.Itoa(seq),
+		SessionID:          sess,
+		ProjectID:          "mer",
+		IncidentID:         incident,
+		Seq:                seq,
+		RoleID:             "implementor",
+		FromHarness:        domain.HarnessClaudeCode,
+		FromModel:          "opus",
+		ToHarness:          domain.HarnessCodex,
+		ToModel:            "",
+		RungIndex:          0,
+		GenerationID:       gen,
+		SourceGenerationID: "source-gen-1",
+		RoleSnapshot: domain.SessionRoleBinding{
+			RoleID: "implementor", ResolvedHarness: domain.HarnessCodex,
+		},
+		State:     domain.FailoverAttemptRequested,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }
 
@@ -72,6 +76,12 @@ func TestFailoverAttempt_AppendWithLedgerWritesBothRows(t *testing.T) {
 	}
 	if got[0].GenerationID != "gen-1" {
 		t.Fatalf("generation = %q, want gen-1", got[0].GenerationID)
+	}
+	if got[0].SourceGenerationID != "source-gen-1" {
+		t.Fatalf("source generation = %q, want source-gen-1", got[0].SourceGenerationID)
+	}
+	if got[0].RoleSnapshot != att.RoleSnapshot {
+		t.Fatalf("role snapshot = %+v, want %+v", got[0].RoleSnapshot, att.RoleSnapshot)
 	}
 	if got[0].State != domain.FailoverAttemptRequested {
 		t.Fatalf("state = %q, want requested", got[0].State)

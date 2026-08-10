@@ -35,6 +35,26 @@ export type FakeBridgeOptions = {
 	daemonPort?: number;
 };
 
+export async function emitFakeNewShellTerminalShortcut(page: Page): Promise<void> {
+	await page.waitForFunction(
+		() =>
+			(
+				window as unknown as {
+					__aoFakeBridge?: { hasNewShellTerminalShortcutListener: () => boolean };
+				}
+			).__aoFakeBridge?.hasNewShellTerminalShortcutListener() === true,
+	);
+	await page.evaluate(() => {
+		const controller = (
+			window as unknown as {
+				__aoFakeBridge?: { emitNewShellTerminalShortcut: () => void };
+			}
+		).__aoFakeBridge;
+		if (!controller) throw new Error("Fake AO bridge is not installed");
+		controller.emitNewShellTerminalShortcut();
+	});
+}
+
 export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}): Promise<void> {
 	const version = opts.version ?? "9.9.9-test";
 	const daemonState = opts.daemonState ?? "ready";
@@ -43,6 +63,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 	await page.addInitScript(
 		({ version, daemonState, daemonPort }) => {
 			const unsubscribe = () => () => undefined;
+			const newShellTerminalListeners = new Set<() => void>();
 			const status: DaemonStatus =
 				daemonState === "ready" ? { state: "ready", port: daemonPort } : { state: daemonState };
 			const navState = (viewId: string) => ({
@@ -66,7 +87,12 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					checkAncestorRepo: async () => undefined,
 					onNewSessionShortcut: unsubscribe,
 					onKeyboardShortcutsHelp: unsubscribe,
-					onNewShellTerminalShortcut: unsubscribe,
+					onNewShellTerminalShortcut: (listener: () => void) => {
+						newShellTerminalListeners.add(listener);
+						return () => {
+							newShellTerminalListeners.delete(listener);
+						};
+					},
 					onCloseShellTerminalShortcut: unsubscribe,
 					setCloseShellTerminalShortcutEnabled: () => undefined,
 					onOpenSettingsShortcut: unsubscribe,
@@ -102,12 +128,12 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					getBootstrap: async () => null,
 				},
 				browser: {
+					nativeCompositionEnabled: true,
 					ensure: async (sessionId: string) => navState(`preview:${sessionId}`),
 					setBounds: () => undefined,
+					setOverlayOpen: () => undefined,
 					navigate: async ({ viewId }: { viewId: string }) => navState(viewId),
 					clear: async (viewId: string) => navState(viewId),
-					capture: async () => "",
-					requestMirror: async () => false,
 					goBack: async (viewId: string) => navState(viewId),
 					goForward: async (viewId: string) => navState(viewId),
 					reload: async (viewId: string) => navState(viewId),
@@ -127,6 +153,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 						activeTabId: "t1",
 						tabs: [{ id: "t1", url: "", title: "", active: true }],
 					}),
+					devtools: async (input: { viewId: string }) => ({ viewId: input.viewId, open: false, activeTabId: "" }),
 					destroy: () => undefined,
 					// Annotation contract (mirrors src/preload.ts): useBrowserView subscribes
 					// to these whenever SessionView mounts with window.ao.browser present, so
@@ -137,6 +164,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 					onNavState: unsubscribe,
 					onTabsState: unsubscribe,
 					onAgentActivity: unsubscribe,
+					onDevToolsState: unsubscribe,
 				},
 				notifications: {
 					show: async () => undefined,
@@ -182,6 +210,19 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 				},
 			} satisfies AoBridge;
 			(window as unknown as { ao: unknown }).ao = ao;
+			(
+				window as unknown as {
+					__aoFakeBridge: {
+						emitNewShellTerminalShortcut: () => void;
+						hasNewShellTerminalShortcutListener: () => boolean;
+					};
+				}
+			).__aoFakeBridge = {
+				emitNewShellTerminalShortcut: () => {
+					for (const listener of newShellTerminalListeners) listener();
+				},
+				hasNewShellTerminalShortcutListener: () => newShellTerminalListeners.size > 0,
+			};
 		},
 		{ version, daemonState, daemonPort },
 	);
@@ -213,6 +254,7 @@ export async function installFakeBridge(page: Page, opts: FakeBridgeOptions = {}
 export type FakeWorker = {
 	id: string;
 	title: string;
+	mode?: "chat" | "tui";
 	provider?: string;
 	branch?: string;
 	status?: string;
@@ -287,6 +329,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				title: w.title,
 				provider: w.provider ?? "codex",
 				kind: "worker",
+				mode: w.mode ?? "tui",
 				branch: w.branch ?? `session/${w.id}`,
 				status: w.status ?? "working",
 				createdAt: nowIso,
@@ -510,13 +553,13 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 				},
 				telemetry: { getBootstrap: async () => null },
 				browser: {
+					nativeCompositionEnabled: true,
 					ensure: async (sessionId: string) => navState(`preview:${sessionId}`),
 					setBounds: () => undefined,
+					setOverlayOpen: () => undefined,
 					navigate: async ({ viewId, url }: { viewId: string; url: string }) =>
 						state.browserError ? navState(viewId, "", state.browserError) : navState(viewId, url),
 					clear: async (viewId: string) => navState(viewId),
-					capture: async () => "",
-					requestMirror: async () => false,
 					goBack: async (viewId: string) => navState(viewId),
 					goForward: async (viewId: string) => navState(viewId),
 					reload: async (viewId: string) => navState(viewId),
@@ -536,6 +579,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 						activeTabId: "t1",
 						tabs: [{ id: "t1", url: "", title: "", active: true }],
 					}),
+					devtools: async (input: { viewId: string }) => ({ viewId: input.viewId, open: false, activeTabId: "" }),
 					destroy: () => undefined,
 					// Annotation contract (mirrors src/preload.ts): useBrowserView subscribes
 					// to these whenever SessionView mounts with window.ao.browser present, so
@@ -546,6 +590,7 @@ export async function installFakeAgent(page: Page, opts: FakeAgentOptions = {}):
 					onNavState: unsubscribe,
 					onTabsState: unsubscribe,
 					onAgentActivity: unsubscribe,
+					onDevToolsState: unsubscribe,
 				},
 				notifications: {
 					show: async () => undefined,

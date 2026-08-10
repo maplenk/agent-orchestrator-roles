@@ -7,10 +7,6 @@ import (
 	"strings"
 )
 
-// errForkMigrationHistoryAmbiguous stops startup before goose can silently
-// skip an upstream migration or replace a genuine upstream ledger row.
-var errForkMigrationHistoryAmbiguous = errors.New("ambiguous fork migration history")
-
 // This fork's migrations live at 9000+, deliberately far above upstream's
 // counter. They used to sit at 0053–0060, in the sequence upstream was still
 // filling, and upstream duly shipped its own 0053 (Muse harness) into the same
@@ -56,16 +52,7 @@ type forkMigrationOnEntry struct {
 
 type forkHistorySnapshot struct {
 	migrations []forkMigrationOnEntry
-	museEffect bool
 }
-
-type forkHistoryDisposition uint8
-
-const (
-	forkHistoryPairwise forkHistoryDisposition = iota
-	forkHistoryPreserveLoneMuse
-	forkHistoryCleanupCompleteStaleBlock
-)
 
 func forkMigrations() []forkMigration {
 	return []forkMigration{
@@ -82,8 +69,9 @@ func forkMigrations() []forkMigration {
 	}
 }
 
-// repairForkMigrationVersions rewrites this fork's legacy 53–60 ledger entries
-// to their 9000-series equivalents. It runs BEFORE goose, in one transaction:
+// repairForkMigrationVersions records this fork's historical 42–49 or 53–60
+// ledger entries under their 9000-series equivalents. It runs BEFORE goose, in
+// one transaction:
 // a half-rewritten ledger is worse than either end state, because the next boot
 // would see a mixture and could both re-run an applied migration and skip an
 // unapplied one.
@@ -113,64 +101,49 @@ func repairForkMigrationVersions(db *sql.DB) error {
 	if err != nil {
 		return fmt.Errorf("fork migration repair: snapshot: %w", err)
 	}
-	disposition, err := classifyForkMigrationHistory(snapshot)
-	if err != nil {
-		return fmt.Errorf("fork migration repair: %w", err)
-	}
-
-	for i, entry := range snapshot.migrations {
+	for _, entry := range snapshot.migrations {
 		m := entry.migration
-		// The fork first shipped these migrations at 0042-0049, before moving
-		// them to 0053-0060. Real databases from that first range still carry the
-		// physical role schema but no 9000 entries. Upstream has since reclaimed
-		// 42-49, so preserve those ledger rows and only add the 9000 identity when
-		// the fork-specific physical fingerprint proves the migration ran.
-		newRecorded := entry.newRecorded
-		if !newRecorded {
-			if entry.firstRecorded && entry.effectRecorded {
-				if _, err := tx.Exec(
-					`INSERT INTO goose_db_version (version_id, is_applied, tstamp)
-					 SELECT ?, 1, tstamp FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1`,
-					m.newVersion, m.firstVersion,
-				); err != nil {
-					return fmt.Errorf("fork migration repair: record %d: %w", m.newVersion, err)
-				}
-				newRecorded = true
-			}
-		}
-
-		// Already repaired on entry. This is what makes repeat passes
-		// idempotent: once 9000 is recorded, a later version 53 row is
-		// upstream's Muse migration and must be left alone even though the
-		// fork's fingerprint is still (correctly) present. When this pass just
-		// recorded 9000 from the first 42-49 range, keep going: the same database
-		// may still carry stale 53-60 fork rows that must be freed.
+		// A recorded 9000-series identity is conclusive. Any same-number row in
+		// upstream's 53-60 range belongs to upstream and must survive every later
+		// boot, even though the fork's physical fingerprint remains present.
 		if entry.newRecorded {
 			continue
 		}
-		if !entry.oldRecorded {
-			continue
-		}
 		if !entry.effectRecorded {
-			// The version is recorded but this fork's change is not physically
-			// there, so the number belongs to somebody else's migration. Leave
-			// it: goose will apply the 9000-series file normally.
+			// Neither historical identity is sufficient without the physical
+			// effect. Let goose apply the 9000-series migration normally.
 			continue
 		}
-		if disposition == forkHistoryPreserveLoneMuse && i == 0 {
-			// The full original 42-49 fork block and all eight physical effects
-			// prove where 9000-9007 came from. A lone 53 plus the widened Muse
-			// constraint is upstream's row, not the abandoned fork identity.
-			continue
-		}
-		if !newRecorded {
+
+		// The fork first shipped these migrations at 0042-0049, before moving
+		// them to 0053-0060. Real databases from that first range still carry the
+		// physical role schema but no 9000 entries. Upstream has since reclaimed
+		// 42-49, so preserve those ledger rows and add the 9000 identity. Their
+		// presence is also provenance: a simultaneously recorded 53-60 row can be
+		// a genuine upstream migration, and must never be deleted or reclassified.
+		if entry.firstRecorded {
 			if _, err := tx.Exec(
 				`INSERT INTO goose_db_version (version_id, is_applied, tstamp)
 				 SELECT ?, 1, tstamp FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1`,
-				m.newVersion, m.oldVersion,
+				m.newVersion, m.firstVersion,
 			); err != nil {
 				return fmt.Errorf("fork migration repair: record %d: %w", m.newVersion, err)
 			}
+			continue
+		}
+
+		if !entry.oldRecorded {
+			continue
+		}
+		// With no original 42-49 provenance, the matching physical effect and
+		// applied 53-60 identity are the abandoned second fork range. Move that
+		// identity so goose is free to apply upstream's migration at the number.
+		if _, err := tx.Exec(
+			`INSERT INTO goose_db_version (version_id, is_applied, tstamp)
+			 SELECT ?, 1, tstamp FROM goose_db_version WHERE version_id = ? ORDER BY id DESC LIMIT 1`,
+			m.newVersion, m.oldVersion,
+		); err != nil {
+			return fmt.Errorf("fork migration repair: record %d: %w", m.newVersion, err)
 		}
 		if _, err := tx.Exec(`DELETE FROM goose_db_version WHERE version_id = ?`, m.oldVersion); err != nil {
 			return fmt.Errorf("fork migration repair: clear %d: %w", m.oldVersion, err)
@@ -210,80 +183,7 @@ func snapshotForkMigrationHistory(tx *sql.Tx) (forkHistorySnapshot, error) {
 			effectRecorded: effectRecorded,
 		})
 	}
-	museEffect, err := tableSQLContainsTx("sessions", "'muse'")(tx)
-	if err != nil {
-		return forkHistorySnapshot{}, fmt.Errorf("inspect Muse physical effect: %w", err)
-	}
-	snapshot.museEffect = museEffect
 	return snapshot, nil
-}
-
-func classifyForkMigrationHistory(snapshot forkHistorySnapshot) (forkHistoryDisposition, error) {
-	if len(snapshot.migrations) != len(forkMigrations()) {
-		return forkHistoryPairwise, fmt.Errorf("%w: incomplete fork history snapshot", errForkMigrationHistoryAmbiguous)
-	}
-
-	allOriginalRecorded := true
-	allEffectsRecorded := true
-	var oldMask, newMask, unprotectedOldMask, unprotectedAppliedOldMask uint8
-	for i, entry := range snapshot.migrations {
-		bit := uint8(1 << i)
-		allOriginalRecorded = allOriginalRecorded && entry.firstRecorded
-		allEffectsRecorded = allEffectsRecorded && entry.effectRecorded
-		if entry.oldRecorded {
-			oldMask |= bit
-			if !entry.newRecorded {
-				unprotectedOldMask |= bit
-				if entry.effectRecorded {
-					unprotectedAppliedOldMask |= bit
-				}
-			}
-		}
-		if entry.newRecorded {
-			newMask |= bit
-		}
-	}
-	if !allOriginalRecorded {
-		return forkHistoryPairwise, nil
-	}
-	if unprotectedAppliedOldMask != 0 && !allEffectsRecorded {
-		return forkHistoryPairwise, fmt.Errorf(
-			"%w: complete original block with physically applied unprotected 53-60 history but incomplete fork schema (old mask %#02x, new mask %#02x, applied old mask %#02x)",
-			errForkMigrationHistoryAmbiguous, oldMask, newMask, unprotectedAppliedOldMask,
-		)
-	}
-	if !allEffectsRecorded {
-		// A burned upstream ledger may record 42-53 without any fork effects. In
-		// that shape the pairwise loop cannot delete an old row; later schema
-		// reconciliation repairs the skipped upstream physical effect.
-		return forkHistoryPairwise, nil
-	}
-
-	switch unprotectedOldMask {
-	case 0:
-		// Original-only and already-repaired histories are both safe. Any old
-		// row with its corresponding 9000 identity already present belongs to
-		// upstream and remains protected by the pairwise loop.
-		return forkHistoryPairwise, nil
-	case 1:
-		if snapshot.museEffect {
-			return forkHistoryPreserveLoneMuse, nil
-		}
-		return forkHistoryPairwise, fmt.Errorf(
-			"%w: complete original block with lone unprotected 53 but no Muse schema effect (old mask %#02x, new mask %#02x)",
-			errForkMigrationHistoryAmbiguous, oldMask, newMask,
-		)
-	case 0xff:
-		// The complete abandoned second block wins even if the schema also
-		// contains Muse text: it is the only population whose 53-60 identities
-		// are known to be stale and must all be freed for upstream.
-		return forkHistoryCleanupCompleteStaleBlock, nil
-	default:
-		return forkHistoryPairwise, fmt.Errorf(
-			"%w: complete original block with partial unprotected 53-60 history (old mask %#02x, new mask %#02x)",
-			errForkMigrationHistoryAmbiguous, oldMask, newMask,
-		)
-	}
 }
 
 func hasGooseTable(db *sql.DB) (bool, error) {

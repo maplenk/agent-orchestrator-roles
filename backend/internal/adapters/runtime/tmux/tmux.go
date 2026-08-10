@@ -304,31 +304,12 @@ func New(opts Options) *Runtime {
 }
 
 // Create starts a new tmux session in the workspace, running the agent's
-// launch command with a keep-alive shell, and returns a handle to it.
+// launch command with the configured post-exit sink, and returns a handle.
 func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
-	id, err := tmuxSessionName(cfg.SessionID)
+	id, args, launchCmd, err := r.preflightCreate(cfg)
 	if err != nil {
 		return ports.RuntimeHandle{}, err
 	}
-	if cfg.WorkspacePath == "" {
-		return ports.RuntimeHandle{}, errors.New("tmux runtime: workspace path is required")
-	}
-	if len(cfg.Argv) == 0 {
-		return ports.RuntimeHandle{}, errors.New("tmux runtime: launch command is required")
-	}
-	if err := validateEnvKeys(cfg.Env); err != nil {
-		return ports.RuntimeHandle{}, err
-	}
-
-	launchCmd := buildLaunchCommand(cfg)
-	// Refuse before tmux is invoked at all: tmux answers an oversized command
-	// line with a bare exit 1, so classifying after the fact gives the caller a
-	// worse error than measuring what we are about to send (see
-	// checkLaunchCommandSize).
-	if err := checkLaunchCommandSize(launchCmd); err != nil {
-		return ports.RuntimeHandle{}, err
-	}
-	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
 	if _, err := r.run(ctx, args...); err != nil {
 		// tmux versions differ in where they enforce the cap and what they print,
 		// so the preflight above is a bound, not a guarantee. Keep the typed
@@ -392,29 +373,15 @@ func (r *Runtime) Create(ctx context.Context, cfg ports.RuntimeConfig) (ports.Ru
 // session. This is used to resume an exited agent without discarding terminal
 // history or forcing attached clients onto a new handle.
 func (r *Runtime) Restart(ctx context.Context, handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (ports.RuntimeHandle, error) {
-	id, err := handleID(handle)
+	id, args, launchCmd, err := r.preflightRestart(handle, cfg)
 	if err != nil {
 		return ports.RuntimeHandle{}, err
 	}
-	expectedID, err := tmuxSessionName(cfg.SessionID)
-	if err != nil {
-		return ports.RuntimeHandle{}, err
-	}
-	if expectedID != id {
-		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: restart handle %s does not match session %s", id, cfg.SessionID)
-	}
-	if cfg.WorkspacePath == "" {
-		return ports.RuntimeHandle{}, errors.New("tmux runtime: workspace path is required")
-	}
-	if len(cfg.Argv) == 0 {
-		return ports.RuntimeHandle{}, errors.New("tmux runtime: launch command is required")
-	}
-	if err := validateEnvKeys(cfg.Env); err != nil {
-		return ports.RuntimeHandle{}, err
-	}
-
-	launchCmd := buildLaunchCommand(cfg)
-	if _, err := r.run(ctx, respawnPaneArgs(id, cfg.WorkspacePath, r.shell, launchCmd)...); err != nil {
+	if _, err := r.run(ctx, args...); err != nil {
+		if isCommandTooLong(err) {
+			return ports.RuntimeHandle{}, fmt.Errorf("%w: tmux rejected the %d-byte launch command for session %s",
+				ports.ErrRuntimeLaunchCommandTooLong, len(launchCmd), id)
+		}
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: restart session %s: %w", id, err)
 	}
 	alive, err := r.IsAlive(ctx, handle)
@@ -425,6 +392,72 @@ func (r *Runtime) Restart(ctx context.Context, handle ports.RuntimeHandle, cfg p
 		return ports.RuntimeHandle{}, fmt.Errorf("tmux runtime: session %s exited during restart", id)
 	}
 	return handle, nil
+}
+
+// PreflightCreate validates cfg and proves that the exact tmux new-session
+// command fits in tmux's MSG_COMMAND payload. It performs no tmux invocation
+// and has no filesystem or process side effects, so callers can run it before
+// an irreversible lifecycle boundary such as stopping a switch source.
+func (r *Runtime) PreflightCreate(cfg ports.RuntimeConfig) error {
+	_, _, _, err := r.preflightCreate(cfg)
+	return err
+}
+
+func (r *Runtime) preflightCreate(cfg ports.RuntimeConfig) (string, []string, string, error) {
+	id, err := tmuxSessionName(cfg.SessionID)
+	if err != nil {
+		return "", nil, "", err
+	}
+	if err := validateLaunchConfig(cfg); err != nil {
+		return "", nil, "", err
+	}
+	launchCmd := buildLaunchCommand(cfg)
+	args := newSessionArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
+	if err := checkTmuxCommandSize(args, len(launchCmd)); err != nil {
+		return "", nil, "", err
+	}
+	return id, args, launchCmd, nil
+}
+
+// PreflightRestart is the respawn-pane counterpart to PreflightCreate. It
+// measures the exact restart argv rather than applying a guessed allowance
+// based on new-session, and it performs no runtime I/O.
+func (r *Runtime) PreflightRestart(handle ports.RuntimeHandle, cfg ports.RuntimeConfig) error {
+	_, _, _, err := r.preflightRestart(handle, cfg)
+	return err
+}
+
+func (r *Runtime) preflightRestart(handle ports.RuntimeHandle, cfg ports.RuntimeConfig) (string, []string, string, error) {
+	id, err := handleID(handle)
+	if err != nil {
+		return "", nil, "", err
+	}
+	expectedID, err := tmuxSessionName(cfg.SessionID)
+	if err != nil {
+		return "", nil, "", err
+	}
+	if expectedID != id {
+		return "", nil, "", fmt.Errorf("tmux runtime: restart handle %s does not match session %s", id, cfg.SessionID)
+	}
+	if err := validateLaunchConfig(cfg); err != nil {
+		return "", nil, "", err
+	}
+	launchCmd := buildLaunchCommand(cfg)
+	args := respawnPaneArgs(id, cfg.WorkspacePath, r.shell, launchCmd)
+	if err := checkTmuxCommandSize(args, len(launchCmd)); err != nil {
+		return "", nil, "", err
+	}
+	return id, args, launchCmd, nil
+}
+
+func validateLaunchConfig(cfg ports.RuntimeConfig) error {
+	if cfg.WorkspacePath == "" {
+		return errors.New("tmux runtime: workspace path is required")
+	}
+	if len(cfg.Argv) == 0 {
+		return errors.New("tmux runtime: launch command is required")
+	}
+	return validateEnvKeys(cfg.Env)
 }
 
 // paneCwdVerifyAttempts and paneCwdVerifyRetryDelay bound how long Create
@@ -578,28 +611,51 @@ func (r *Runtime) IsAlive(ctx context.Context, handle ports.RuntimeHandle) (bool
 // interactive shell behind, a child launched from that shell is treated as a
 // manually resumed workload. Command failures remain inconclusive.
 func (r *Runtime) IsSupervisedProcessAlive(ctx context.Context, handle ports.RuntimeHandle, ref ports.SupervisedProcessRef) (bool, error) {
-	id, err := handleID(handle)
+	entries, panePID, err := r.supervisedProcessTree(ctx, handle)
 	if err != nil {
 		return false, err
 	}
+	return containsManagedWorkload(entries, panePID, string(ref.SessionID), ref.LaunchID), nil
+}
+
+// IsExactSupervisedProcessAlive reports only the AO supervisor matching ref
+// while that supervisor still owns a live managed child. It deliberately
+// excludes both the manual-child fallback used by the ordinary reaper probe
+// and a supervisor that is merely waiting to durably report its child's exit:
+// neither is proof that an agent can safely receive a continuation.
+func (r *Runtime) IsExactSupervisedProcessAlive(ctx context.Context, handle ports.RuntimeHandle, ref ports.SupervisedProcessRef) (bool, error) {
+	if ref.SessionID == "" || strings.TrimSpace(ref.LaunchID) == "" {
+		return false, errors.New("tmux runtime: exact supervisor session and launch are required")
+	}
+	entries, panePID, err := r.supervisedProcessTree(ctx, handle)
+	if err != nil {
+		return false, err
+	}
+	return containsExactSupervisedWorkload(entries, panePID, string(ref.SessionID), ref.LaunchID), nil
+}
+
+func (r *Runtime) supervisedProcessTree(ctx context.Context, handle ports.RuntimeHandle) ([]processEntry, int, error) {
+	id, err := handleID(handle)
+	if err != nil {
+		return nil, 0, err
+	}
 	paneOut, err := r.run(ctx, panePIDArgs(id)...)
 	if err != nil {
-		return false, fmt.Errorf("tmux runtime: inspect pane pid %s: %w", id, err)
+		return nil, 0, fmt.Errorf("tmux runtime: inspect pane pid %s: %w", id, err)
 	}
 	panePID, err := strconv.Atoi(strings.TrimSpace(string(paneOut)))
 	if err != nil || panePID <= 0 {
-		return false, fmt.Errorf("tmux runtime: invalid pane pid %q", strings.TrimSpace(string(paneOut)))
+		return nil, 0, fmt.Errorf("tmux runtime: invalid pane pid %q", strings.TrimSpace(string(paneOut)))
 	}
-
 	processOut, err := r.runCommand(ctx, "ps", "-ww", "-axo", "pid=,ppid=,args=")
 	if err != nil {
-		return false, fmt.Errorf("tmux runtime: inspect process tree %s: %w", id, err)
+		return nil, 0, fmt.Errorf("tmux runtime: inspect process tree %s: %w", id, err)
 	}
 	entries, err := parseProcessTable(string(processOut))
 	if err != nil {
-		return false, fmt.Errorf("tmux runtime: parse process tree %s: %w", id, err)
+		return nil, 0, fmt.Errorf("tmux runtime: parse process tree %s: %w", id, err)
 	}
-	return containsManagedWorkload(entries, panePID, string(ref.SessionID), ref.LaunchID), nil
+	return entries, panePID, nil
 }
 
 // SendMessage sends literal text to the session (chunked via send-keys -l) then
@@ -679,6 +735,20 @@ func (r *Runtime) Interrupt(ctx context.Context, handle ports.RuntimeHandle) err
 	return nil
 }
 
+// SendInput sends raw terminal input without appending Enter. It is intended
+// for TUI keybindings such as Escape rather than prompt text.
+func (r *Runtime) SendInput(ctx context.Context, handle ports.RuntimeHandle, input string) error {
+	id, err := handleID(handle)
+	if err != nil {
+		return err
+	}
+	args := sendKeysLiteralArgs(id, input)
+	if _, err := r.run(ctx, args...); err != nil {
+		return fmt.Errorf("tmux runtime: send input %s: %w", id, err)
+	}
+	return nil
+}
+
 // GetOutput returns the last `lines` lines of the session pane's captured
 // output.
 func (r *Runtime) GetOutput(ctx context.Context, handle ports.RuntimeHandle, lines int) (string, error) {
@@ -692,6 +762,22 @@ func (r *Runtime) GetOutput(ctx context.Context, handle ports.RuntimeHandle, lin
 	out, err := r.run(ctx, capturePaneArgs(id, lines)...)
 	if err != nil {
 		return "", fmt.Errorf("tmux runtime: capture output %s: %w", id, err)
+	}
+	return tailLines(trimTrailingBlankLines(string(out)), lines), nil
+}
+
+// GetStyledOutput is GetOutput with tmux's -e flag so SGR styling is retained.
+func (r *Runtime) GetStyledOutput(ctx context.Context, handle ports.RuntimeHandle, lines int) (string, error) {
+	id, err := handleID(handle)
+	if err != nil {
+		return "", err
+	}
+	if lines <= 0 {
+		return "", errors.New("tmux runtime: lines must be positive")
+	}
+	out, err := r.run(ctx, capturePaneStyledArgs(id, lines)...)
+	if err != nil {
+		return "", fmt.Errorf("tmux runtime: capture styled output %s: %w", id, err)
 	}
 	return tailLines(trimTrailingBlankLines(string(out)), lines), nil
 }
@@ -875,10 +961,21 @@ func containsManagedWorkload(entries []processEntry, rootPID int, sessionID, lau
 	return hasChild && !hasSupervisor
 }
 
-func containsSupervisor(entries []processEntry, rootPID int, sessionID, launchID string) bool {
+func containsExactSupervisedWorkload(entries []processEntry, rootPID int, sessionID, launchID string) bool {
 	descendants := descendantPIDs(entries, rootPID)
+	supervisorPID := 0
 	for _, entry := range entries {
 		if entry.pid != rootPID && descendants[entry.pid] && isSupervisorCommand(entry.command, sessionID, launchID) {
+			supervisorPID = entry.pid
+			break
+		}
+	}
+	if supervisorPID == 0 {
+		return false
+	}
+	workloadDescendants := descendantPIDs(entries, supervisorPID)
+	for _, entry := range entries {
+		if entry.pid != supervisorPID && workloadDescendants[entry.pid] {
 			return true
 		}
 	}
@@ -1117,8 +1214,10 @@ func shellQuote(s string) string {
 }
 
 // buildLaunchCommand builds the shell command string passed to `sh -c`. It
-// exports env vars, then runs argv, then execs a keep-alive interactive shell
-// so the tmux session survives the agent exiting.
+// exports env vars, runs argv, then keeps the tmux session alive. Supervised
+// launches park on a non-interpreting stdin sink after exit so bytes racing a
+// process exit can never become shell commands; legacy/unsupervised launches
+// retain the interactive-shell fallback used by manual recovery.
 //
 // PATH from cfg.Env is exported last, after all other keys, so an explicit
 // override takes effect.
@@ -1164,37 +1263,48 @@ func buildLaunchCommand(cfg ports.RuntimeConfig) string {
 		parts[i] = shellQuote(a)
 	}
 	b.WriteString(strings.Join(parts, " "))
-	// Keep the tmux session alive after the agent exits so the operator can
-	// inspect the terminal. The shell variable expansion picks up $SHELL from
-	// the process env if set, otherwise falls back to /bin/sh.
-	b.WriteString(`; exec "${SHELL:-/bin/sh}" -i`)
+	if cfg.Env["AO_SUPERVISED_PROCESS"] == "1" {
+		// cat consumes and discards any input that arrived while the supervised
+		// child was exiting. Runtime Restart/Destroy replaces or kills the pane.
+		b.WriteString(`; exec cat >/dev/null`)
+	} else {
+		// Keep the tmux session alive after an unsupervised agent exits so the
+		// operator can inspect it and use the historical manual-recovery shell.
+		b.WriteString(`; exec "${SHELL:-/bin/sh}" -i`)
+	}
 	return b.String()
 }
 
-// tmuxMaxCommandBytes is tmux's own MAX_IMSGSIZE: the client hands the server
-// its whole command line in a single imsg, and anything larger is rejected
-// before any session exists. launchCommandArgvAllowance reserves room for the
-// rest of the `new-session` argv that travels in the same message — the session
-// name, the geometry flags, the workspace path and the shell path — so the
-// budget below is what the launch command word itself may occupy.
+// tmuxMaxCommandBytes is tmux's MAX_IMSGSIZE. The wire message reserves the
+// 16-byte imsg header and four bytes for struct msg_command's argc field; the
+// remaining payload is the exact argv encoding that client.c sends: every
+// argument plus its terminating NUL. tmux's client-side "command too long"
+// check omits the imsg header, but imsg_create enforces the complete wire size.
 const (
-	tmuxMaxCommandBytes        = 16384
-	launchCommandArgvAllowance = 1024
+	tmuxMaxCommandBytes     = 16384
+	tmuxIMSGHeaderBytes     = 16
+	tmuxCommandHeaderBytes  = 4
+	tmuxMaxCommandArgvBytes = tmuxMaxCommandBytes - tmuxIMSGHeaderBytes - tmuxCommandHeaderBytes
 )
 
-// checkLaunchCommandSize refuses a launch command that cannot survive the trip
-// to the tmux server. The whole composed command — including a harness that
-// inlines its system prompt into argv, which for this fork means the role
-// template — becomes one shell-quoted word of `new-session`, so a large role
-// prompt is what pushes a spawn over the cap. tmux reports that as a bare exit
-// 1, so measuring first is the only way the caller learns the actual size.
-func checkLaunchCommandSize(launchCmd string) error {
-	allowed := tmuxMaxCommandBytes - launchCommandArgvAllowance
-	if len(launchCmd) <= allowed {
+func encodedTmuxCommandSize(args []string) int {
+	encoded := 0
+	for _, arg := range args {
+		encoded += len(arg) + 1
+	}
+	return encoded
+}
+
+// checkTmuxCommandSize refuses an exact command argv that tmux cannot carry to
+// its server. This is deliberately pure: lifecycle code can prove launch
+// capacity before stopping or otherwise mutating an existing agent.
+func checkTmuxCommandSize(args []string, launchCommandBytes int) error {
+	encoded := encodedTmuxCommandSize(args)
+	if encoded <= tmuxMaxCommandArgvBytes {
 		return nil
 	}
-	return fmt.Errorf("%w: launch command is %d bytes, limit is %d",
-		ports.ErrRuntimeLaunchCommandTooLong, len(launchCmd), allowed)
+	return fmt.Errorf("%w: encoded tmux command is %d bytes, limit is %d (launch command is %d bytes)",
+		ports.ErrRuntimeLaunchCommandTooLong, encoded, tmuxMaxCommandArgvBytes, launchCommandBytes)
 }
 
 func sameDirectory(a, b string) bool {

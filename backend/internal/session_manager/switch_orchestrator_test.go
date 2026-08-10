@@ -426,6 +426,7 @@ func TestSwitchOrchestrator_LegacyRoleAdoptionRollsBackWithLiveSource(t *testing
 	st.sessions[id] = rec
 	runtime := m.runtime.(*fakeRuntime)
 	runtime.aliveByHandle[rec.Metadata.RuntimeHandleID] = true
+	runtime.destroyLeavesAlive = true
 
 	if _, err := m.SwitchOrchestrator(context.Background(), SwitchRequest{
 		SessionID: id, TargetHarness: domain.HarnessCodex,

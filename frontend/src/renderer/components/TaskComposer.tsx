@@ -1,18 +1,28 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2 } from "lucide-react";
-import { type FormEvent, useCallback, useEffect, useId, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { FileText, Loader2, Paperclip, X } from "lucide-react";
+import {
+	type ClipboardEvent,
+	type DragEvent,
+	type FormEvent,
+	useCallback,
+	useEffect,
+	useId,
+	useRef,
+	useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { Button } from "./ui/button";
-import { Label } from "./ui/label";
+import { cn } from "../lib/utils";
 import { RequiredAgentField } from "./CreateProjectAgentSheet";
 import type { components } from "../../api/schema";
 import { apiClient, apiErrorCode, apiErrorMessage } from "../lib/api-client";
 import { captureRendererEvent } from "../lib/telemetry";
-import { agentsQueryKey, agentsQueryOptions, refreshAgents } from "../hooks/useAgentsQuery";
+import { agentsQueryKey, agentsQueryOptions, refreshAgentsIfStale } from "../hooks/useAgentsQuery";
+import { type FileAttachmentPayload, useFileAttachments } from "../hooks/useFileAttachments";
+import { useSettings } from "../hooks/useSettings";
 import {
 	agentModelsQueryKey,
 	agentModelsQueryOptions,
-	refreshAgentModels,
 	revalidateAgentModels,
 	type AgentModelCatalog,
 } from "../hooks/useAgentModelsQuery";
@@ -21,7 +31,6 @@ import { SettingsOptionMenu } from "./settings/SettingsOptionMenu";
 
 type Project = components["schemas"]["Project"];
 type DelegateAgent = components["schemas"]["DelegateTaskRequest"]["agent"];
-
 type RoleMap = NonNullable<components["schemas"]["ProjectConfig"]["roleMap"]>;
 
 type CreateTaskInput = {
@@ -31,6 +40,7 @@ type CreateTaskInput = {
 	model?: string;
 	roleId?: string;
 	mode?: "tui";
+	attachments?: FileAttachmentPayload[];
 };
 
 const CHAT_PREFLIGHT_CODES = new Set([
@@ -38,11 +48,16 @@ const CHAT_PREFLIGHT_CODES = new Set([
 	"CHAT_DRIVER_UNAVAILABLE",
 	"CHAT_DRIVER_INCOMPATIBLE",
 	"CHAT_AUTH_REQUIRED",
-	// A read-only role cannot run in Chat: read_only_enforced is a property of
-	// the harness's terminal launch, and the Chat controller does not take that
-	// argv. TUI fallback is the offer, and it KEEPS the role.
 	"SESSION_MODE_ROLE_FORBIDDEN",
 ]);
+
+export function delegatableRoles(map: RoleMap | undefined): string[] {
+	if (!map?.roles) return [];
+	const orchestratorRole = map.orchestratorRole ?? "orchestrator";
+	return Object.keys(map.roles)
+		.filter((id) => id !== orchestratorRole)
+		.sort((a, b) => a.localeCompare(b));
+}
 
 class TaskCreateError extends Error {
 	constructor(
@@ -54,28 +69,9 @@ class TaskCreateError extends Error {
 	}
 }
 
-/**
- * Roles a worker may be delegated to, in a stable order.
- *
- * The orchestrator role is excluded: delegation spawns a worker, and a strict
- * map auto-binds the orchestrator role for KindOrchestrator only — offering it
- * here would be offering a target the daemon would refuse.
- */
-export function delegatableRoles(map: RoleMap | undefined): string[] {
-	if (!map?.roles) return [];
-	const orchestratorRole = map.orchestratorRole ?? "orchestrator";
-	return Object.keys(map.roles)
-		.filter((id) => id !== orchestratorRole)
-		.sort((a, b) => a.localeCompare(b));
-}
-
-const newTaskSelectSurfaceClass =
-	"h-control-form w-full flex-1 justify-between rounded-md border border-transparent bg-input/50 px-3 py-2 text-control text-foreground transition-[color,box-shadow,background-color,border-color] hover:text-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30";
-
 export type TaskComposerProps = {
 	projectId?: string;
 	onCreated: (sessionId: string) => void;
-	onCancel?: () => void;
 	onDirtyChange?: (dirty: boolean) => void;
 	onSubmittingChange?: (submitting: boolean) => void;
 	autoFocusTitle?: boolean;
@@ -84,7 +80,6 @@ export type TaskComposerProps = {
 export function TaskComposer({
 	projectId,
 	onCreated,
-	onCancel,
 	onDirtyChange,
 	onSubmittingChange,
 	autoFocusTitle,
@@ -94,6 +89,7 @@ export function TaskComposer({
 	const promptId = useId();
 	const modelId = useId();
 	const agentId = useId();
+	const fileInputRef = useRef<HTMLInputElement>(null);
 	const [prompt, setPrompt] = useState("");
 	const [model, setModel] = useState("");
 	const [mode, setMode] = useState("");
@@ -103,7 +99,17 @@ export function TaskComposer({
 	const [modelTouched, setModelTouched] = useState(false);
 	const [isSubmitting, setIsSubmitting] = useState(false);
 	const [error, setError] = useState<string | undefined>();
+	const [modelWarning, setModelWarning] = useState<string | undefined>();
 	const [canCreateAsTUI, setCanCreateAsTUI] = useState(false);
+	const [isDragging, setIsDragging] = useState(false);
+	const {
+		attachments,
+		error: attachmentError,
+		addFiles,
+		remove: removeAttachment,
+		clear: clearAttachments,
+		toSettledPayload,
+	} = useFileAttachments();
 	const createTask = useCallback(
 		async (input: CreateTaskInput): Promise<string> => {
 			void captureRendererEvent("ao.renderer.task_create_requested", { project_id: input.projectId });
@@ -116,6 +122,7 @@ export function TaskComposer({
 						model: input.model,
 						roleId: input.roleId,
 						...(input.mode ? { mode: input.mode } : {}),
+						...(input.attachments && input.attachments.length > 0 ? { attachments: input.attachments } : {}),
 					},
 				});
 				if (error) {
@@ -149,45 +156,56 @@ export function TaskComposer({
 		},
 	});
 	const agentsQuery = useQuery(agentsQueryOptions);
-	const refreshAgentsMutation = useMutation({
-		mutationFn: refreshAgents,
-		onSuccess: (next) => queryClient.setQueryData(agentsQueryKey, next),
-	});
-	const defaultWorkerAgent = projectQuery.data?.config?.worker?.agent ?? "";
+	const { settings } = useSettings();
+	// Freshen the inventory on open so a just-installed or just-authenticated agent
+	// is present without the user asking for it.
+	useEffect(() => {
+		void refreshAgentsIfStale().then((next) => {
+			if (next) queryClient.setQueryData(agentsQueryKey, next);
+		});
+	}, [queryClient]);
+	// The composer preselects the agent and model a spawn would actually use
+	// instead of parking the controls on a "default" label the user has to
+	// remember. Both resolved values remain directly editable.
+	const projectWorkerAgent = projectQuery.data?.config?.worker?.agent ?? "";
+	const globalDefaultAgent = projectQuery.data?.agent ?? "";
+	const defaultWorkerAgent = projectWorkerAgent || globalDefaultAgent;
 	const selectedAgent = agent || defaultWorkerAgent;
 	const defaultWorkerModel =
 		projectQuery.data?.config?.worker?.agentConfig?.model ?? projectQuery.data?.config?.agentConfig?.model ?? "";
 	const defaultWorkerMode =
 		projectQuery.data?.config?.worker?.agentConfig?.mode ?? projectQuery.data?.config?.agentConfig?.mode ?? "";
-	const defaultModelForSelectedAgent = selectedAgent === defaultWorkerAgent ? defaultWorkerModel : "";
-	const defaultModeForSelectedAgent = selectedAgent === defaultWorkerAgent ? defaultWorkerMode : "";
+	const projectModelForSelectedAgent = selectedAgent === defaultWorkerAgent ? defaultWorkerModel : "";
+	const projectModeForSelectedAgent = selectedAgent === defaultWorkerAgent ? defaultWorkerMode : "";
 	const agentCatalog = agentsQuery.data;
-
-	// Strict delegation is the daemon's rule, read here only to stop offering
-	// inputs it would refuse. The composer never decides that a spawn is legal —
-	// it declines to send a shape already known to be rejected.
 	const roleMap = projectQuery.data?.config?.roleMap;
 	const strictDelegation = roleMap?.strictDelegation === true;
 	const roleOptions = delegatableRoles(roleMap);
-	// Until the config has loaded, strictness is unknown. Submitting a free-form
-	// agent in that window is exactly the request a strict map rejects, so the
-	// composer waits rather than guessing.
-	//
-	// A FAILED read is the same situation wearing different clothes: isPending
-	// goes false and data stays undefined, so `strictDelegation` reads false and
-	// the free-form form would come back — treating "we could not find out" as
-	// "not strict". Unknown has to stay unknown, and the human needs to see why.
 	const configPending = Boolean(projectId) && projectQuery.isPending;
 	const configUnavailable = Boolean(projectId) && projectQuery.isError;
-	const configError =
-		projectQuery.error instanceof Error ? projectQuery.error.message : undefined;
+	const configError = projectQuery.error instanceof Error ? projectQuery.error.message : undefined;
 	const noDelegatableRole = strictDelegation && roleOptions.length === 0;
 	const binding = strictDelegation && role ? roleMap?.roles?.[role] : undefined;
+
+	// Shares the picker's query key, so this is the same fetch, not a second one.
+	const modelCatalogQuery = useQuery(agentModelsQueryOptions(selectedAgent, projectId ?? ""));
+	const catalogDefaultOption = modelCatalogQuery.data?.models?.find((item) => item.isDefault)?.id ?? "";
+	const catalogUsesModes = modelCatalogQuery.data?.selectionMode === "mode";
+	const defaultModelForSelectedAgent =
+		projectModelForSelectedAgent || (catalogUsesModes ? "" : catalogDefaultOption);
+	const defaultModeForSelectedAgent = projectModeForSelectedAgent || (catalogUsesModes ? catalogDefaultOption : "");
+
+	const selectedAgentLabel =
+		agentCatalog?.supported?.find((item) => item.id === selectedAgent)?.label || selectedAgent;
+	const effectiveHarness = strictDelegation ? (binding?.harness ?? "") : selectedAgent;
+	const requiresTuiFallback =
+		effectiveHarness !== "" &&
+		settings?.defaultSessionMode === "chat" &&
+		!settings.chatHarnesses.includes(effectiveHarness);
 
 	useEffect(() => {
 		if (!agentTouched) setAgent(defaultWorkerAgent);
 	}, [agentTouched, defaultWorkerAgent]);
-	// A role id is only meaningful inside one project's map.
 	useEffect(() => setRole(""), [projectId]);
 	useEffect(() => {
 		if (!modelTouched) {
@@ -196,7 +214,7 @@ export function TaskComposer({
 		}
 	}, [defaultModelForSelectedAgent, defaultModeForSelectedAgent, modelTouched]);
 
-	const isDirty = prompt.trim() !== "" || modelTouched;
+	const isDirty = prompt.trim() !== "" || modelTouched || role !== "" || attachments.length > 0;
 	useEffect(() => {
 		onDirtyChange?.(isDirty);
 	}, [isDirty, onDirtyChange]);
@@ -206,24 +224,11 @@ export function TaskComposer({
 		onSubmittingChange?.(isSubmitting);
 	}, [isSubmitting, onSubmittingChange]);
 	useEffect(() => () => onSubmittingChange?.(false), [onSubmittingChange]);
+	useEffect(() => () => clearAttachments(), [clearAttachments]);
 
 	const submitTask = async (interfaceMode?: "tui") => {
 		if (!projectId || isSubmitting) return;
-
-		const cleanPrompt = prompt.trim();
-		const cleanModel = model.trim();
-		const cleanMode = mode.trim();
-		const requestedModel =
-			modelTouched && (cleanModel !== defaultModelForSelectedAgent || cleanMode !== defaultModeForSelectedAgent)
-				? cleanModel || cleanMode || undefined
-				: undefined;
-		if (!cleanPrompt) {
-			setError(t("newTask.taskRequired"));
-			return;
-		}
 		if (configUnavailable) {
-			// The disabled button is an affordance; this is the gate. A form
-			// submitted by Enter, or by a test, must hit the same rule.
 			setError(t("newTask.configUnavailable"));
 			return;
 		}
@@ -232,27 +237,35 @@ export function TaskComposer({
 			return;
 		}
 
+		const cleanModel = model.trim();
+		const cleanMode = mode.trim();
+		const requestedModel =
+			modelTouched && (cleanModel !== defaultModelForSelectedAgent || cleanMode !== defaultModeForSelectedAgent)
+				? cleanModel || cleanMode || undefined
+				: undefined;
+
 		setIsSubmitting(true);
 		setError(undefined);
 		setCanCreateAsTUI(false);
 		try {
-			// Under a strict map the role carries the harness and the model, and
-			// sending either alongside it is HARNESS_OVERRIDE_FORBIDDEN. So they
-			// are not merely hidden in the UI — they are not sent.
-			//
-			// mode rides along in BOTH shapes: a role binds harness, model and
-			// policy, never the interface, so {roleId, mode} is a legal pair and
-			// the TUI fallback must not drop the role to change interface.
+			const attachmentPayloads = await toSettledPayload();
 			const sessionId = await createTask(
 				strictDelegation
-					? { projectId, brief: prompt, roleId: role, mode: interfaceMode }
+					? {
+							projectId,
+							brief: prompt,
+							roleId: role,
+							mode: interfaceMode,
+							attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
+						}
 					: {
 							projectId,
 							brief: prompt,
-							agent: agentTouched && agent ? (agent as CreateTaskInput["agent"]) : undefined,
+							agent: selectedAgent ? (selectedAgent as CreateTaskInput["agent"]) : undefined,
 							model: requestedModel,
 							mode: interfaceMode,
-					  },
+							attachments: attachmentPayloads.length > 0 ? attachmentPayloads : undefined,
+						},
 			);
 			onCreated(sessionId);
 		} catch (err) {
@@ -269,165 +282,238 @@ export function TaskComposer({
 
 	const submit = (event: FormEvent<HTMLFormElement>) => {
 		event.preventDefault();
-		void submitTask();
+		void submitTask(requiresTuiFallback ? "tui" : undefined);
+	};
+
+	const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
+		const files = Array.from(event.clipboardData?.files ?? []);
+		if (files.length === 0) return;
+		event.preventDefault();
+		void addFiles(files);
+	};
+
+	const handleDrop = (event: DragEvent<HTMLFormElement>) => {
+		event.preventDefault();
+		setIsDragging(false);
+		const files = Array.from(event.dataTransfer?.files ?? []);
+		if (files.length > 0) void addFiles(files);
+	};
+
+	const handleDragOver = (event: DragEvent<HTMLFormElement>) => {
+		if (Array.from(event.dataTransfer?.items ?? []).some((item) => item.kind === "file")) {
+			event.preventDefault();
+			setIsDragging(true);
+		}
 	};
 
 	return (
-		<form onSubmit={submit} className="space-y-4 p-(--size-modal-padding)">
-			<div className="space-y-1.5">
-				<div className="flex items-center justify-between">
-					<label className="text-xs font-medium text-muted-foreground" htmlFor={promptId}>
-						{t("newTask.task")}
-					</label>
-				</div>
-				<div className="rounded-md border border-border transition">
-					<textarea
-						id={promptId}
-						autoFocus={autoFocusTitle}
-						className="min-h-textarea-min w-full resize-y rounded-md bg-transparent px-3 py-2 text-control leading-relaxed text-foreground outline-none transition placeholder:text-passive focus-visible:border-accent focus-visible:ring-2 focus-visible:ring-accent-weak"
-						placeholder={t("newTask.taskPlaceholder")}
-						value={prompt}
-						onChange={(event) => setPrompt(event.target.value)}
-						onKeyDown={(event) => {
-							if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing) {
-								event.preventDefault();
-								event.currentTarget.form?.requestSubmit();
-							}
-						}}
-					/>
-				</div>
-				<p className="text-caption text-muted-foreground">{t("newTask.enterHint")}</p>
-			</div>
+		<form
+			onSubmit={submit}
+			className="composer-prompt-surface flex flex-col transition-[background-color,box-shadow]"
+			data-dragging={isDragging || undefined}
+			onDrop={handleDrop}
+			onDragOver={handleDragOver}
+			onDragLeave={(event) => {
+				const nextTarget = event.relatedTarget;
+				if (!(nextTarget instanceof Node) || !event.currentTarget.contains(nextTarget)) setIsDragging(false);
+			}}
+		>
+			{/* The whole card is one composer: the prompt carries the hierarchy and the
+			    launch controls sit in its own bottom padding, without a dialog footer. */}
+			<label className="sr-only" htmlFor={promptId}>
+				{t("newTask.task")}
+			</label>
+			<textarea
+				id={promptId}
+				autoFocus={autoFocusTitle}
+				className="min-h-(--size-composer-prompt-min) w-full resize-none bg-transparent px-4 pb-3 pt-4 text-md leading-relaxed text-foreground outline-none placeholder:text-passive"
+				placeholder={t("newTask.taskPlaceholder")}
+				value={prompt}
+				onChange={(event) => setPrompt(event.target.value)}
+				onPaste={handlePaste}
+				onKeyDown={(event) => {
+					if (event.key === "Enter" && !event.shiftKey && !event.altKey && !event.nativeEvent.isComposing) {
+						event.preventDefault();
+						event.currentTarget.form?.requestSubmit();
+					}
+				}}
+			/>
 
 			{configPending ? (
-				<p className="text-caption text-muted-foreground">{t("newTask.configLoading")}</p>
+				<p className="px-4 pb-2 text-caption text-muted-foreground">{t("newTask.configLoading")}</p>
 			) : configUnavailable ? (
-				<div
-					role="alert"
-					className="space-y-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
-				>
+				<div role="alert" className="mx-3 mb-2 space-y-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
 					<p>{t("newTask.configUnavailable")}</p>
-					{configError ? <p className="font-mono break-all">{configError}</p> : null}
-					<button
-						type="button"
-						className="underline underline-offset-2 hover:no-underline disabled:pointer-events-none disabled:opacity-50"
-						disabled={projectQuery.isFetching}
-						onClick={() => void projectQuery.refetch()}
-					>
+					{configError ? <p className="break-all font-mono">{configError}</p> : null}
+					<button type="button" className="underline underline-offset-2 hover:no-underline" onClick={() => void projectQuery.refetch()}>
 						{t("newTask.configRetry")}
 					</button>
 				</div>
 			) : noDelegatableRole ? (
-				<p className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">
-					{t("newTask.noWorkerRole")}
-				</p>
-			) : strictDelegation ? (
-				<div className="space-y-1.5">
-					<Label className="text-xs font-medium text-muted-foreground">{t("newTask.role")}</Label>
-					<SettingsOptionMenu
-						aria-label={t("newTask.role")}
-						value={role || "__none__"}
-						options={[
-							{ value: "__none__", label: t("newTask.rolePlaceholder") },
-							...roleOptions.map((id) => ({ value: id, label: id })),
-						]}
-						triggerClassName={newTaskSelectSurfaceClass}
-						onChange={(next) => setRole(next === "__none__" ? "" : next)}
-					/>
-					{/* The binding is shown, never edited: it is what the daemon will
-					    launch, and an editable copy of it would be a target the map
-					    could reject. */}
-					<p className="text-caption text-muted-foreground">
-						{binding ? `${binding.harness}${binding.model ? ` · ${binding.model}` : ""}` : t("newTask.roleLocked")}
-					</p>
-				</div>
-			) : (
-				<div className="grid gap-3 sm:grid-cols-[1fr_1fr]">
-					<div className="space-y-1.5">
-						<RequiredAgentField
-							id={agentId}
-							label={t("newTask.agent")}
-							placeholder={t("newTask.projectDefault")}
-							value={agent}
-							authorized={agentCatalog?.authorized}
-							installed={agentCatalog?.installed}
-							supported={agentCatalog?.supported}
-							disabled={agentsQuery.isFetching && agentCatalog === undefined}
-							onChange={(value) => {
-								setAgent(value);
-								setAgentTouched(true);
-								setModelTouched(false);
-							}}
-						/>
-						<button
-							type="button"
-							className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50"
-							disabled={refreshAgentsMutation.isPending}
-							onClick={() => refreshAgentsMutation.mutate()}
+				<p className="mx-3 mb-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-warning">{t("newTask.noWorkerRole")}</p>
+			) : null}
+
+			{attachments.length > 0 && (
+				<ul className="scrollbar-none flex max-h-24 flex-wrap gap-2 overflow-y-auto px-3 pb-2">
+					{attachments.map((attachment) => (
+						<li
+							key={attachment.id}
+							className="flex min-w-0 max-w-48 items-center gap-2 rounded-md bg-surface px-1.5 py-1 text-xs text-foreground"
 						>
-							{refreshAgentsMutation.isPending ? t("newTask.refreshingAgents") : t("newTask.refreshAgents")}
-						</button>
+							{attachment.dataUrl ? (
+								<img src={attachment.dataUrl} alt="" className="size-7 shrink-0 rounded object-cover" />
+							) : (
+								<FileText
+									className="size-7 shrink-0 rounded bg-input/60 p-1.5 text-muted-foreground"
+									aria-hidden="true"
+								/>
+							)}
+							<span className="min-w-0 flex-1 truncate font-medium">{attachment.name}</span>
+							<button
+								type="button"
+								className="grid size-5 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:bg-border hover:text-foreground"
+								aria-label={t("newTask.removeFile", { name: attachment.name })}
+								onClick={() => removeAttachment(attachment.id)}
+							>
+								<X className="size-icon-sm" aria-hidden="true" />
+							</button>
+						</li>
+					))}
+				</ul>
+			)}
+			<input
+				ref={fileInputRef}
+				type="file"
+				multiple
+				className="hidden"
+				onChange={(event) => {
+					if (event.target.files) void addFiles(event.target.files);
+					event.target.value = "";
+				}}
+			/>
+			{attachmentError && (
+				<p className="px-4 pb-2 text-caption text-destructive">{attachmentError}</p>
+			)}
+
+			{(error || modelWarning) && (
+				<div className="px-3 pb-2">
+					{error && (
+						<div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+							<span>{error}</span>
+							{/* Chat preflight failed for this agent: offer the terminal interface
+							    rather than making the user rediscover the task. */}
+							{canCreateAsTUI ? (
+								<Button
+									type="button"
+									variant="outline"
+									size="sm"
+									disabled={isSubmitting}
+									onClick={() => void submitTask("tui")}
+									className="shrink-0"
+								>
+									{t("newTask.createAsTui")}
+								</Button>
+							) : null}
+						</div>
+					)}
+					{!error && modelWarning && <p className="text-caption text-warning">{modelWarning}</p>}
+				</div>
+			)}
+
+			<div className="composer-toolbar">
+				{!configPending && !configUnavailable && !noDelegatableRole ? (
+					<div className="composer-run-controls" role="group" aria-label={t("newTask.runsWith")}>
+						{strictDelegation ? (
+							<div className="composer-toolbar-slot min-w-48">
+								<SettingsOptionMenu
+									aria-label={t("newTask.role")}
+									value={role || "__none__"}
+									options={[
+										{ value: "__none__", label: t("newTask.rolePlaceholder") },
+										...roleOptions.map((id) => ({ value: id, label: id })),
+									]}
+									triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
+									onChange={(next) => setRole(next === "__none__" ? "" : next)}
+								/>
+								<span className="sr-only">
+									{binding
+										? `${binding.harness}${binding.model ? ` · ${binding.model}` : ""}`
+										: t("newTask.roleLocked")}
+								</span>
+							</div>
+						) : (
+							<>
+								<div className="composer-toolbar-slot">
+									<RequiredAgentField
+										id={agentId}
+										variant="chip"
+										label={t("newTask.agent")}
+										placeholder={t("newTask.selectAgent")}
+										value={selectedAgent}
+										authorized={agentCatalog?.authorized}
+										installed={agentCatalog?.installed}
+										supported={agentCatalog?.supported}
+										disabled={agentsQuery.isFetching && agentCatalog === undefined}
+										triggerClassName="composer-toolbar-option w-full justify-between"
+										onChange={(value) => {
+											setAgent(value);
+											setAgentTouched(true);
+											// Never pair a newly selected agent with the previous agent's model.
+											// The new catalog will resolve its own default into this cleared slot.
+											setModel("");
+											setMode("");
+											setModelTouched(false);
+										}}
+									/>
+								</div>
+								<span className="composer-toolbar-divider" aria-hidden="true" />
+								<div className="composer-toolbar-slot">
+									<TaskModelPicker
+										id={modelId}
+										agentId={selectedAgent}
+										agentLabel={selectedAgentLabel}
+										projectId={projectId ?? ""}
+										value={model}
+										mode={mode}
+										onWarningChange={setModelWarning}
+										onModelChange={(value) => {
+											setModel(value);
+											setMode("");
+											setModelTouched(true);
+										}}
+										onModeChange={(value) => {
+											setMode(value);
+											setModel("");
+											setModelTouched(true);
+										}}
+									/>
+								</div>
+							</>
+						)}
 					</div>
-					<div className="space-y-1.5">
-						<Label className="text-xs font-medium text-muted-foreground" htmlFor={modelId}>
-							{t("newTask.model")}
-						</Label>
-						<TaskModelPicker
-							id={modelId}
-							agentId={selectedAgent}
-							projectId={projectId ?? ""}
-							value={model}
-							mode={mode}
-							onModelChange={(value) => {
-								setModel(value);
-								setMode("");
-								setModelTouched(true);
-							}}
-							onModeChange={(value) => {
-								setMode(value);
-								setModel("");
-								setModelTouched(true);
-							}}
-						/>
-					</div>
-				</div>
-			)}
-
-			{error && (
-				<div className="flex items-center justify-between gap-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-					<span>{error}</span>
-					{canCreateAsTUI ? (
-						<Button
-							type="button"
-							variant="outline"
-							size="sm"
-							disabled={isSubmitting}
-							onClick={() => void submitTask("tui")}
-							className="shrink-0"
-						>
-							{t("newTask.createAsTui")}
-						</Button>
-					) : null}
-				</div>
-			)}
-
-			{refreshAgentsMutation.isError && (
-				<div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-					{refreshAgentsMutation.error instanceof Error
-						? refreshAgentsMutation.error.message
-						: t("newTask.refreshFailed")}
-				</div>
-			)}
-
-			<div className="flex items-center justify-end gap-3 pt-1">
-				{onCancel && (
-					<Button type="button" variant="footer" disabled={isSubmitting} onClick={onCancel}>
-						{t("newTask.cancel")}
-					</Button>
-				)}
-				<Button type="submit" variant="footer-primary" disabled={isSubmitting || !projectId || configPending || configUnavailable || noDelegatableRole}>
-					{isSubmitting ? <Loader2 className="size-3.5 animate-spin" aria-hidden="true" /> : null}
+				) : null}
+				<button
+					type="button"
+					className="grid size-(--size-settings-action-height) place-items-center rounded-md text-muted-foreground transition-colors hover:bg-surface hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+					aria-label={t("newTask.addFile")}
+					onClick={() => fileInputRef.current?.click()}
+				>
+					<Paperclip className="size-icon-base" aria-hidden="true" />
+				</button>
+				<Button
+					type="submit"
+					variant="primary"
+					size="none"
+					disabled={isSubmitting || !projectId || configPending || configUnavailable || noDelegatableRole}
+					className="h-(--size-settings-action-height) min-w-(--size-composer-start-button) px-3"
+				>
+					{isSubmitting ? <Loader2 className="size-icon-base animate-spin" aria-hidden="true" /> : null}
 					{isSubmitting ? t("newTask.starting") : t("newTask.start")}
+					{!isSubmitting && (
+						<kbd className="composer-keycap" aria-hidden="true">
+							↵
+						</kbd>
+					)}
 				</Button>
 			</div>
 		</form>
@@ -437,19 +523,23 @@ export function TaskComposer({
 function TaskModelPicker({
 	id,
 	agentId,
+	agentLabel,
 	projectId,
 	value,
 	mode,
 	onModelChange,
 	onModeChange,
+	onWarningChange,
 }: {
 	id: string;
 	agentId: string;
+	agentLabel: string;
 	projectId: string;
 	value: string;
 	mode: string;
 	onModelChange: (value: string) => void;
 	onModeChange: (value: string) => void;
+	onWarningChange: (warning: string | undefined) => void;
 }) {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
@@ -468,16 +558,7 @@ function TaskModelPicker({
 			queryClient.setQueryData(agentModelsQueryKey(agentId, projectId), revalidationQuery.data);
 		}
 	}, [agentId, projectId, queryClient, revalidationQuery.data]);
-	const refreshMutation = useMutation({
-		mutationFn: () => refreshAgentModels(agentId, projectId),
-		onSuccess: (catalog) => queryClient.setQueryData(agentModelsQueryKey(agentId, projectId), catalog),
-	});
 	const warning =
-		(refreshMutation.isError
-			? refreshMutation.error instanceof Error
-				? refreshMutation.error.message
-				: t("settings.models.refreshFailed")
-			: undefined) ??
 		(revalidationQuery.isError
 			? revalidationQuery.error instanceof Error
 				? revalidationQuery.error.message
@@ -485,35 +566,68 @@ function TaskModelPicker({
 			: undefined) ??
 		catalog?.warning ??
 		(query.isError ? (query.error instanceof Error ? query.error.message : t("settings.models.loadFailed")) : undefined);
+	// The composer owns the one place warnings appear, so a picker never grows a
+	// second line and shifts the launch controls while you are typing.
+	useEffect(() => {
+		onWarningChange(warning);
+	}, [onWarningChange, warning]);
+	useEffect(() => () => onWarningChange(undefined), [onWarningChange]);
+
+	// Says what happens with no override, rather than labelling it "Agent default".
+	const noOverrideLabel = agentLabel
+		? t("newTask.letAgentChoose", { agent: agentLabel })
+		: t("settings.models.agentDefault");
+	const catalogLoading = agentId !== "" && query.isFetching && catalog === undefined;
+
+	if (catalogLoading) {
+		return (
+			<span
+				className="composer-chip composer-toolbar-option w-full cursor-not-allowed justify-start opacity-50"
+				role="status"
+				aria-label={t("settings.models.loading")}
+				aria-busy="true"
+			>
+				<Loader2 className="size-icon-sm shrink-0 animate-spin text-settings-muted" aria-hidden="true" />
+				<span className="truncate text-settings-muted">{t("settings.models.loading")}</span>
+			</span>
+		);
+	}
 
 	if (catalog?.selectionMode === "mode") {
 		const options = [
-			{ value: "__default__", label: t("settings.models.agentDefault") },
+			{ value: "__default__", label: noOverrideLabel },
 			...(catalog.models ?? []).map((item) => ({ value: item.id, label: item.label })),
 		];
+		const visibleModeLabel = mode ? (options.find((option) => option.value === mode)?.label ?? mode) : noOverrideLabel;
 		return (
-			<>
-				<div className="flex min-w-0 items-center gap-2">
-					<SettingsOptionMenu
-						aria-label={t("newTask.model")}
-						value={mode || "__default__"}
-						options={options}
-						triggerClassName={newTaskSelectSurfaceClass}
-						onChange={(nextMode) => onModeChange(nextMode === "__default__" ? "" : nextMode)}
-					/>
-				</div>
-				<TaskModelRefreshButton
-					pending={refreshMutation.isPending}
-					disabled={agentId === ""}
-					onClick={() => refreshMutation.mutate()}
-				/>
-				{warning && <p className="text-xs text-warning">{warning}</p>}
-			</>
+			<SettingsOptionMenu
+				aria-label={t("newTask.model")}
+				value={mode || "__default__"}
+				options={options}
+				triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
+				menuAlign="start"
+				renderTrigger={() => (
+					<span className="min-w-0 truncate text-control text-foreground" title={visibleModeLabel}>
+						{visibleModeLabel}
+					</span>
+				)}
+				onChange={(nextMode) => onModeChange(nextMode === "__default__" ? "" : nextMode)}
+			/>
 		);
 	}
 
 	const hasCatalog = catalog?.selectionMode === "catalog" && (catalog.models?.length ?? 0) > 0;
 	const modelIsInCatalog = catalog?.models?.some((item) => item.id === value) ?? false;
+	// Cursor's own "auto" model routes each request to whatever it judges best —
+	// a distinct, explicit choice from leaving the field untouched (which just
+	// omits --model and defers to Cursor's own default, currently also "auto").
+	// Relabel so the two don't read as the same option twice. Other agents'
+	// default-flagged model keeps its real name: for them, explicitly picking
+	// it isn't functionally different from leaving the field untouched, so a
+	// second "Default" entry would just duplicate the no-override option.
+	const displayModels = (catalog?.models ?? []).map((item) =>
+		item.id === "auto" ? { ...item, label: t("settings.models.autoRouteLabel") } : item,
+	);
 	const showCustomInput = hasCatalog && (customAgentId === agentId || (value !== "" && !modelIsInCatalog));
 	const selectCatalogModel = (nextModel: string) => {
 		setCustomAgentId(null);
@@ -524,72 +638,68 @@ function TaskModelPicker({
 		onModelChange(nextModel);
 	};
 
-	return (
-		<>
-			<div className="flex min-w-0 items-center gap-2">
-				{hasCatalog && !showCustomInput ? (
-					<AgentModelCombobox
-						aria-label={t("newTask.model")}
-						value={value}
-						models={catalog.models ?? []}
-						allowCustom={catalog.allowCustom}
-						onChange={selectCatalogModel}
-						onCustom={selectCustomModel}
-						triggerClassName={newTaskSelectSurfaceClass}
-					/>
-				) : (
-					<>
-						<input
-							id={id}
-							className="h-control-form flex min-w-0 flex-1 rounded-md border border-transparent bg-input/50 px-3 py-2 text-control text-foreground outline-none transition-[color,box-shadow,background-color,border-color] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 disabled:cursor-not-allowed disabled:opacity-50"
-							value={value}
-							disabled={agentId === ""}
-							onChange={(event) => onModelChange(event.target.value)}
-							placeholder={query.isFetching ? t("settings.models.loading") : t("newTask.projectDefault")}
-						/>
-						{hasCatalog && (
-							<AgentModelCombobox
-								aria-label={t("settings.models.optionsAria", { label: t("newTask.model") })}
-								value={value}
-								models={catalog.models ?? []}
-								allowCustom={catalog.allowCustom}
-								onChange={selectCatalogModel}
-								onCustom={selectCustomModel}
-								triggerLabel={t("settings.models.browse")}
-								triggerClassName="shrink-0"
-							/>
-						)}
-					</>
-				)}
-			</div>
-			<TaskModelRefreshButton
-				pending={refreshMutation.isPending}
-				disabled={agentId === ""}
-				onClick={() => refreshMutation.mutate()}
+	if (hasCatalog && !showCustomInput) {
+		return (
+			<AgentModelCombobox
+				key={agentId}
+				aria-label={t("newTask.model")}
+				value={value}
+				models={displayModels}
+				allowCustom={catalog.allowCustom}
+				emptyLabel={noOverrideLabel}
+				onChange={selectCatalogModel}
+				onCustom={selectCustomModel}
+				compact
+				recentScope={agentId}
+				triggerClassName="composer-chip composer-toolbar-option w-full justify-between"
+				menuAlign="start"
+				renderTrigger={(label) => {
+					const visibleLabel = value ? label : noOverrideLabel;
+					return (
+						<span className="min-w-0 truncate text-control text-foreground" title={visibleLabel}>
+							{visibleLabel}
+						</span>
+					);
+				}}
 			/>
-			{warning && <p className="text-xs text-warning">{warning}</p>}
-		</>
-	);
-}
+		);
+	}
 
-function TaskModelRefreshButton({
-	pending,
-	disabled,
-	onClick,
-}: {
-	pending: boolean;
-	disabled: boolean;
-	onClick: () => void;
-}) {
-	const { t } = useTranslation();
+	// Free-text agents keep an input inside the same stable model track.
 	return (
-		<button
-			type="button"
-			className="text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:pointer-events-none disabled:opacity-50"
-			disabled={disabled || pending}
-			onClick={onClick}
-		>
-			{pending ? t("newTask.refreshingModels") : t("newTask.refreshModels")}
-		</button>
+		<span className="inline-flex w-full min-w-0 items-center gap-1.5">
+			<input
+				id={id}
+				aria-label={t("newTask.model")}
+				className={cn(
+					"composer-chip composer-toolbar-option min-w-0 flex-1 text-control placeholder:text-passive disabled:cursor-not-allowed disabled:opacity-50",
+					// When no Browse button trails it, this input is the pill's
+					// rightmost element — its own square corner sits inside the
+					// container's rounded curve, not past it, so overflow-hidden on
+					// the container never clips it. Round it to match explicitly.
+					!hasCatalog && "rounded-r-md!",
+				)}
+				value={value}
+				disabled={agentId === ""}
+				onChange={(event) => onModelChange(event.target.value)}
+				placeholder={query.isFetching ? t("settings.models.loading") : noOverrideLabel}
+			/>
+			{hasCatalog && (
+				<AgentModelCombobox
+					key={agentId}
+					aria-label={t("settings.models.optionsAria", { label: t("newTask.model") })}
+					value={value}
+					models={displayModels}
+					allowCustom={catalog.allowCustom}
+					emptyLabel={noOverrideLabel}
+					onChange={selectCatalogModel}
+					onCustom={selectCustomModel}
+					compact
+					recentScope={agentId}
+					triggerLabel={t("settings.models.browse")}
+					triggerClassName="shrink-0"
+				/>
+			)}
+		</span>
 	);
 }

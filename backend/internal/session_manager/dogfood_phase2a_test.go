@@ -389,7 +389,7 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		preAgent := st.sessions[id].Metadata.AgentSessionID
 		preLaunch := st.sessions[id].Metadata.RuntimeLaunchID
 
-		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}, destroyLeavesAlive: true}
 		m := dogfoodManager(st, rt)
 		_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
 		if err == nil {
@@ -424,7 +424,7 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		workerSession(st, id, domain.HarnessClaudeCode, ws, art, sha)
 		st.updateFailAfter = 2
 		st.updateErr = errors.New("disk full")
-		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}}
+		rt := &fakeRuntime{aliveByHandle: map[string]bool{"rt-1": true}, destroyLeavesAlive: true}
 		m := dogfoodManager(st, rt)
 		_, err := m.SwitchWorker(ctx, SwitchRequest{SessionID: id, TargetHarness: domain.HarnessCodex})
 		if !errors.Is(err, ErrSwitchUncertain) {
@@ -453,15 +453,15 @@ func TestDogfood_Phase2AChecklist(t *testing.T) {
 		m := dogfoodManager(st, &fakeRuntime{})
 		for _, key := range []string{string(id), handle} {
 			err := m.AllowTerminalInput(ctx, key)
-			if !errors.Is(err, ErrSwitchInProgress) {
-				t.Fatalf("key=%s err=%v want ErrSwitchInProgress", key, err)
+			if !errors.Is(err, ErrSwitchRecoveryRequired) {
+				t.Fatalf("key=%s err=%v want ErrSwitchRecoveryRequired", key, err)
 			}
 		}
 		// After handle clear, pending source handle still fences.
 		rec := st.sessions[id]
 		rec.Metadata.RuntimeHandleID = ""
 		st.sessions[id] = rec
-		if err := m.AllowTerminalInput(ctx, handle); !errors.Is(err, ErrSwitchInProgress) {
+		if err := m.AllowTerminalInput(ctx, handle); !errors.Is(err, ErrSwitchRecoveryRequired) {
 			t.Fatalf("pending-source-handle fence: %v", err)
 		}
 		if err := m.AllowTerminalInput(ctx, "shell-unrelated"); err != nil {

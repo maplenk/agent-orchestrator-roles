@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useUiStore } from "../stores/ui-store";
@@ -20,7 +21,12 @@ afterEach(() => {
 describe("SettingsDialog project navigation", () => {
 	it("exposes the role-map editor through the project settings sidebar", async () => {
 		useUiStore.setState({ settingsModal: { scope: "project", projectId: "proj-1" } });
-		render(<SettingsDialog />);
+		const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+		render(
+			<QueryClientProvider client={queryClient}>
+				<SettingsDialog />
+			</QueryClientProvider>,
+		);
 
 		const roles = await screen.findByRole("button", { name: "Roles" });
 		await userEvent.click(roles);
