@@ -62,6 +62,8 @@ describe("session presentation", () => {
 		["working", "Working"],
 		["idle", "Idle"],
 		["needs_input", "Input needed"],
+		["completed", "Completed"],
+		["failed", "Failed"],
 		["no_signal", "No signal"],
 		["ci_failed", "CI failed"],
 		["changes_requested", "Changes requested"],
@@ -91,6 +93,7 @@ describe("session presentation", () => {
 		["approved", "merge", "Ready to merge"],
 		["mergeable", "merge", "Ready to merge"],
 		["needs_input", "action", "Needs you"],
+		["failed", "action", "Needs you"],
 		["exited", "action", "Needs you"],
 		["no_signal", "action", "Needs you"],
 		["ci_failed", "action", "Needs you"],
@@ -102,7 +105,8 @@ describe("session presentation", () => {
 		["working", "working", "Working"],
 		["idle", "working", "Working"],
 		["merged", "merge", "Ready to merge"],
-		["terminated", "done", "Terminated"],
+		["completed", "done", "Done"],
+		["terminated", "done", "Done"],
 	] as const)("maps %s to the %s attention zone", (status, zone, label) => {
 		expect(attentionZone(sessionWith({ status }))).toBe(zone);
 		expect(getAttentionZoneView(status)).toMatchObject({ zone, label });

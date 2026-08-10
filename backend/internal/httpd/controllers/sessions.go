@@ -1808,7 +1808,9 @@ func (c *SessionsController) authorizeCallerSwitch(w http.ResponseWriter, r *htt
 }
 
 // authorizeCallerSessionRead allows the operator/LAN and a durable canSpawn
-// session principal to read terminal output only inside its own project.
+// session principal to read terminal output only inside its own project. A
+// narrow compatibility path also lets a legacy unpinned orchestrator read a
+// same-project worker without mutating/adopting a role pin.
 func (c *SessionsController) authorizeCallerSessionRead(w http.ResponseWriter, r *http.Request) bool {
 	if authctx.IsLANAuthenticated(r.Context()) {
 		return true
@@ -1839,9 +1841,15 @@ func (c *SessionsController) authorizeCallerSessionRead(w http.ResponseWriter, r
 		return false
 	}
 	role := callingSession.Metadata.Role
-	if strings.TrimSpace(role.RoleID) == "" || !role.ResolvedPermissions.CanSpawn {
+	legacyOrchestrator := strings.TrimSpace(role.RoleID) == ""
+	if legacyOrchestrator && callingSession.Kind != domain.KindOrchestrator {
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_FORBIDDEN",
-			"Calling session must have a durable role pin with canSpawn=true", nil)
+			"Calling session must have canSpawn=true or be a legacy unpinned orchestrator", nil)
+		return false
+	}
+	if !legacyOrchestrator && !role.ResolvedPermissions.CanSpawn {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_FORBIDDEN",
+			"Calling session role does not allow worker output reads (canSpawn=false)", nil)
 		return false
 	}
 	target, err := c.Svc.Get(r.Context(), sessionID(r))
@@ -1852,6 +1860,11 @@ func (c *SessionsController) authorizeCallerSessionRead(w http.ResponseWriter, r
 	if callingSession.ProjectID != target.ProjectID {
 		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_PROJECT_MISMATCH",
 			"Session callers may read output only for sessions in their own project", nil)
+		return false
+	}
+	if target.Kind != domain.KindWorker {
+		envelope.WriteAPIError(w, r, http.StatusForbidden, "forbidden", "SESSION_READ_FORBIDDEN",
+			"Session callers may read only same-project worker output", nil)
 		return false
 	}
 	return true
@@ -1882,10 +1895,22 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if in.RoleResult != nil {
+		if strings.TrimSpace(in.Event) != "stop" {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_ROLE_RESULT_EVENT", "Role result is accepted only on a Stop hook", nil)
+			return
+		}
+		normalized, err := domain.NormalizeRoleResultReport(*in.RoleResult)
+		if err != nil {
+			envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "INVALID_ROLE_RESULT", err.Error(), nil)
+			return
+		}
+		in.RoleResult = &normalized
+	}
 	agentSessionID := capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.AgentSessionID)))
 	// Usage-only posts carry neither a state nor a session id; they are still
 	// a valid hook payload.
-	if state == "" && agentSessionID == "" && in.Usage == nil {
+	if state == "" && agentSessionID == "" && in.Usage == nil && in.RoleResult == nil {
 		envelope.WriteAPIError(w, r, http.StatusBadRequest, "bad_request", "ACTIVITY_OR_SESSION_ID_REQUIRED", "Activity state or agent session ID is required", nil)
 		return
 	}
@@ -1903,13 +1928,14 @@ func (c *SessionsController) activity(w http.ResponseWriter, r *http.Request) {
 		AgentSessionID:        agentSessionID,
 		LatestUserPrompt:      capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.LatestUserPrompt)), 16<<10),
 		LatestAssistantUpdate: capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.LatestAssistantUpdate)), 16<<10),
+		RoleResult:            in.RoleResult,
 		TranscriptPath:        capActivityText(domain.SanitizeControlChars(strings.TrimSpace(in.TranscriptPath)), 4096),
 		LaunchID:              capActivityMeta(domain.SanitizeControlChars(strings.TrimSpace(in.LaunchID))),
 	}
 	// Guarded on BOTH sides now: a usage-only hook post wires no activity
 	// recorder at all, and a payload carrying neither a state nor a native
 	// session id has no activity signal to apply.
-	if c.Activity != nil && (sig.Valid || sig.AgentSessionID != "") {
+	if c.Activity != nil && (sig.Valid || sig.AgentSessionID != "" || sig.RoleResult != nil) {
 		if err := c.Activity.ApplyActivitySignal(r.Context(), sessionID(r), sig); err != nil {
 			if errors.Is(err, ports.ErrSessionNotFound) {
 				envelope.WriteAPIError(w, r, http.StatusNotFound, "not_found", "SESSION_NOT_FOUND", "Unknown session", nil)

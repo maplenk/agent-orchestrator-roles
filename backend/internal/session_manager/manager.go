@@ -4526,7 +4526,7 @@ func (m *Manager) buildSpawnTexts(ctx context.Context, cfg ports.SpawnConfig, ro
 		return "", "", err
 	}
 	// Use the single pinned role resolution from Spawn — fail closed if missing.
-	systemPrompt, err = composeSystemPromptWithRole(systemPrompt, role)
+	systemPrompt, err = composeSystemPromptWithRole(systemPrompt, role, cfg.Kind)
 	if err != nil {
 		return "", "", err
 	}

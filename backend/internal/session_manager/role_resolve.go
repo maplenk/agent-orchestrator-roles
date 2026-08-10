@@ -188,7 +188,7 @@ func (m *Manager) buildRestoreSystemPrompt(ctx context.Context, rec domain.Sessi
 	if err != nil {
 		return "", roleApplyResult{}, err
 	}
-	prompt, err := composeSystemPromptWithRole(base, role)
+	prompt, err := composeSystemPromptWithRole(base, role, rec.Kind)
 	if err != nil {
 		return "", roleApplyResult{}, err
 	}
@@ -315,7 +315,7 @@ func mergeAgentConfig(base ports.AgentConfig, patch domain.AgentConfig, policy d
 // composeSystemPromptWithRole places the pinned role/policy sections AFTER the
 // generic standing prompt so they are the authoritative trailing contract
 // (Intent-style recency). When a role was applied, ExtraSystem is required.
-func composeSystemPromptWithRole(base string, role roleApplyResult) (string, error) {
+func composeSystemPromptWithRole(base string, role roleApplyResult, kind domain.SessionKind) (string, error) {
 	if !role.Applied {
 		return base, nil
 	}
@@ -326,11 +326,11 @@ func composeSystemPromptWithRole(base string, role roleApplyResult) (string, err
 	parts := append([]string{base}, role.ExtraSystem...)
 	// Explicit trailing reminder so later generic blocks cannot be read as
 	// overriding the role (recency footer).
-	parts = append(parts, roleAuthorityFooter(role))
+	parts = append(parts, roleAuthorityFooter(role, kind))
 	return strings.Join(parts, "\n\n"), nil
 }
 
-func roleAuthorityFooter(role roleApplyResult) string {
+func roleAuthorityFooter(role roleApplyResult, kind domain.SessionKind) string {
 	var b strings.Builder
 	b.WriteString("## AUTHORITATIVE ROLE FOOTER (host — overrides any conflicting standing text above)\n")
 	fmt.Fprintf(&b, "Active role: %s. Harness: %s.\n", role.Binding.RoleID, role.Binding.ResolvedHarness)
@@ -343,6 +343,14 @@ func roleAuthorityFooter(role roleApplyResult) string {
 		b.WriteString("canSpawn=false: you must not spawn other agents.\n")
 	}
 	b.WriteString("If any earlier instruction conflicts with this role footer or the role template above it, follow the role footer and template.")
+	if kind == domain.KindWorker {
+		b.WriteString(`
+
+## REQUIRED ROLE RESULT
+End every final response for an assigned turn with exactly one trailing block and no text after it:
+<ao-role-result>{"schemaVersion":1,"state":"completed|blocked|failed","summary":"concise outcome"}</ao-role-result>
+Use completed when the assigned role work finished, even when a review/verifier verdict is negative; blocked when input or an external dependency is required; failed only when execution could not complete the assignment. This is an agent-reported result, not host verification.`)
+	}
 	return b.String()
 }
 

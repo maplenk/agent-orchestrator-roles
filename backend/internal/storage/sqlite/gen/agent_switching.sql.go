@@ -1000,6 +1000,11 @@ UPDATE sessions SET
     ) THEN sessions.agent_session_id ELSE ?4 END,
     latest_user_prompt = ?5,
     latest_assistant_update = ?6,
+    role_result_state = ?7,
+    role_result_summary = ?8,
+    role_result_reported_at = ?9,
+    role_result_generation_id = ?10,
+    role_result_current = ?11,
     native_transcript_path = CASE WHEN EXISTS (
         SELECT 1 FROM agent_switches AS delivering_switch
         WHERE delivering_switch.session_id = sessions.id
@@ -1007,21 +1012,21 @@ UPDATE sessions SET
           AND delivering_switch.target_harness = sessions.harness
           AND delivering_switch.target_generation_id = sessions.runtime_launch_id
           AND delivering_switch.target_acknowledged_at IS NULL
-    ) THEN sessions.native_transcript_path ELSE ?7 END,
-    updated_at = ?8
-WHERE sessions.id = ?9
+    ) THEN sessions.native_transcript_path ELSE ?12 END,
+    updated_at = ?13
+WHERE sessions.id = ?14
   AND sessions.is_terminated = 0
-  AND sessions.harness = ?10
-  AND sessions.session_mode = ?11
+  AND sessions.harness = ?15
+  AND sessions.session_mode = ?16
   AND (
       (
-          ?11 <> 'chat'
-          AND sessions.runtime_launch_id = ?12
+          ?16 <> 'chat'
+          AND sessions.runtime_launch_id = ?17
       )
       OR
       (
-          ?11 = 'chat'
-          AND sessions.controller_generation = ?13
+          ?16 = 'chat'
+          AND sessions.controller_generation = ?18
       )
   )
   AND NOT EXISTS (
@@ -1042,6 +1047,11 @@ type UpdateSessionFromActivitySignalParams struct {
 	AgentSessionID               string
 	LatestUserPrompt             string
 	LatestAssistantUpdate        string
+	RoleResultState              string
+	RoleResultSummary            string
+	RoleResultReportedAt         sql.NullTime
+	RoleResultGenerationID       string
+	RoleResultCurrent            int64
 	NativeTranscriptPath         string
 	UpdatedAt                    time.Time
 	ID                           domain.SessionID
@@ -1064,6 +1074,11 @@ func (q *Queries) UpdateSessionFromActivitySignal(ctx context.Context, arg Updat
 		arg.AgentSessionID,
 		arg.LatestUserPrompt,
 		arg.LatestAssistantUpdate,
+		arg.RoleResultState,
+		arg.RoleResultSummary,
+		arg.RoleResultReportedAt,
+		arg.RoleResultGenerationID,
+		arg.RoleResultCurrent,
 		arg.NativeTranscriptPath,
 		arg.UpdatedAt,
 		arg.ID,

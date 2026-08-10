@@ -53,6 +53,9 @@ type ActivitySignal struct {
 	// the hook client before submission.
 	LatestUserPrompt      string
 	LatestAssistantUpdate string
+	// RoleResult is a strict final-response claim. Lifecycle accepts it only for
+	// the currently owned generation of a role-pinned worker.
+	RoleResult *domain.RoleResultReport
 	// TranscriptPath is a read-only provider-native transcript reference when
 	// the hook exposes one. AO stores the path, never rewrites the transcript.
 	TranscriptPath string

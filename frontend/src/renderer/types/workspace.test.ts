@@ -61,6 +61,8 @@ describe("toSessionStatus", () => {
 		expect(toSessionStatus("mergeable")).toBe("mergeable");
 		expect(toSessionStatus("no_signal")).toBe("no_signal");
 		expect(toSessionStatus("exited")).toBe("exited");
+		expect(toSessionStatus("completed")).toBe("completed");
+		expect(toSessionStatus("failed")).toBe("failed");
 	});
 
 	it("keeps a backend merged status even when the session is terminated", () => {
@@ -355,6 +357,7 @@ describe("attentionZone", () => {
 		["mergeable", "merge"],
 		["approved", "merge"],
 		["needs_input", "action"],
+		["failed", "action"],
 		["exited", "action"],
 		["no_signal", "action"],
 		["ci_failed", "action"],
@@ -367,6 +370,7 @@ describe("attentionZone", () => {
 		["idle", "working"],
 		["merged", "merge"],
 		["terminated", "done"],
+		["completed", "done"],
 	];
 
 	it.each(cases)("buckets %s into the %s zone", (status, zone) => {

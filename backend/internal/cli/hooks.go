@@ -41,16 +41,17 @@ const (
 // native payload when present. All four are optional: an old daemon decodes
 // the body leniently and simply ignores them.
 type setActivityAPIRequest struct {
-	State                 string             `json:"state,omitempty"`
-	Event                 string             `json:"event,omitempty"`
-	ToolName              string             `json:"toolName,omitempty"`
-	ToolUseID             string             `json:"toolUseId,omitempty"`
-	AgentSessionID        string             `json:"agentSessionId,omitempty"`
-	LatestUserPrompt      string             `json:"latestUserPrompt,omitempty"`
-	LatestAssistantUpdate string             `json:"latestAssistantUpdate,omitempty"`
-	TranscriptPath        string             `json:"transcriptPath,omitempty"`
-	LaunchID              string             `json:"launchId,omitempty"`
-	Usage                 *usageHookMetadata `json:"usage,omitempty"`
+	State                 string                   `json:"state,omitempty"`
+	Event                 string                   `json:"event,omitempty"`
+	ToolName              string                   `json:"toolName,omitempty"`
+	ToolUseID             string                   `json:"toolUseId,omitempty"`
+	AgentSessionID        string                   `json:"agentSessionId,omitempty"`
+	LatestUserPrompt      string                   `json:"latestUserPrompt,omitempty"`
+	LatestAssistantUpdate string                   `json:"latestAssistantUpdate,omitempty"`
+	RoleResult            *domain.RoleResultReport `json:"roleResult,omitempty"`
+	TranscriptPath        string                   `json:"transcriptPath,omitempty"`
+	LaunchID              string                   `json:"launchId,omitempty"`
+	Usage                 *usageHookMetadata       `json:"usage,omitempty"`
 }
 
 type usageHookMetadata struct {
@@ -298,6 +299,16 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 	case domain.HarnessClaudeCode, domain.HarnessCodex:
 		conversation = hookConversationFacts(payload)
 	}
+	var roleResult *domain.RoleResultReport
+	if event == "stop" {
+		// Result extraction is provider-neutral and stores only the bounded
+		// structured summary. Harnesses such as Grok use Claude-compatible Stop
+		// payloads even though AO does not otherwise retain their full response.
+		final := hookConversationFacts(payload).LatestAssistantUpdate
+		if report, ok := domain.ParseRoleResultEnvelope(final); ok {
+			roleResult = &report
+		}
+	}
 	path := "sessions/" + url.PathEscape(sessionID) + "/activity"
 	req := setActivityAPIRequest{
 		Event:                 event,
@@ -306,6 +317,7 @@ func (c *commandContext) runHook(ctx context.Context, agent, event string) error
 		AgentSessionID:        agentSessionID,
 		LatestUserPrompt:      conversation.LatestUserPrompt,
 		LatestAssistantUpdate: conversation.LatestAssistantUpdate,
+		RoleResult:            roleResult,
 		TranscriptPath:        conversation.TranscriptPath,
 		LaunchID:              validLaunchID(os.Getenv("AO_RUNTIME_LAUNCH_ID")),
 		Usage:                 usage,

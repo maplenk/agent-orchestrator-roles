@@ -74,8 +74,9 @@ func TestSessionOutputSessionPrincipalIsProjectScopedAndRequiresCanSpawn(t *test
 		ResolvedPermissions: domain.RoleExecutionPolicy{CanSpawn: true, WorkspaceWrites: true},
 	}
 	svc.sessions["ao-1"] = caller
-	svc.sessions["pelican-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "pelican-worker", ProjectID: "pelican"}}
-	svc.sessions["other-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "other-worker", ProjectID: "other"}}
+	svc.sessions["pelican-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "pelican-worker", ProjectID: "pelican", Kind: domain.KindWorker}}
+	svc.sessions["pelican-orchestrator"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "pelican-orchestrator", ProjectID: "pelican", Kind: domain.KindOrchestrator}}
+	svc.sessions["other-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "other-worker", ProjectID: "other", Kind: domain.KindWorker}}
 	svc.output = "worker report"
 	srv := newSessionTestServer(t, svc)
 	headers := map[string]string{
@@ -93,11 +94,68 @@ func TestSessionOutputSessionPrincipalIsProjectScopedAndRequiresCanSpawn(t *test
 		t.Fatalf("cross-project status=%d env=%v calls=%d", status, env, svc.outputCalls)
 	}
 
+	status, env = doOutputGET(t, srv.URL, "/api/v1/sessions/pelican-orchestrator/output", headers)
+	if status != http.StatusForbidden || env["code"] != "SESSION_READ_FORBIDDEN" || svc.outputCalls != 1 {
+		t.Fatalf("non-worker status=%d env=%v calls=%d", status, env, svc.outputCalls)
+	}
+
 	caller = svc.sessions["ao-1"]
 	caller.Metadata.Role.ResolvedPermissions.CanSpawn = false
 	svc.sessions["ao-1"] = caller
 	status, env = doOutputGET(t, srv.URL, "/api/v1/sessions/pelican-worker/output", headers)
 	if status != http.StatusForbidden || env["code"] != "SESSION_READ_FORBIDDEN" || svc.outputCalls != 1 {
 		t.Fatalf("no-canSpawn status=%d env=%v calls=%d", status, env, svc.outputCalls)
+	}
+}
+
+func TestSessionOutputLegacyUnpinnedOrchestratorReadsOnlySameProjectWorker(t *testing.T) {
+	svc := newFakeSessionService()
+	plain := "legacy-orchestrator-capability"
+	caller := svc.sessions["ao-1"]
+	caller.Kind = domain.KindOrchestrator
+	caller.ProjectID = "pelican"
+	caller.Metadata.SpawnCapabilityHash = spawncred.Hash(plain)
+	caller.Metadata.Role = domain.SessionRoleBinding{}
+	svc.sessions["ao-1"] = caller
+	svc.sessions["pelican-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "pelican-worker", ProjectID: "pelican", Kind: domain.KindWorker}}
+	svc.sessions["pelican-orchestrator"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "pelican-orchestrator", ProjectID: "pelican", Kind: domain.KindOrchestrator}}
+	svc.sessions["other-worker"] = domain.Session{SessionRecord: domain.SessionRecord{ID: "other-worker", ProjectID: "other", Kind: domain.KindWorker}}
+	svc.output = "legacy-readable report"
+	srv := newSessionTestServer(t, svc)
+	headers := map[string]string{
+		"X-AO-Caller-Session-Id": "ao-1",
+		"X-AO-Spawn-Capability":  plain,
+	}
+
+	status, env := doOutputGET(t, srv.URL, "/api/v1/sessions/pelican-worker/output", headers)
+	if status != http.StatusOK || env["output"] != svc.output {
+		t.Fatalf("same-project worker status=%d env=%v", status, env)
+	}
+
+	status, env = doOutputGET(t, srv.URL, "/api/v1/sessions/pelican-orchestrator/output", headers)
+	if status != http.StatusForbidden || env["code"] != "SESSION_READ_FORBIDDEN" {
+		t.Fatalf("orchestrator target status=%d env=%v", status, env)
+	}
+
+	status, env = doOutputGET(t, srv.URL, "/api/v1/sessions/other-worker/output", headers)
+	if status != http.StatusForbidden || env["code"] != "SESSION_READ_PROJECT_MISMATCH" {
+		t.Fatalf("cross-project status=%d env=%v", status, env)
+	}
+
+	caller = svc.sessions["ao-1"]
+	caller.Kind = domain.KindWorker
+	svc.sessions["ao-1"] = caller
+	status, env = doOutputGET(t, srv.URL, "/api/v1/sessions/pelican-worker/output", headers)
+	if status != http.StatusForbidden || env["code"] != "SESSION_READ_FORBIDDEN" {
+		t.Fatalf("roleless worker status=%d env=%v", status, env)
+	}
+
+	caller = svc.sessions["ao-1"]
+	caller.Kind = domain.KindOrchestrator
+	caller.IsTerminated = true
+	svc.sessions["ao-1"] = caller
+	status, env = doOutputGET(t, srv.URL, "/api/v1/sessions/pelican-worker/output", headers)
+	if status != http.StatusForbidden || env["code"] != "SESSION_READ_CAPABILITY_INVALID" {
+		t.Fatalf("terminated caller status=%d env=%v", status, env)
 	}
 }

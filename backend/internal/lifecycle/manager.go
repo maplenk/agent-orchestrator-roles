@@ -335,10 +335,10 @@ func (m *Manager) mutate(ctx context.Context, id domain.SessionID, fn func(domai
 // just made stale. A session that stopped waiting on the user — because the
 // input arrived, or because the session ended — has nothing left to resolve.
 func needsInputResolutions(prev, next domain.SessionRecord, now time.Time) []ports.NotificationResolution {
-	if !prev.Activity.State.NeedsInput() {
+	if !sessionNeedsInput(prev) {
 		return nil
 	}
-	if next.Activity.State.NeedsInput() && !next.IsTerminated {
+	if sessionNeedsInput(next) && !next.IsTerminated {
 		return nil
 	}
 	return []ports.NotificationResolution{{
@@ -346,6 +346,24 @@ func needsInputResolutions(prev, next domain.SessionRecord, now time.Time) []por
 		SessionID:  next.ID,
 		ResolvedAt: now,
 	}}
+}
+
+func sessionNeedsInput(rec domain.SessionRecord) bool {
+	return rec.Activity.State.NeedsInput() ||
+		(rec.RoleResult != nil && rec.RoleResult.Current && rec.RoleResult.State == domain.RoleResultBlocked)
+}
+
+func needsInputIntent(prev, next domain.SessionRecord, at time.Time) *ports.NotificationIntent {
+	if sessionNeedsInput(prev) || !sessionNeedsInput(next) || next.IsTerminated {
+		return nil
+	}
+	return &ports.NotificationIntent{
+		Type:               domain.NotificationNeedsInput,
+		SessionID:          next.ID,
+		ProjectID:          next.ProjectID,
+		CreatedAt:          at,
+		SessionDisplayName: next.DisplayName,
+	}
 }
 
 // ApplyRuntimeObservation only writes when runtime liveness is unambiguous. A
@@ -489,7 +507,7 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 			}
 		}
 	}
-	if !s.Valid && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" {
+	if !s.Valid && s.AgentSessionID == "" && s.LatestUserPrompt == "" && s.LatestAssistantUpdate == "" && s.TranscriptPath == "" && s.RoleResult == nil {
 		return nil
 	}
 	if s.LaunchID != "" {
@@ -522,6 +540,7 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 		m.mu.Unlock()
 		return fmt.Errorf("%w: %s", ports.ErrSessionNotFound, id)
 	}
+	previous := rec
 	now := m.clock()
 	if rec.IsTerminated {
 		delete(m.flights, id)
@@ -556,6 +575,8 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	// rule, while their tracking side effects still land. Untagged signals
 	// (old CLIs, adapters without tool identity) pass through untouched —
 	// last-writer-wins, exactly as before.
+	var roleResultChanged bool
+	rec, roleResultChanged = applyRoleResultSignal(rec, s, now)
 	metadataChanged := (s.AgentSessionID != "" && rec.Metadata.AgentSessionID != s.AgentSessionID) ||
 		(s.LatestUserPrompt != "" && rec.Metadata.LatestUserPrompt != s.LatestUserPrompt) ||
 		(s.LatestAssistantUpdate != "" && rec.Metadata.LatestAssistantUpdate != s.LatestAssistantUpdate) ||
@@ -563,24 +584,32 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	if s.Valid {
 		s = m.applyToolPrecedenceLocked(id, rec.Activity.State, s)
 	}
-	if !s.Valid && !metadataChanged {
+	recordChanged := metadataChanged || roleResultChanged
+	if !s.Valid && !recordChanged {
 		m.mu.Unlock()
 		return nil
 	}
 	if !s.Valid {
 		applyActivityMetadata(&rec.Metadata, s)
 		rec.UpdatedAt = now
-		_, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
+		applied, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
+		intent = needsInputIntent(previous, rec, now)
+		resolutions := needsInputResolutions(previous, rec, now)
 		m.mu.Unlock()
-		return err
+		if err != nil || !applied {
+			return err
+		}
+		m.emitNotification(ctx, intent)
+		m.resolveNotifications(ctx, resolutions...)
+		return nil
 	}
 	if metadataChanged {
 		// Fold metadata into rec before copying it into next below, so the
 		// activity and resume handle land in one store update.
 		applyActivityMetadata(&rec.Metadata, s)
 	}
-	prevState := rec.Activity.State
-	prevAt := rec.Activity.LastActivityAt
+	prevState := previous.Activity.State
+	prevAt := previous.Activity.LastActivityAt
 	act := domain.Activity{State: s.State, LastActivityAt: timeOr(s.Timestamp, now)}
 	sameState := sameActivity(rec.Activity, act)
 	// A same-state repeat is still a write when it is the FIRST signal for
@@ -589,9 +618,11 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	// first to ARRIVE may match the seeded state — e.g. a turn's "active"
 	// POST is lost and its Stop hook lands idle on the idle-seeded row.
 	if sameState && !rec.FirstSignalAt.IsZero() {
-		if metadataChanged || s.Event == "user-prompt-submit" {
+		if recordChanged || s.Event == "user-prompt-submit" {
 			rec.UpdatedAt = now
 			applied, err := m.store.UpdateSessionFromActivitySignal(ctx, rec)
+			intent = needsInputIntent(previous, rec, now)
+			resolutions := needsInputResolutions(previous, rec, now)
 			m.mu.Unlock()
 			if err != nil {
 				return err
@@ -599,7 +630,12 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 			if !applied {
 				return nil
 			}
-			return m.acknowledgeAgentSwitchTarget(ctx, id, s, now)
+			if err := m.acknowledgeAgentSwitchTarget(ctx, id, s, now); err != nil {
+				return err
+			}
+			m.emitNotification(ctx, intent)
+			m.resolveNotifications(ctx, resolutions...)
+			return nil
 		}
 		m.mu.Unlock()
 		return nil
@@ -629,18 +665,10 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	// Transition into the needs-input family (waiting_input or blocked) pings
 	// the user; an in-family escalation (waiting_input -> blocked) does not
 	// re-notify — the user was already pinged once for this pause.
-	if !rec.Activity.State.NeedsInput() && next.Activity.State.NeedsInput() && !next.IsTerminated {
-		intent = &ports.NotificationIntent{
-			Type:               domain.NotificationNeedsInput,
-			SessionID:          next.ID,
-			ProjectID:          next.ProjectID,
-			CreatedAt:          next.Activity.LastActivityAt,
-			SessionDisplayName: next.DisplayName,
-		}
-	}
+	intent = needsInputIntent(previous, next, next.Activity.LastActivityAt)
 	// Leaving the needs-input family is the user answering: the notification
 	// that pinged them has nothing left to resolve.
-	resolutions := needsInputResolutions(rec, next, now)
+	resolutions := needsInputResolutions(previous, next, now)
 	waitingEvents := m.waitingInputEvents(next, prevState, prevAt, now)
 	m.mu.Unlock()
 	if err := m.acknowledgeAgentSwitchTarget(ctx, id, s, now); err != nil {
@@ -652,6 +680,47 @@ func (m *Manager) ApplyActivitySignal(ctx context.Context, id domain.SessionID, 
 	m.emitNotification(ctx, intent)
 	m.resolveNotifications(ctx, resolutions...)
 	return nil
+}
+
+func applyRoleResultSignal(rec domain.SessionRecord, signal ports.ActivitySignal, now time.Time) (domain.SessionRecord, bool) {
+	changed := false
+	if (signal.Event == "user-prompt-submit" || signal.Event == "chat.turn.started") &&
+		rec.RoleResult != nil && rec.RoleResult.Current {
+		result := *rec.RoleResult
+		result.Current = false
+		rec.RoleResult = &result
+		changed = true
+	}
+	if signal.RoleResult == nil || rec.Kind != domain.KindWorker || strings.TrimSpace(rec.Metadata.Role.RoleID) == "" {
+		return rec, changed
+	}
+	if signal.Event != "stop" && signal.Event != "chat.turn.completed" {
+		return rec, changed
+	}
+	report, err := domain.NormalizeRoleResultReport(*signal.RoleResult)
+	if err != nil {
+		return rec, changed
+	}
+	generation := signal.LaunchID
+	if domain.NormalizeSessionMode(rec.Mode) == domain.SessionModeChat {
+		generation = signal.ControllerGeneration
+	}
+	if generation == "" {
+		return rec, changed
+	}
+	if current := rec.RoleResult; current != nil && current.Current && current.GenerationID == generation &&
+		current.State == report.State && current.Summary == report.Summary {
+		return rec, changed
+	}
+	rec.RoleResult = &domain.SessionRoleResult{
+		RoleID:       rec.Metadata.Role.RoleID,
+		State:        report.State,
+		Summary:      report.Summary,
+		ReportedAt:   timeOr(signal.Timestamp, now),
+		Current:      true,
+		GenerationID: generation,
+	}
+	return rec, true
 }
 
 // stagePendingAgentSwitchNativeMetadata persists provider-assigned startup

@@ -5,11 +5,11 @@ description: Human-facing coordinator; delegates via ao spawn --role only
 roleReminder: >
   You coordinate only. Never edit source files. Spawn workers with
   `ao spawn --project <id> --role <role> --name "<≤20>" --prompt "…"`.
-  Do not pass --agent or --model. After spawning an implementor, report the
-  session id and yield. After spawning a reviewer or verifier, monitor its
-  durable state at bounded intervals and retrieve its terminal report with
-  `ao session output` when idle; do not assume AO will wake you. Never do the
-  worker's task yourself.
+  Do not pass --agent or --model. After spawning any role worker, monitor its
+  durable state at bounded intervals until `roleResult.current=true`; idle and
+  ordinary AO messages are not completion signals. For a terminal-only reviewer
+  or verifier, retrieve its report with `ao session output`. Do not assume AO will wake you.
+  Never do the worker's task yourself.
 # Authoring hints only — NOT consumed at runtime. Routing comes from the
 # project's roleMap; ParseTemplate reads id/name/description/roleReminder and
 # the body, and discards the three fields below. Kept aligned with
@@ -62,11 +62,13 @@ work you cannot accept or reject on evidence:
 3. **Choose the role** (implementor, ui, reviewer, verifier, …) from the role
    catalog in your system prompt.
 4. **Write the brief** with all five sections above.
-5. **Spawn** with `--role` and a ≤20 character name. For an implementor, report
-   the session id and **yield**. For a reviewer or verifier whose final report
-   can be terminal-only, retain coordination ownership: check `ao session get`
-   at bounded intervals of no more than 60 seconds and, when it becomes idle or
-   exits, retrieve `ao session output <session-id>` before synthesizing.
+5. **Spawn** with `--role` and a ≤20 character name, then retain coordination
+   ownership for every worker: check
+   `ao session get <session-id> --json` at bounded intervals of no more than 60 seconds
+   until a current completed/blocked/failed `roleResult` appears. Idle and
+   ordinary AO messages are not completion signals. For a reviewer or verifier
+   whose final report can be terminal-only, retrieve `ao session output <session-id>`
+   before synthesizing. An exit without a current result is a missing-result failure.
 6. **On a later turn**: re-read durable session state rather than trusting your
    own recollection of it. Read what the worker actually changed.
 7. **Reconcile** the claimed tests against evidence. If a worker says tests

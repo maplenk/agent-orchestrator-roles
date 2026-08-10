@@ -1834,10 +1834,11 @@ export interface components {
             prs: components["schemas"]["SessionPRFacts"][];
             /** @enum {string} */
             reviewerHarness?: "claude-code" | "codex" | "copilot" | "cursor" | "kilocode" | "opencode" | "kiro" | "pi" | "qwen" | "agy" | "continue" | "goose" | "vibe" | "devin" | "droid" | "kimi" | "kimchi" | "muse" | "amp" | "aider" | "grok" | "crush" | "auggie" | "cline" | "autohand";
+            roleResult?: components["schemas"]["SessionRoleResult"];
             /** @enum {string} */
             scmStatus?: "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged";
             /** @enum {string} */
-            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "exited" | "idle" | "terminated" | "no_signal";
+            status: "working" | "pr_open" | "draft" | "ci_failed" | "review_pending" | "changes_requested" | "approved" | "mergeable" | "merged" | "needs_input" | "completed" | "failed" | "exited" | "idle" | "terminated" | "no_signal";
             switch: components["schemas"]["SessionSwitchView"];
             terminalHandleId?: string;
             terminateOnPrMerge: boolean;
@@ -2478,6 +2479,11 @@ export interface components {
             agent?: string;
             agentConfig?: components["schemas"]["AgentConfig"];
         };
+        RoleResultReport: {
+            schemaVersion: number;
+            state: string;
+            summary: string;
+        };
         RollbackConversationResponse: {
             turnsDiscarded: number;
         };
@@ -2671,6 +2677,14 @@ export interface components {
         SessionResponse: {
             session: components["schemas"]["ControllersSessionView"];
         };
+        SessionRoleResult: {
+            current: boolean;
+            /** Format: date-time */
+            reportedAt: string;
+            roleId: string;
+            state: string;
+            summary: string;
+        };
         SessionSwitchPendingView: {
             from: components["schemas"]["SessionSwitchTarget"];
             generationId: string;
@@ -2708,6 +2722,8 @@ export interface components {
             latestUserPrompt?: string;
             /** @description AO process generation that produced the signal. */
             launchId?: string;
+            /** @description Structured result parsed from a role-pinned worker's trailing final-response envelope. */
+            roleResult?: components["schemas"]["RoleResultReport"];
             /**
              * @description Agent activity state reported by an agent hook. Optional for metadata-only hooks.
              * @enum {string}

@@ -5599,6 +5599,8 @@ components:
           - cline
           - autohand
           type: string
+        roleResult:
+          $ref: '#/components/schemas/SessionRoleResult'
         scmStatus:
           enum:
           - pr_open
@@ -5622,6 +5624,8 @@ components:
           - mergeable
           - merged
           - needs_input
+          - completed
+          - failed
           - exited
           - idle
           - terminated
@@ -7301,6 +7305,19 @@ components:
         agentConfig:
           $ref: '#/components/schemas/AgentConfig'
       type: object
+    RoleResultReport:
+      properties:
+        schemaVersion:
+          type: integer
+        state:
+          type: string
+        summary:
+          type: string
+      required:
+      - schemaVersion
+      - state
+      - summary
+      type: object
     RollbackConversationResponse:
       properties:
         turnsDiscarded:
@@ -7840,6 +7857,26 @@ components:
       required:
       - session
       type: object
+    SessionRoleResult:
+      properties:
+        current:
+          type: boolean
+        reportedAt:
+          format: date-time
+          type: string
+        roleId:
+          type: string
+        state:
+          type: string
+        summary:
+          type: string
+      required:
+      - roleId
+      - state
+      - summary
+      - reportedAt
+      - current
+      type: object
     SessionSwitchPendingView:
       properties:
         from:
@@ -7945,6 +7982,10 @@ components:
         launchId:
           description: AO process generation that produced the signal.
           type: string
+        roleResult:
+          $ref: '#/components/schemas/RoleResultReport'
+          description: Structured result parsed from a role-pinned worker's trailing
+            final-response envelope.
         state:
           description: Agent activity state reported by an agent hook. Optional for
             metadata-only hooks.

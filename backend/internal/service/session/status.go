@@ -35,13 +35,28 @@ func deriveStatus(rec domain.SessionRecord, prs []domain.PRFacts, now time.Time,
 	switch rec.Activity.State {
 	case domain.ActivityActive:
 		return domain.StatusWorking
-	case domain.ActivityExited:
-		return domain.StatusExited
 	case domain.ActivityWaitingInput, domain.ActivityBlocked:
 		return domain.StatusNeedsInput
 	}
 
-	if scmStatus := deriveSCMStatus(prs); scmStatus != "" {
+	scmStatus := deriveSCMStatus(prs)
+	if result := rec.RoleResult; result != nil && result.Current {
+		switch result.State {
+		case domain.RoleResultFailed:
+			return domain.StatusFailed
+		case domain.RoleResultBlocked:
+			return domain.StatusNeedsInput
+		case domain.RoleResultCompleted:
+			if scmStatus != "" {
+				return scmStatus
+			}
+			return domain.StatusCompleted
+		}
+	}
+	if rec.Activity.State == domain.ActivityExited {
+		return domain.StatusExited
+	}
+	if scmStatus != "" {
 		return scmStatus
 	}
 

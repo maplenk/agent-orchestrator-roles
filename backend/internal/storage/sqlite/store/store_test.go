@@ -172,6 +172,73 @@ func TestSessionPersistsRoleMetadata(t *testing.T) {
 	}
 }
 
+func TestSessionPersistsAndSupersedesRoleResult(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	reportedAt := time.Date(2026, 8, 10, 8, 0, 0, 0, time.UTC)
+	rec := sampleRecord("mer")
+	rec.Metadata.RuntimeLaunchID = "launch-1"
+	rec.Metadata.Role = domain.SessionRoleBinding{RoleID: "reviewer", ResolvedHarness: rec.Harness}
+	rec.RoleResult = &domain.SessionRoleResult{
+		RoleID: "reviewer", State: domain.RoleResultCompleted, Summary: "Review completed.",
+		ReportedAt: reportedAt, Current: true, GenerationID: "launch-1",
+	}
+
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get session: ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(got.RoleResult, rec.RoleResult) {
+		t.Fatalf("created role result = %#v, want %#v", got.RoleResult, rec.RoleResult)
+	}
+
+	if applied, err := s.RecordSessionLatestUserPrompt(ctx, created.ID, "review again", created.UpdatedAt.Add(time.Minute)); err != nil || !applied {
+		t.Fatalf("record prompt: applied=%v err=%v", applied, err)
+	}
+	got, ok, err = s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get superseded session: ok=%v err=%v", ok, err)
+	}
+	if got.RoleResult == nil || got.RoleResult.Current || got.RoleResult.Summary != "Review completed." {
+		t.Fatalf("superseded role result = %#v", got.RoleResult)
+	}
+}
+
+func TestSessionRoleResultIsFencedByRuntimeGeneration(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+	seedProject(t, s, "mer")
+	rec := sampleRecord("mer")
+	rec.Metadata.RuntimeLaunchID = "launch-1"
+	rec.Metadata.Role = domain.SessionRoleBinding{RoleID: "verifier", ResolvedHarness: rec.Harness}
+	rec.RoleResult = &domain.SessionRoleResult{
+		RoleID: "verifier", State: domain.RoleResultCompleted, Summary: "Old launch passed.",
+		ReportedAt: rec.UpdatedAt, Current: true, GenerationID: "launch-1",
+	}
+	created, err := s.CreateSession(ctx, rec)
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	created.Metadata.RuntimeLaunchID = "launch-2"
+	created.UpdatedAt = created.UpdatedAt.Add(time.Minute)
+	if err := s.UpdateSession(ctx, created); err != nil {
+		t.Fatalf("relaunch session: %v", err)
+	}
+
+	got, ok, err := s.GetSession(ctx, created.ID)
+	if err != nil || !ok {
+		t.Fatalf("get relaunched session: ok=%v err=%v", ok, err)
+	}
+	if got.RoleResult == nil || got.RoleResult.Current || got.RoleResult.GenerationID != "launch-1" {
+		t.Fatalf("generation-fenced role result = %#v", got.RoleResult)
+	}
+}
+
 // Artifact-only (or any partial) role columns must survive GetSession so restore
 // can fail closed with ErrIncompleteRolePin — never silent legacy.
 func TestSessionPersistsPartialRolePin_ArtifactOnly(t *testing.T) {

@@ -117,8 +117,8 @@ func TestOrchestratorProfileKeepsTerminalOnlyVerificationOwned(t *testing.T) {
 	}
 	got := string(raw)
 	for _, want := range []string{
-		"After spawning a reviewer or verifier",
-		"do not assume AO will wake you",
+		"After spawning any role worker",
+		"Do not assume AO will wake you",
 		"bounded intervals of no more than 60 seconds",
 		"ao session output <session-id>",
 	} {

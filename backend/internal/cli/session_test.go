@@ -92,7 +92,7 @@ func sessionCommandServer(t *testing.T) (*httptest.Server, *sessionRequestLog) {
 					sessionJSON("demo-1", "demo", "worker", "working", false)+`]}`)
 			}
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1":
-			_, _ = io.WriteString(w, `{"session":`+sessionJSON("demo-1", "demo", "worker", "working", false)+`}`)
+			_, _ = io.WriteString(w, `{"session":`+sessionJSONWithRoleResult("demo-1", "demo", "worker", "completed", false)+`}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/sessions/demo-1/output":
 			_, _ = io.WriteString(w, `{"sessionId":"demo-1","output":"FINAL REPORT\nall checks passed","lines":73}`)
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/demo":
@@ -154,6 +154,23 @@ func sessionJSON(id, project, kind, status string, terminated bool) string {
 		"harness":      "codex",
 		"displayName":  "Current Name",
 		"activity":     map[string]any{"state": "idle", "lastActivityAt": "2026-06-02T12:00:00Z"},
+		"isTerminated": terminated,
+		"createdAt":    "2026-06-02T11:00:00Z",
+		"updatedAt":    "2026-06-02T12:00:00Z",
+		"status":       status,
+	})
+	return string(b)
+}
+
+func sessionJSONWithRoleResult(id, project, kind, status string, terminated bool) string {
+	b, _ := json.Marshal(map[string]any{
+		"id":           id,
+		"projectId":    project,
+		"kind":         kind,
+		"harness":      "codex",
+		"displayName":  "Current Name",
+		"activity":     map[string]any{"state": "idle", "lastActivityAt": "2026-06-02T12:00:00Z"},
+		"roleResult":   map[string]any{"roleId": "verifier", "state": "completed", "summary": "All checks passed.", "reportedAt": "2026-06-02T12:00:00Z", "current": true},
 		"isTerminated": terminated,
 		"createdAt":    "2026-06-02T11:00:00Z",
 		"updatedAt":    "2026-06-02T12:00:00Z",
@@ -289,7 +306,8 @@ func TestSessionGet_SuccessWithProjectScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("session get failed: %v\nstderr=%s", err, errOut)
 	}
-	if !strings.Contains(out, "id: demo-1") || !strings.Contains(out, "project: demo") {
+	if !strings.Contains(out, "id: demo-1") || !strings.Contains(out, "project: demo") ||
+		!strings.Contains(out, "role-result: completed") || !strings.Contains(out, "role-result-summary: All checks passed.") {
 		t.Fatalf("unexpected get output:\n%s", out)
 	}
 	want := []string{"GET /api/v1/sessions/demo-1"}
@@ -313,7 +331,8 @@ func TestSessionGet_JSONOutputDecodes(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatalf("session get --json output is not decodable: %v\noutput=%s", err, out)
 	}
-	if got.Session.ID != "demo-1" || got.Session.ProjectID != "demo" || got.Session.Status != "working" {
+	if got.Session.ID != "demo-1" || got.Session.ProjectID != "demo" || got.Session.Status != "completed" ||
+		got.Session.RoleResult == nil || !got.Session.RoleResult.Current || got.Session.RoleResult.RoleID != "verifier" {
 		t.Fatalf("unexpected session JSON: %#v", got.Session)
 	}
 }

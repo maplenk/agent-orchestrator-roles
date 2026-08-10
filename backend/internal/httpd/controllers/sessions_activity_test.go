@@ -311,6 +311,42 @@ func TestSessionsAPI_ActivityThreadsAgentSessionIDWithState(t *testing.T) {
 	}
 }
 
+func TestSessionsAPI_ActivityAcceptsValidatedStopRoleResult(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"state":"idle","event":"stop","launchId":"launch-1","roleResult":{"schemaVersion":1,"state":"completed","summary":"  checks passed  "}}`)
+	if status != http.StatusOK {
+		t.Fatalf("activity = %d, want 200; body=%s", status, body)
+	}
+	if rec.gotSignal.RoleResult == nil || rec.gotSignal.RoleResult.State != domain.RoleResultCompleted || rec.gotSignal.RoleResult.Summary != "checks passed" {
+		t.Fatalf("role result signal = %#v", rec.gotSignal.RoleResult)
+	}
+}
+
+func TestSessionsAPI_ActivityRejectsRoleResultOutsideStop(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"state":"idle","event":"post-tool-use","roleResult":{"schemaVersion":1,"state":"completed","summary":"done"}}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_ROLE_RESULT_EVENT")
+	if rec.calls != 0 {
+		t.Fatalf("recorder called %d times", rec.calls)
+	}
+}
+
+func TestSessionsAPI_ActivityRejectsInvalidRoleResult(t *testing.T) {
+	rec := &fakeActivityRecorder{}
+	srv := newActivityTestServer(t, rec)
+	body, status, _ := doRequest(t, srv, "POST", "/api/v1/sessions/ao-1/activity",
+		`{"state":"idle","event":"stop","roleResult":{"schemaVersion":2,"state":"completed","summary":"done"}}`)
+	assertErrorCode(t, body, status, http.StatusBadRequest, "INVALID_ROLE_RESULT")
+	if rec.calls != 0 {
+		t.Fatalf("recorder called %d times", rec.calls)
+	}
+}
+
 func TestSessionsAPI_ActivityCapsOverlongCorrelationFields(t *testing.T) {
 	// Overlong values are dropped, not truncated: a truncated id could never
 	// match its pre/post counterpart, so an empty value (fail-safe: no

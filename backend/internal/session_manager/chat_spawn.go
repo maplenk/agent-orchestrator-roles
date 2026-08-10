@@ -260,6 +260,13 @@ func (m *Manager) sendChat(ctx context.Context, id domain.SessionID, message, cl
 	if relayErr != nil {
 		return true, fmt.Errorf("send %s: %w", id, relayErr)
 	}
+	if origin == sendOriginUser && strings.TrimSpace(message) != "" {
+		if recorder, ok := m.store.(latestUserPromptRecorder); ok {
+			if _, recordErr := recorder.RecordSessionLatestUserPrompt(ctx, id, boundedConversationFact(message), m.clock()); recordErr != nil {
+				m.logger.Warn("send chat: delivered message but failed to persist latest user prompt", "sessionID", id, "error", recordErr)
+			}
+		}
+	}
 	return true, nil
 }
 

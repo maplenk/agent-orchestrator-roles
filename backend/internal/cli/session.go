@@ -41,17 +41,26 @@ type sessionRenameRequest struct {
 }
 
 type sessionDTO struct {
-	ID           string          `json:"id"`
-	ProjectID    string          `json:"projectId"`
-	IssueID      string          `json:"issueId,omitempty"`
-	Kind         string          `json:"kind"`
-	Harness      string          `json:"harness,omitempty"`
-	DisplayName  string          `json:"displayName,omitempty"`
-	Activity     sessionActivity `json:"activity"`
-	IsTerminated bool            `json:"isTerminated"`
-	CreatedAt    time.Time       `json:"createdAt"`
-	UpdatedAt    time.Time       `json:"updatedAt"`
-	Status       string          `json:"status"`
+	ID           string                `json:"id"`
+	ProjectID    string                `json:"projectId"`
+	IssueID      string                `json:"issueId,omitempty"`
+	Kind         string                `json:"kind"`
+	Harness      string                `json:"harness,omitempty"`
+	DisplayName  string                `json:"displayName,omitempty"`
+	Activity     sessionActivity       `json:"activity"`
+	IsTerminated bool                  `json:"isTerminated"`
+	CreatedAt    time.Time             `json:"createdAt"`
+	UpdatedAt    time.Time             `json:"updatedAt"`
+	Status       string                `json:"status"`
+	RoleResult   *sessionRoleResultDTO `json:"roleResult,omitempty"`
+}
+
+type sessionRoleResultDTO struct {
+	RoleID     string    `json:"roleId"`
+	State      string    `json:"state"`
+	Summary    string    `json:"summary"`
+	ReportedAt time.Time `json:"reportedAt"`
+	Current    bool      `json:"current"`
 }
 
 type sessionActivity struct {
@@ -1003,6 +1012,23 @@ func writeSessionDetails(cmd *cobra.Command, sess sessionDTO) error {
 		}
 		if _, err := fmt.Fprintf(out, "%s: %s\n", field[0], field[1]); err != nil {
 			return err
+		}
+	}
+	if result := sess.RoleResult; result != nil {
+		state := result.State
+		if !result.Current {
+			state += " (stale)"
+		}
+		if _, err := fmt.Fprintf(out, "role-result: %s\n", state); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(out, "role-result-summary: %s\n", result.Summary); err != nil {
+			return err
+		}
+		if !result.ReportedAt.IsZero() {
+			if _, err := fmt.Fprintf(out, "role-result-reported: %s\n", result.ReportedAt.Format(time.RFC3339)); err != nil {
+				return err
+			}
 		}
 	}
 	if !sess.CreatedAt.IsZero() {
