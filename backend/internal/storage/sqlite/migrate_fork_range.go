@@ -81,6 +81,17 @@ func forkMigrations() []forkMigration {
 // safe on every boot rather than needing a one-shot flag — a flag is just
 // another thing that can be wrong.
 func repairForkMigrationVersions(db *sql.DB) error {
+	activePairings, err := activeUpstreamMigrationPairings(migrationsFS, upstreamMigrationPairings())
+	if err != nil {
+		return fmt.Errorf("fork migration repair: inspect upstream pairings: %w", err)
+	}
+	return repairForkMigrationVersionsWithPairings(db, activePairings)
+}
+
+func repairForkMigrationVersionsWithPairings(
+	db *sql.DB,
+	activePairings []upstreamMigrationPairing,
+) error {
 	ok, err := hasGooseTable(db)
 	if err != nil {
 		return fmt.Errorf("fork migration repair: %w", err)
@@ -89,6 +100,13 @@ func repairForkMigrationVersions(db *sql.DB) error {
 		// A brand new database. goose will create the ledger and apply the
 		// 9000-series files in order; there is nothing to rewrite.
 		return nil
+	}
+	pairedByFork := make(map[int64]upstreamMigrationPairing, len(activePairings))
+	for _, pairing := range activePairings {
+		if _, duplicate := pairedByFork[pairing.forkVersion]; duplicate {
+			return fmt.Errorf("fork migration repair: duplicate active pairing for fork version %d", pairing.forkVersion)
+		}
+		pairedByFork[pairing.forkVersion] = pairing
 	}
 
 	tx, err := db.Begin()
@@ -103,6 +121,25 @@ func repairForkMigrationVersions(db *sql.DB) error {
 	}
 	for _, entry := range snapshot.migrations {
 		m := entry.migration
+		if pairing, paired := pairedByFork[m.newVersion]; paired {
+			upstreamRecorded, err := versionRecorded(tx, pairing.upstreamVersion)
+			if err != nil {
+				return fmt.Errorf(
+					"fork migration repair: %s: read paired upstream version %d: %w",
+					m.name,
+					pairing.upstreamVersion,
+					err,
+				)
+			}
+			if upstreamRecorded {
+				// Once the exact canonical upstream migration is embedded and its
+				// identity is recorded, the physical effect is no longer
+				// fork-exclusive. Do not let ambiguous legacy versions claim its
+				// provenance; pairing reconciliation validates the effect and
+				// records the fork identity below this repair phase.
+				continue
+			}
+		}
 		// A recorded 9000-series identity is conclusive. Any same-number row in
 		// upstream's 53-60 range belongs to upstream and must survive every later
 		// boot, even though the fork's physical fingerprint remains present.

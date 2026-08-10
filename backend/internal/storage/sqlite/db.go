@@ -133,19 +133,28 @@ func migrate(db *sql.DB) error {
 	if err := goose.SetDialect("sqlite3"); err != nil {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
-	// Two pre-goose ledger repairs, and the ORDER between them is load-bearing.
+	// The pre-goose ledger repairs, and the ORDER between them, are load-bearing.
 	//
 	// This fork's own renumber, from 0053-0060 into the 9000 range, has to land
 	// in the ledger BEFORE goose looks at it — see migrate_fork_range.go.
 	// Running it after would mean goose had already re-applied migrations the
 	// database has, against tables that already carry their effects.
 	//
-	// It also has to run before upstream's chat repair, whose loop reads
+	// Historical fork repair runs before upstream-equivalence pairing so a real
+	// legacy fork identity can be normalized before the pairing requires one of
+	// the two canonical identities. Once the canonical upstream identity exists,
+	// historical repair defers to pairing rather than treating a now-shared
+	// physical effect as fork-exclusive.
+	//
+	// Both also have to run before upstream's chat repair, whose loop reads
 	// versions 52-65 and shifts each applied one by +14. That range overlaps
 	// the fork's abandoned 53-60. Upstream's guard (chat columns present) means
 	// no fork database reaches that loop today, but the guard is theirs to
 	// change; clearing 53-60 first means the overlap can never be read.
 	if err := repairForkMigrationVersions(db); err != nil {
+		return err
+	}
+	if err := repairUpstreamMigrationPairings(db); err != nil {
 		return err
 	}
 	if err := repairRenumberedChatMigrationHistory(db); err != nil {
