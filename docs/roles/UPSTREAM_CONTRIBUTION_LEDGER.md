@@ -84,6 +84,11 @@ that authorization in the row. Existing draft PRs opened before assignment are
 not review-ready: leave them draft and ask maintainers whether to assign and
 continue or close them.
 
+This contribution program does not assume Discord access. Claims, assignment,
+scope approval, and retain-or-close decisions are recorded on the relevant
+GitHub issue. A maintainer assignment or explicit approving issue comment is
+the authorization gate.
+
 ### File and LOC measurements
 
 “Post-Sync-3 files” names the current downstream surfaces to re-audit after the
@@ -101,9 +106,9 @@ ship in the same PR but never count toward the ceiling.
 
 | Invariant | Chain | Downstream commits | Post-Sync-3 files | Handwritten LOC | #3548 coverage | Issue / PR | Schema effects | Migration pairing | Fingerprint shared since: upstream file / merge SHA / downstream sync | Validation | Status |
 |---|---|---|---|---:|---|---|---|---|---|---|---|
-| Missing tmux server is authoritative absence, while genuine probe failures remain unknown. | `R1 tmux absence` | `be4321d1`, `66d4ceb3`, `6a07d5d6`, `24906d35`; upstream extraction `976dc41ca` | 5 files: tmux runtime, outbound port, manager, tests | extraction `+159/-35` | `absent` | [#3800](https://github.com/Untrivial-ai/agent-orchestrator/issues/3800) / [#3801](https://github.com/Untrivial-ai/agent-orchestrator/pull/3801) | None | n/a | n/a | Focused tmux and manager absence/error tests; upstream CI | `open` — mergeable with no reviews or review requests. Go, CLI E2E, and gitleaks workflow runs concluded `action_required`; at the 22:00 IST Discord sync ask maintainers to approve and run first-contributor workflows for #3801, #3804, and #3806. Request review only after checks run. Blocks only overlapping tmux-classification work. |
-| Exactly one daemon owns and reconciles an AO data directory. | `R2 data-dir lease` | `9480bdc7`; upstream extraction `3db79ad0` | 6 files: `backend/internal/datadirlock/`, daemon wiring, HTTP fallback comments | extraction `+391/-8` | `absent` | [#3805](https://github.com/Untrivial-ai/agent-orchestrator/issues/3805) / [draft #3806](https://github.com/Untrivial-ai/agent-orchestrator/pull/3806) | None | n/a | n/a | Repeated and race lock tests, daemon/HTTP suites, serial full backend suite, build/vet/lint, Linux/Windows cross-compilation | `open` — draft opened before issue assignment; do not request review. At the 22:00 IST sync, disclose the ordering error and ask whether maintainers want to assign #3805 and retain #3806 or close it. If retained, request workflow approval, address checks, and only then request review. |
-| Replacing a live xterm handle cannot race queued viewport work against disposed terminal state. | `R3 xterm disposal` | `f8d31046`; upstream extraction `1d13dd72` | 2 files: `XtermTerminal.tsx`, real-xterm E2E | extraction `+33/-6`; component change `+14/-6` | `absent` | [#3803](https://github.com/Untrivial-ai/agent-orchestrator/issues/3803) / [draft #3804](https://github.com/Untrivial-ai/agent-orchestrator/pull/3804) | None | n/a | n/a | Frontend/E2E typecheck, 49 focused Vitest tests, exact real-xterm Playwright replacement regression | `open` — draft opened before issue assignment; do not request review. At the 22:00 IST sync, disclose the ordering error and ask whether maintainers want to assign #3803 and retain #3804 or close it. If retained, request workflow approval, address checks, and only then request review. |
+| Missing tmux server is authoritative absence, while genuine probe failures remain unknown. | `R1 tmux absence` | `be4321d1`, `66d4ceb3`, `6a07d5d6`, `24906d35`; upstream extraction `976dc41ca` | 5 files: tmux runtime, outbound port, manager, tests | extraction `+159/-35` | `absent` | [#3800](https://github.com/Untrivial-ai/agent-orchestrator/issues/3800) / [draft #3801](https://github.com/Untrivial-ai/agent-orchestrator/pull/3801) | None | n/a | n/a | Focused tmux and manager absence/error tests; upstream CI | `open` — converted to draft and [claimed with the ordering error disclosed](https://github.com/Untrivial-ai/agent-orchestrator/issues/3800#issuecomment-5237737900). No assignment, review, or review request. Three workflows await maintainer approval. Wait for assignment or explicit approval on #3800; only then approve workflows, address checks, and request review. Blocks only overlapping tmux-classification work. |
+| Exactly one daemon owns and reconciles an AO data directory. | `R2 data-dir lease` | `9480bdc7`; upstream extraction `3db79ad0` | 6 files: `backend/internal/datadirlock/`, daemon wiring, HTTP fallback comments | extraction `+391/-8` | `absent` | [#3805](https://github.com/Untrivial-ai/agent-orchestrator/issues/3805) / [draft #3806](https://github.com/Untrivial-ai/agent-orchestrator/pull/3806) | None | n/a | n/a | Repeated and race lock tests, daemon/HTTP suites, serial full backend suite, build/vet/lint, Linux/Windows cross-compilation | `open` — draft preceded assignment; [claim/disclosure posted](https://github.com/Untrivial-ai/agent-orchestrator/issues/3805#issuecomment-5237740787). No assignment, review, or review request. Wait for an assignment or explicit retain/approve comment on #3805. If retained, request workflow approval, address checks, and only then request review; otherwise close #3806. |
+| Replacing a live xterm handle cannot race queued viewport work against disposed terminal state. | `R3 xterm disposal` | `f8d31046`; upstream extraction `1d13dd72` | 2 files: `XtermTerminal.tsx`, real-xterm E2E | extraction `+33/-6`; component change `+14/-6` | `absent` | [#3803](https://github.com/Untrivial-ai/agent-orchestrator/issues/3803) / [draft #3804](https://github.com/Untrivial-ai/agent-orchestrator/pull/3804) | None | n/a | n/a | Frontend/E2E typecheck, 49 focused Vitest tests, exact real-xterm Playwright replacement regression | `open` — draft preceded assignment; [claim/disclosure posted](https://github.com/Untrivial-ai/agent-orchestrator/issues/3803#issuecomment-5237739727). No assignment, review, or review request. Wait for an assignment or explicit retain/approve comment on #3803. If retained, request workflow approval, address checks, and only then request review; otherwise close #3804. |
 | Tmux servers are namespaced by resolved AO data directory so isolated installations cannot share processes. | `R4 tmux namespace` | `9f687d79` | 9 files across runtime selection, tmux socket/config, daemon, ports, service, tests | seed `+247/-8` | `absent` | pending issue / PR | None | n/a | n/a | Socket-name determinism/collision tests and daemon wiring tests | `blocked:R1` — rebase after #3801 because both touch tmux classification/runtime boundaries. |
 | Every new Claude native conversation receives a caller-reserved stable UUID and cannot replay another session's identity. | `R5 Claude identity` | `15a4e6f0` | 7 code/test files across Claude adapter, agent port, manager, switching | seed `+220/-20` | `absent` | pending issue / PR | None | n/a | n/a | Concurrent reservation, replay, fresh-switch, and adapter invocation tests | `ready-for-issue` |
 
@@ -303,13 +308,13 @@ Wave 1 starts without waiting for migration pairing because all immediate code
 PRs are schema-free:
 
 1. Keep this seeded ledger current and open the umbrella design issue.
-2. At the 22:00 IST Discord sync, ask for assignment/authorization on each
-   focused issue before implementation or review. For #3801, also request
-   workflow approval, then address checks and request review.
-3. Disclose that draft data-directory lease PR #3806 preceded assignment of
-   #3805; ask whether to retain the draft or close it. If retained, approve and
-   run workflows before requesting review.
-4. Do the same for xterm issue #3803 and draft PR #3804.
+2. Claims and ordering disclosures are posted on #3800, #3803, and #3805; all
+   three implementation PRs are drafts. Wait for assignment or explicit
+   authorization on those GitHub issues before any review. If retained,
+   request workflow approval for #3801, #3804, and #3806, then address checks.
+3. If maintainers decline or do not assign data-directory lease issue #3805,
+   close draft #3806; otherwise request review only after its checks pass.
+4. Apply the same retain-or-close rule to xterm issue #3803 and draft #3804.
 5. Implement and validate migration pairing in the fork in parallel; it gates
    the first schema-bearing role or pause PR, not Wave 1.
 
