@@ -10,7 +10,8 @@ export type ThemeStyle =
 	| "rose-pine"
 	| "nord"
 	| "gruvbox"
-	| "solarized";
+	| "solarized"
+	| "zen";
 
 export const themeStorageKey = "ao.theme";
 export const themeStyleStorageKey = "ao.theme-style";
@@ -53,7 +54,8 @@ export function readStoredThemeStyle(): ThemeStyle {
 			stored === "rose-pine" ||
 			stored === "nord" ||
 			stored === "gruvbox" ||
-			stored === "solarized"
+			stored === "solarized" ||
+			stored === "zen"
 		) {
 			return stored;
 		}

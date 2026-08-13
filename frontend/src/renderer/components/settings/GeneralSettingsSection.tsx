@@ -76,6 +76,7 @@ const COLOR_THEME_OPTIONS = [
 	{ value: "nord", label: "Nord" },
 	{ value: "gruvbox", label: "Gruvbox" },
 	{ value: "solarized", label: "Solarized" },
+	{ value: "zen", label: "Zen" },
 ] satisfies SettingsOption<ThemeStyle>[];
 
 export function GeneralSettingsSection({

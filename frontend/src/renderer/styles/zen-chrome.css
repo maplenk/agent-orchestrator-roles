@@ -1,0 +1,92 @@
+/*
+ * Zen Color Theme chrome. Decorative only — never changes layout or IA.
+ * Light: paper grain + Fuji header wash + lantern sidebar + 調和 caption.
+ * Dark: tokens only. Hidden when the sidebar is the icon rail.
+ */
+
+:root[data-style-theme="zen"][data-theme="light"] {
+	--zen-fuji: url("../assets/themes/zen/fuji.jpg");
+	--zen-lantern: url("../assets/themes/zen/lantern.jpg");
+	--zen-seal: url("../assets/themes/zen/seal.webp");
+	--zen-grain: url("../assets/themes/zen/grain.webp");
+}
+
+:root[data-style-theme="zen"][data-theme="light"] body {
+	background-image: var(--zen-grain);
+	background-repeat: repeat;
+	background-size: 280px 280px;
+}
+
+:root[data-style-theme="zen"] .sidebar-brand-lockup::after {
+	content: "調和";
+	display: block;
+	margin-top: 1px;
+	font-size: 10px;
+	font-weight: 400;
+	letter-spacing: 0.28em;
+	line-height: 1.2;
+	color: var(--muted-foreground);
+}
+
+:root[data-style-theme="zen"][data-theme="light"] [data-sidebar="sidebar"] {
+	position: relative;
+	overflow: hidden;
+}
+
+:root[data-style-theme="zen"][data-theme="light"] [data-state="expanded"] [data-sidebar="sidebar"]::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 240px;
+	pointer-events: none;
+	z-index: 0;
+	background-image: var(--zen-lantern), var(--zen-seal);
+	background-repeat: no-repeat, no-repeat;
+	background-position: left -8px bottom -4px, right 18px bottom 56px;
+	background-size: 230px auto, 28px 28px;
+	opacity: 0.38;
+	mask-image: linear-gradient(to top, #000 42%, transparent 100%);
+}
+
+:root[data-style-theme="zen"][data-theme="light"] [data-sidebar="footer"] {
+	position: relative;
+	z-index: 1;
+	background: linear-gradient(to top, var(--sidebar) 68%, color-mix(in srgb, var(--sidebar) 55%, transparent));
+}
+
+:root[data-style-theme="zen"][data-theme="light"] .zen-board-surface {
+	position: relative;
+	isolation: isolate;
+}
+
+:root[data-style-theme="zen"][data-theme="light"] .zen-board-surface::before {
+	content: "";
+	position: absolute;
+	inset: 0;
+	z-index: 0;
+	pointer-events: none;
+	background-image: var(--zen-fuji);
+	background-repeat: no-repeat;
+	background-position: right -24px top -28px;
+	background-size: min(46vw, 720px) auto;
+	opacity: 0.32;
+	mask-image: linear-gradient(to left, #000 28%, transparent 72%);
+}
+
+:root[data-style-theme="zen"][data-theme="light"] .zen-board-surface > * {
+	position: relative;
+	z-index: 1;
+}
+
+:root[data-style-theme="zen"][data-theme="light"] .zen-board-surface .center-panel-titlebar {
+	background: color-mix(in srgb, var(--background) 82%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root[data-style-theme="zen"][data-theme="light"] [data-state="expanded"] [data-sidebar="sidebar"]::after,
+	:root[data-style-theme="zen"][data-theme="light"] .zen-board-surface::before {
+		opacity: 0.18;
+	}
+}
