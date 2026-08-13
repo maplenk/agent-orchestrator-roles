@@ -39,21 +39,21 @@
 	left: 0;
 	right: 0;
 	bottom: 0;
-	height: 240px;
+	height: min(52%, 420px);
 	pointer-events: none;
 	z-index: 0;
 	background-image: var(--zen-lantern), var(--zen-seal);
 	background-repeat: no-repeat, no-repeat;
-	background-position: left -8px bottom -4px, right 18px bottom 56px;
-	background-size: 230px auto, 28px 28px;
-	opacity: 0.38;
-	mask-image: linear-gradient(to top, #000 42%, transparent 100%);
+	background-position: left 8% bottom -6%, right 14px bottom 72px;
+	background-size: 165% auto, 36px 36px;
+	opacity: 0.52;
+	mask-image: linear-gradient(to top, #000 55%, transparent 100%);
 }
 
 :root[data-style-theme="zen"][data-theme="light"] [data-sidebar="footer"] {
 	position: relative;
 	z-index: 1;
-	background: linear-gradient(to top, var(--sidebar) 68%, color-mix(in srgb, var(--sidebar) 55%, transparent));
+	background: linear-gradient(to top, color-mix(in srgb, var(--sidebar) 72%, transparent), transparent);
 }
 
 :root[data-style-theme="zen"][data-theme="light"] .zen-board-surface {
@@ -69,10 +69,17 @@
 	pointer-events: none;
 	background-image: var(--zen-fuji);
 	background-repeat: no-repeat;
-	background-position: right -24px top -28px;
-	background-size: min(46vw, 720px) auto;
-	opacity: 0.32;
-	mask-image: linear-gradient(to left, #000 28%, transparent 72%);
+	background-position: right -4% top -8%;
+	background-size: min(92vw, 1480px) auto;
+	opacity: 0.48;
+	mask-image:
+		linear-gradient(to left, #000 42%, transparent 88%),
+		linear-gradient(to bottom, #000 48%, transparent 92%);
+	mask-composite: intersect;
+	-webkit-mask-image:
+		linear-gradient(to left, #000 42%, transparent 88%),
+		linear-gradient(to bottom, #000 48%, transparent 92%);
+	-webkit-mask-composite: source-in;
 }
 
 :root[data-style-theme="zen"][data-theme="light"] .zen-board-surface > * {
